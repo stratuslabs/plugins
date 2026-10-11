@@ -52,6 +52,8 @@ test('the profile denies by default and allows exactly what it was given', () =>
   assert.match(profile, /\(allow file-write\* \(subpath "\/w"\)/);
   assert.match(profile, /\(subpath "\/r"\)/);
   assert.doesNotMatch(profile, /network/);
+  assert.match(profile, /\(allow signal \(target same-sandbox\)\)/);
+  assert.doesNotMatch(profile, /\bsignal\b(?! \(target same-sandbox\))/);
   assert.match(sandboxProfile({ write: ['/w'], read: [], network: true }), /\(allow network\*\)/);
   // A path that would end the string early is refused, not spliced in.
   assert.throws(() => sandboxProfile({ write: ['/w") (allow file-write* (subpath "/'], read: [], network: true }), /cannot express/);
@@ -119,4 +121,41 @@ test('a symlinked workspace is allowed where it really is', { skip: !onMac }, as
   await symlink(realWorkspace, linked);
   const settings = sandboxSettings({}, 'nova', linked, undefined);
   assert.deepEqual(settings.write, [realWorkspace]);
+});
+
+test('a command can signal its own children but no process outside the sandbox', { skip: !onMac }, async () => {
+  const { run } = await setup();
+  const { spawn } = await import('node:child_process');
+  const host = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+  try {
+    // Control: the host itself may signal it, so a refusal below is the wall.
+    assert.equal(process.kill(host.pid, 0), true);
+    const outside = await run(`kill -0 ${host.pid}`);
+    assert.equal(outside.ok, false, `signalling a host process should be refused (${outside.out})`);
+    const own = await run('sleep 30 & kill $! && echo killed');
+    assert.equal(own.ok, true, own.out);
+    assert.match(own.out, /killed/);
+  } finally {
+    host.kill();
+  }
+});
+
+test('no workspace refuses the command even when a cwd or write paths are known', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-nows-')));
+  const cwd = path.join(root, 'cwd');
+  await mkdir(cwd);
+  for (const config of [{}, { writePaths: [path.join(root, 'extra')] }]) {
+    let registered;
+    createPlugin(config).setup({
+      executors: { register: (entry) => { registered = entry; } },
+      workspaces: { forAgent: () => undefined, prepare: () => undefined, all: async () => [] },
+    });
+    const session = { id: 's1', agent: { id: 'nova', name: 'Nova' }, status: 'running', messages: [] };
+    const result = await registered.executor.execute({ id: 'c1', toolName: 'shell.run', input: { command: 'echo hi > a.txt' } }, shellIn(cwd), session);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.match(JSON.stringify(result), /no workspace/);
+  }
+  // Nothing was created where the command would have run.
+  assert.equal(existsSync(path.join(cwd, '.tmp')), false);
+  assert.equal(existsSync(path.join(cwd, 'a.txt')), false);
 });

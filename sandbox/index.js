@@ -61,7 +61,11 @@ export const sandboxProfile = ({ write, read, network }) => {
   return [
     '(version 1)',
     '(deny default)',
-    '(allow process-exec process-fork signal sysctl-read mach-lookup ipc-posix-shm pseudo-tty)',
+    '(allow process-exec process-fork sysctl-read mach-lookup ipc-posix-shm pseudo-tty)',
+    // A command may signal its own children, never the daemon or another
+    // process the same user owns: sandbox-exec execs the command, so $PPID
+    // is the unsandboxed host.
+    '(allow signal (target same-sandbox))',
     '(allow file-read-metadata)',
     `(allow file-read* (literal "/") ${readRules})`,
     `(allow file-write* ${writeRules} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty") (literal "/dev/dtracehelper"))`,
@@ -79,8 +83,14 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
   const own = (shared.agents && typeof shared.agents === 'object' ? shared.agents[agentId] : undefined) ?? {};
   // Lists add up: every agent reads the shared paths, and its own besides.
   const list = (key) => [...strings(shared[key]), ...strings(own[key])].map((target) => real(expandHome(target, home)));
-  const write = [...new Set([workspace, cwd].filter((dir) => typeof dir === 'string' && dir.length > 0).map(real).concat(list('writePaths')))];
+  // The workspace is checked on its own: a cwd or configured write path
+  // must never stand in for a missing one.
+  const ownWorkspace = typeof workspace === 'string' && workspace.length > 0 ? real(workspace) : undefined;
+  const write = ownWorkspace
+    ? [...new Set([ownWorkspace, ...(typeof cwd === 'string' && cwd.length > 0 ? [real(cwd)] : []), ...list('writePaths')])]
+    : [];
   return {
+    workspace: ownWorkspace,
     write,
     read: list('readPaths'),
     network: resolved.network !== false,
@@ -101,14 +111,14 @@ export const createPlugin = (config = {}) => ({
     }
     const workspaces = context.workspaces;
     const spawnFor = (settings) => (command, args, options) => {
-      if (settings.write.length === 0) {
-        // Nowhere to allow writing means no workspace was named for this
-        // agent: refuse rather than guess one.
+      if (!settings.workspace) {
+        // No workspace was named for this agent: refuse rather than guess
+        // one, and before anything is created on the host.
         throw new Error('stratus-plugin-sandbox has no workspace for this agent, so it will not run the command.');
       }
       // Temporary files go inside the workspace, which is writable, rather
       // than to a shared directory, which isn't.
-      const tmp = path.join(settings.write[0], '.tmp');
+      const tmp = path.join(settings.workspace, '.tmp');
       mkdirSync(tmp, { recursive: true });
       const profile = sandboxProfile(settings);
       return nodeSpawn(SANDBOX_EXEC, ['-p', profile, command, ...args], {

@@ -99,3 +99,16 @@ test('enable runs the nightly unit from the user home, not the directory it was 
   assert.ok(output.includes(userHome), output);
   assert.ok(!output.includes(elsewhere), 'the caller directory must not be the working directory');
 });
+
+test('enable resolves a relative --config against the directory it was called from', async () => {
+  const { main } = await import('../src/cli.js');
+  const userHome = tmp();
+  const elsewhere = tmp();
+  const { mkdirSync: mk } = await import('node:fs');
+  mk(path.join(userHome, '.stratus', 'backup'), { recursive: true });
+  writeFileSync(path.join(userHome, '.stratus', 'backup', 'settings.json'), JSON.stringify({ remote: '/r.git', branch: 'mini' }));
+  const lines = [];
+  await main(['enable', '--dry-run', '--config', 'conf/stratus.json'], { env: { HOME: userHome, PATH: '/usr/bin' }, cwd: elsewhere, out: (line) => lines.push(line), scriptPath: '/x/stratus-backup.js' });
+  const output = lines.join('\n');
+  assert.ok(output.includes(path.join(elsewhere, 'conf', 'stratus.json')), output);
+});

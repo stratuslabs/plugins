@@ -95,7 +95,8 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     case 'enable': {
       await readSettings(home);
       const script = scriptPath ?? realpathSync(process.argv[1]);
-      const configPath = values.config ?? (env.STRATUS_CONFIG ? path.resolve(cwd, env.STRATUS_CONFIG) : undefined);
+      // The unit runs from the user home, so a relative path is fixed here, where it was meant.
+      const configPath = values.config ? path.resolve(cwd, values.config) : (env.STRATUS_CONFIG ? path.resolve(cwd, env.STRATUS_CONFIG) : undefined);
       const result = await enable({
         platform: process.platform,
         userHome: env.HOME || os.homedir(),

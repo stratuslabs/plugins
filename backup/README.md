@@ -55,7 +55,9 @@ What this does not catch: a secret an agent rewrote into a form neither
 layer recognizes (paraphrased, split up, ROT13'd) in a memory or a schedule
 prompt. That is why the repository must be private. On GitHub, every run
 checks, without credentials, that the repository is not publicly readable
-and refuses to push if it is.
+and refuses to push if it is. The check covers the URL git actually uses,
+so a remote written as an alias (`url.<base>.insteadOf` or `pushInsteadOf`)
+is checked as the GitHub repository it reaches.
 
 ## How history is kept
 

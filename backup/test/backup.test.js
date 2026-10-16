@@ -251,3 +251,66 @@ test('a known secret with characters JSON escapes is redacted inside a schedule 
   const row = schedules.split('\n').filter(Boolean).map((line) => JSON.parse(line)).find((r) => r.id === 's-odd');
   assert.equal(JSON.parse(row.body).prompt, `use ${'[redacted by stratus-backup]'}`);
 });
+
+test('a remote git rewrites to GitHub is checked as the GitHub repository it reaches', async () => {
+  const saved = { ...process.env };
+  const seen = [];
+  const publicRepo = async (url) => { seen.push(url); return { status: 200 }; };
+  try {
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = 'url.git@github.com:.insteadOf';
+    process.env.GIT_CONFIG_VALUE_0 = 'gh:';
+    const fresh = makeHome();
+    await assert.rejects(init(fresh.home, 'gh:owner/home.git', { branch: 'mini', fetchImpl: publicRepo }), /public repository/);
+    assert.ok(seen.some((url) => url.endsWith('/repos/owner/home')), JSON.stringify(seen));
+  } finally {
+    process.env = saved;
+  }
+  // A push rewrite set up after init is caught before the next push.
+  const { home, remote } = await setUp();
+  try {
+    process.env.GIT_CONFIG_COUNT = '1';
+    process.env.GIT_CONFIG_KEY_0 = 'url.git@github.com:owner/pushed.git.pushInsteadOf';
+    process.env.GIT_CONFIG_VALUE_0 = remote;
+    await assert.rejects(now(home, { env: {}, fetchImpl: publicRepo }), /public repository/);
+    assert.ok(seen.some((url) => url.endsWith('/repos/owner/pushed')), JSON.stringify(seen));
+  } finally {
+    process.env = saved;
+  }
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('a re-init that fails leaves origin where the settings say', async () => {
+  const { home, remote } = await setUp();
+  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { branch: 'mini', fetchImpl: notFound }));
+  const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
+  assert.equal(origin, remote);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(refOf(remote, 'refs/heads/mini'), result.commit);
+});
+
+test('two runs that find the same stale lock never both take it', async () => {
+  const { takeLock } = await import('../src/backup.js');
+  const { home } = await setUp();
+  writeFileSync(path.join(home, 'backup', 'run.lock'), '999999');
+  // Both runs read the dead pid; then the first reclaims and takes the lock
+  // before the second acts on what it read.
+  let bothSaw;
+  const seen = new Promise((resolve) => { bothSaw = resolve; });
+  let count = 0;
+  let firstDone;
+  const firstTook = new Promise((resolve) => { firstDone = resolve; });
+  const onStale = async (who) => {
+    count += 1;
+    if (count === 2) bothSaw();
+    await seen;
+    if (who === 'second') await firstTook;
+  };
+  const first = takeLock(home, { onStale: () => onStale('first') }).then((release) => { firstDone(); return release; }, (error) => { firstDone(); throw error; });
+  const second = takeLock(home, { onStale: () => onStale('second') });
+  const results = await Promise.allSettled([first, second]);
+  assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'rejected'], JSON.stringify(results.map((r) => r.reason?.message)));
+  assert.match(results[1].reason.message, /Another backup is running/);
+  assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8'), String(process.pid));
+  await results[0].value();
+});

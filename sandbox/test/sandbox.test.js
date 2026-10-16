@@ -303,3 +303,45 @@ test('a command cannot read preferences through cfprefsd', { skip: !onMac }, asy
     try { execFileSync('/usr/bin/defaults', ['delete', domain]); } catch {}
   }
 });
+
+test('the DNS broker is reachable only with the network on', () => {
+  const on = sandboxProfile({ write: ['/w'], read: [], network: true });
+  const off = sandboxProfile({ write: ['/w'], read: [], network: false });
+  assert.match(on, /\(global-name "com\.apple\.dnssd\.service"\)/);
+  assert.doesNotMatch(off, /dnssd/);
+  assert.doesNotMatch(off, /mDNSResponder/);
+});
+
+test('POSIX shared memory is allowed by name, read-only, never as a whole', () => {
+  const profile = sandboxProfile({ write: ['/w'], read: [], network: true });
+  assert.doesNotMatch(profile, /ipc-posix-shm(?=[ )])(?!-)/, 'a bare ipc-posix-shm allows every object');
+  assert.doesNotMatch(profile, /ipc-posix-shm-write/);
+  assert.match(profile, /\(ipc-posix-name "apple\.shm\.notification_center"\)/);
+});
+
+test('a command cannot open shared memory another process of the same user created', { skip: !onMac || !existsSync('/usr/bin/python3') }, async () => {
+  const { spawn } = await import('node:child_process');
+  const { run } = await setup();
+  const name = `/stratus-sbx-${process.pid}`;
+  const host = [
+    'import _posixshmem, os, mmap, sys, time',
+    `name = ${JSON.stringify(name)}`,
+    'fd = _posixshmem.shm_open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)',
+    'os.ftruncate(fd, 16)',
+    'm = mmap.mmap(fd, 16)',
+    'm[:9] = b"SHM-READ!"',
+    'print("ready", flush=True)',
+    'try:\n    sys.stdin.read()\nfinally:\n    _posixshmem.shm_unlink(name)',
+  ].join('\n');
+  const owner = spawn('/usr/bin/python3', ['-c', host], { stdio: ['pipe', 'pipe', 'inherit'] });
+  try {
+    await new Promise((resolve, reject) => { owner.stdout.once('data', resolve); owner.once('exit', reject); });
+    const probe = `/usr/bin/python3 -c 'import _posixshmem, os, mmap; fd = _posixshmem.shm_open("${name}", os.O_RDONLY, 0); print(bytes(mmap.mmap(fd, 16, prot=mmap.PROT_READ)[:9]))'`;
+    const read = await run(probe);
+    assert.doesNotMatch(read.out, /SHM-READ!/, read.out);
+    assert.match(read.out, /Operation not permitted|PermissionError/, read.out);
+  } finally {
+    owner.stdin.end();
+    await new Promise((resolve) => owner.once('exit', resolve));
+  }
+});

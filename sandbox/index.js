@@ -45,13 +45,21 @@ const MACH_SERVICES = [
   'com.apple.system.logger',
   'com.apple.logd',
   'com.apple.diagnosticd',
-  'com.apple.dnssd.service',
   'com.apple.SystemConfiguration.configd',
   'com.apple.SystemConfiguration.DNSConfiguration',
   'com.apple.trustd',
   'com.apple.trustd.agent',
   'com.apple.ocspd',
 ];
+
+/** The resolver broker, allowed only with the network: without it a command could still send DNS queries. */
+const NETWORK_MACH_SERVICES = ['com.apple.dnssd.service'];
+
+/**
+ * POSIX shared memory by name only: the notification center's, read-only.
+ * Any other named object a same-user process created stays out of reach.
+ */
+const SHM_READ = ['apple.shm.notification_center'];
 
 /** Paths are spliced into the profile as strings: no quote or backslash may end one early. */
 const sbplString = (value) => {
@@ -80,13 +88,15 @@ const expandHome = (target, home) => (target === '~' ? home : target.startsWith(
  * and its temporary directory, and (unless turned off) the network.
  */
 export const sandboxProfile = ({ write, read, network }) => {
+  const mach = [...MACH_SERVICES, ...(network ? NETWORK_MACH_SERVICES : [])];
   const readRules = [...SYSTEM_READ, ...read, ...write].map((target) => `(subpath ${sbplString(target)})`).join(' ');
   const writeRules = write.map((target) => `(subpath ${sbplString(target)})`).join(' ');
   return [
     '(version 1)',
     '(deny default)',
-    '(allow process-exec process-fork sysctl-read ipc-posix-shm pseudo-tty)',
-    `(allow mach-lookup ${MACH_SERVICES.map((name) => `(global-name ${sbplString(name)})`).join(' ')})`,
+    '(allow process-exec process-fork sysctl-read pseudo-tty)',
+    `(allow ipc-posix-shm-read-data ipc-posix-shm-read-metadata ${SHM_READ.map((name) => `(ipc-posix-name ${sbplString(name)})`).join(' ')})`,
+    `(allow mach-lookup ${mach.map((name) => `(global-name ${sbplString(name)})`).join(' ')})`,
     // A command may signal its own children, never the daemon or another
     // process the same user owns: sandbox-exec execs the command, so $PPID
     // is the unsandboxed host.

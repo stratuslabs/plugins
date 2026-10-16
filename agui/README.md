@@ -38,22 +38,55 @@ Any AG-UI client that speaks the HTTP + SSE transport (CopilotKit's
 | `tool.called` | `TOOL_CALL_START`, `TOOL_CALL_ARGS` (the input as JSON), `TOOL_CALL_END` |
 | `tool.completed` | `TOOL_CALL_RESULT` |
 | the AG-UI `threadId` | one durable Stratus session, `agui:<agent>:<threadId>` |
+| `tool.approval-requested` (a gated call parks) | the call's `TOOL_CALL_*` events, then `RUN_FINISHED` with `outcome: interrupt` (`reason: tool_approval`, `toolCallId`, `expiresAt`, a `responseSchema` for the answer) |
+| a `RunAgentInput` with `resume` entries | `gateway.resolveApproval` for each, and the same turn streams on as the new run |
+| `tool.denied` | `TOOL_CALL_RESULT` with `{"error":"denied"}` |
 
 Stratus keeps the conversation, so only the newest user message in
 `messages` is sent on. A client that hangs up cancels the turn.
 
+## Interrupts (approvals)
+
+Under `approvals.mode: remote`, a gated call parks the turn. The run ends
+with an interrupt and the turn keeps waiting in the gateway, so closing
+that response does not cancel it. Answer with a new run on the same thread:
+
+```bash
+curl -N http://127.0.0.1:4319/ \
+  -H 'content-type: application/json' -H 'authorization: Bearer pick-one' \
+  -d '{"threadId":"t1","runId":"r2","messages":[],"resume":[{"interruptId":"<id>","status":"resolved","payload":{"answer":"once"}}]}'
+```
+
+`payload.answer` is `once`, `always` or `deny` (`always` is left out of the
+`responseSchema` for a one-shot call); `payload.approved: true|false` also
+works. `status: cancelled` is a denial. Anything else is refused rather
+than read as a yes. A resume for an interrupt that is no longer pending
+(answered in Slack or the dashboard, expired, cancelled) gets a 409, and so
+does a new message on a thread that is waiting.
+
+Whoever holds the token is an approver here. Slack checks its approver
+list; this spike has no equivalent, which is the main thing a real version
+would need.
+
 ## Not in the spike
 
-- **Interrupts.** A gated call under `approvals.mode: remote` parks the
-  turn, and nothing here maps that to AG-UI's `RUN_FINISHED` interrupt
-  outcome and `resume` entries. That mapping is the most interesting next
-  step, since AG-UI's human-in-the-loop model and Stratus approvals line up.
-- Client-supplied `tools` and `state` (ignored), reasoning events, usage.
+- Events while no run is attached are dropped: if an approval times out
+  after its interrupt, the turn finishes unseen and the next run on the
+  thread starts fresh.
+- Client-supplied `tools` and `state` (ignored), reasoning events, usage,
+  `editedArgs` on resume.
 - Authentication beyond a static token on a loopback-only port.
 
 ## Verified
 
-- Unit: input validation; delta, tool call and result mapping; per-session filtering.
+- Unit: input validation; delta, tool call and result mapping; per-session
+  filtering; interrupt then resume (approved and cancelled) over real HTTP
+  against a fake gateway, including the 409s; strict resume parsing.
+- Interrupt end to end, not committed: a real gateway (agent main 8c5ebb6)
+  with `approvals.mode: remote`, this adapter, and a fake OpenAI endpoint
+  that calls `schedule.every`. Run 1 ended with the interrupt while the
+  call stayed parked; run 2 resumed it with `answer: once`, the schedule
+  was created, and the run finished. All 11 events passed `EventSchema`.
 - End to end, not committed: a real Stratus gateway with this plugin loaded
   through the plugin loader, a fake OpenAI endpoint, and an HTTP POST. The
   run streamed `RUN_STARTED`, a tool call with its result, a text message,

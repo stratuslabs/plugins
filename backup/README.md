@@ -40,8 +40,9 @@ encoded form. They need encryption first, which is planned.
 
 1. **Replacement.** Every value in `credentials.json`, and the control API
    token, is replaced with `[redacted by stratus-backup]` wherever it
-   appears in the snapshot: raw, JSON-escaped, base64, hex and URL-encoded.
-   In the config, string values under keys named like credentials (`token`,
+   appears in the snapshot: raw, JSON-escaped (once or twice), base64, hex
+   and URL-encoded. A file name holding one stops the run instead, since a
+   renamed file would not restore. In the config, string values under keys named like credentials (`token`,
    `apiKey`, `secret`, `password`, ...) and every value in an `env` block are
    replaced too.
 2. **A scan.** Anything still shaped like a well-known key (Anthropic,

@@ -102,7 +102,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
         home,
         time: parseTime(values.at),
         command: commandFor({ script, configPath }),
-        workingDirectory: cwd,
+        workingDirectory: env.HOME || os.homedir(),
         env: { HOME: env.HOME || os.homedir(), PATH: env.PATH ?? '/usr/bin:/bin' },
         install: !values['dry-run'],
       });

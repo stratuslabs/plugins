@@ -8,7 +8,7 @@ import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { BRANCH_PATTERN, commitSnapshot, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
-import { collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
+import { KEY_PATTERNS, REDACTED, collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
 export const backupDir = (home) => path.join(home, 'backup');
@@ -44,9 +44,12 @@ export const defaultBranch = () => {
 
 /** owner/name for a github.com remote, in any of the URL forms git accepts. */
 export const githubRepoOf = (remote) => {
-  const match = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
+  const match = /^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(?:www\.)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?github\.com:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
   return match ? `${match[1]}/${match[2]}` : undefined;
 };
+
+/** True when the remote's host is github.com, whether or not its path parses. */
+const pointsAtGithub = (remote) => /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?(?:www\.)?github\.com(?:[:/]|$)/i.test(remote);
 
 /**
  * Refuses a GitHub repository anyone can read. The check is unauthenticated
@@ -55,7 +58,10 @@ export const githubRepoOf = (remote) => {
  */
 export const assertNotPublic = async (remote, fetchImpl = globalThis.fetch) => {
   const repo = githubRepoOf(remote);
-  if (repo === undefined) return;
+  if (repo === undefined) {
+    if (pointsAtGithub(remote)) throw new Error('Could not tell which GitHub repository the remote names, so could not confirm it is private. Nothing was pushed.');
+    return;
+  }
   let response;
   try {
     response = await fetchImpl(`https://api.github.com/repos/${repo}`, { headers: { 'user-agent': 'stratus-backup' } });
@@ -122,6 +128,34 @@ export class FindingsError extends Error {
 }
 
 /**
+ * A path is committed as written, so it is checked as well as the bytes. A
+ * known secret in a path cannot be replaced without breaking restore, so it
+ * stops the run; the message shows the path with the secret replaced.
+ */
+const assertPathsHoldNoKnownSecret = (entries, needles) => {
+  const leaking = entries
+    .map((entry) => redactBuffer(Buffer.from(entry.path), needles))
+    .filter(({ count }) => count > 0)
+    .map(({ buffer }) => `  ${buffer.toString()}`);
+  if (leaking.length > 0) {
+    throw new Error(
+      'A file name holds a stored secret, so nothing was committed or pushed:\n'
+        + `${leaking.join('\n')}\n`
+        + 'Rename the file so its name does not hold the secret.',
+    );
+  }
+};
+
+/** Key-shaped text in a path. The finding names the path with the match replaced. */
+const scanPath = (entryPath) => {
+  const findings = scanBuffer(entryPath, Buffer.from(entryPath));
+  if (findings.length === 0) return [];
+  let shown = entryPath;
+  for (const [, pattern] of KEY_PATTERNS) shown = shown.replace(pattern, REDACTED);
+  return findings.map((finding) => ({ ...finding, file: `${shown} (file name)`, line: 1 }));
+};
+
+/**
  * Takes a snapshot, replaces every known secret, scans what is left, and
  * commits and pushes it. Returns { commit, pushed, unchanged }.
  */
@@ -145,8 +179,11 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
       executable: false,
     };
     redacted.push(manifestEntry);
+    assertPathsHoldNoKnownSecret(redacted, needles);
     const allowed = new Set(settings.allow);
-    const findings = redacted.flatMap((entry) => scanBuffer(entry.path, entry.bytes)).filter((f) => !allowed.has(f.id));
+    const findings = redacted
+      .flatMap((entry) => [...scanBuffer(entry.path, entry.bytes), ...scanPath(entry.path)])
+      .filter((f) => !allowed.has(f.id));
     if (findings.length > 0) throw new FindingsError(findings);
 
     const repo = repoDir(home);

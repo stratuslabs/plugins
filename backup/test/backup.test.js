@@ -138,6 +138,13 @@ test('init on a new machine continues an existing branch', async () => {
 });
 
 test('a public GitHub repository is refused, a private or unknown one is not', async () => {
+  assert.equal(githubRepoOf('ssh://git@github.com:22/stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
+  assert.equal(githubRepoOf('https://github.com:443/stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
+  assert.equal(githubRepoOf('https://www.github.com/stratuslabs/home-backup'), 'stratuslabs/home-backup');
+  assert.equal(githubRepoOf('git+ssh://git@GitHub.com/stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
+  assert.equal(githubRepoOf('github.com:stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
+  await assert.rejects(assertNotPublic('https://github.com:443/a/b.git', async () => ({ status: 200 })), /public repository/);
+  await assert.rejects(assertNotPublic('https://github.com/a', async () => { throw new Error('must not be called'); }), /could not confirm/i);
   assert.equal(githubRepoOf('git@github.com:stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
   assert.equal(githubRepoOf('https://github.com/stratuslabs/home-backup'), 'stratuslabs/home-backup');
   assert.equal(githubRepoOf('ssh://git@github.com/stratuslabs/home-backup.git'), 'stratuslabs/home-backup');
@@ -206,4 +213,41 @@ test('a second run while one holds the lock is refused; a lock left by a dead pr
   writeFileSync(path.join(home, 'backup', 'run.lock'), '999999');
   const result = await now(home, { env: {}, fetchImpl: notFound });
   assert.equal(result.pushed, true);
+});
+
+test('a file name holding a known secret or a key-shaped value stops the run without naming it', async () => {
+  const { home, remote } = await setUp();
+  mkdirSync(path.join(home, 'skills', 'leak'), { recursive: true });
+  writeFileSync(path.join(home, 'skills', 'leak', `${NAMED}.md`), 'harmless\n');
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), (error) => !error.message.includes(NAMED) && /file name/.test(error.message));
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+
+  execFileSync('rm', ['-rf', path.join(home, 'skills', 'leak')]);
+  mkdirSync(path.join(home, 'skills', 'shaped'), { recursive: true });
+  const token = ['gh', 'p_', 'B'.repeat(36)].join('');
+  writeFileSync(path.join(home, 'skills', 'shaped', token), 'harmless\n');
+  let failure;
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), (error) => {
+    failure = error;
+    return error instanceof FindingsError;
+  });
+  assert.equal(failure.findings.length, 1);
+  assert.ok(!failure.message.includes(token), 'the error must not carry the matched text');
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('a known secret with characters JSON escapes is redacted inside a schedule body', async () => {
+  const { home, remote } = await setUp();
+  const secret = 'quote"back\\slash-0123456789';
+  const credentials = JSON.parse(readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+  credentials.named.shared['odd.key'] = secret;
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  const db = new DatabaseSync(path.join(home, 'fleet.db'));
+  db.exec('CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, next_fire_at TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL)');
+  db.prepare('INSERT INTO schedules VALUES (?, ?, ?, ?, ?)').run('s-odd', 'blair', '2026-10-16T00:00:00Z', JSON.stringify({ prompt: `use ${secret}` }), '2026-10-15T00:00:00Z');
+  db.close();
+  await now(home, { env: {}, fetchImpl: notFound });
+  const schedules = execFileSync('git', ['--git-dir', remote, 'show', 'refs/heads/mini:home/schedules.jsonl'], { encoding: 'utf8' });
+  const row = schedules.split('\n').filter(Boolean).map((line) => JSON.parse(line)).find((r) => r.id === 's-odd');
+  assert.equal(JSON.parse(row.body).prompt, `use ${'[redacted by stratus-backup]'}`);
 });

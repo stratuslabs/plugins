@@ -85,3 +85,17 @@ test('a dry run writes nothing', async () => {
 test('a time that is not one is refused', () => {
   for (const bad of ['24:00', '3', '03:60', 'noon']) assert.throws(() => parseTime(bad));
 });
+
+test('enable runs the nightly unit from the user home, not the directory it was called from', async () => {
+  const { main } = await import('../src/cli.js');
+  const userHome = tmp();
+  const elsewhere = tmp();
+  const { mkdirSync: mk } = await import('node:fs');
+  mk(path.join(userHome, '.stratus', 'backup'), { recursive: true });
+  writeFileSync(path.join(userHome, '.stratus', 'backup', 'settings.json'), JSON.stringify({ remote: '/r.git', branch: 'mini' }));
+  const lines = [];
+  await main(['enable', '--dry-run'], { env: { HOME: userHome, PATH: '/usr/bin' }, cwd: elsewhere, out: (line) => lines.push(line), scriptPath: '/x/stratus-backup.js' });
+  const output = lines.join('\n');
+  assert.ok(output.includes(userHome), output);
+  assert.ok(!output.includes(elsewhere), 'the caller directory must not be the working directory');
+});

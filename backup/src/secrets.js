@@ -2,8 +2,8 @@
 //
 // 1. Replacement. Every value the home knows to be secret (each string in
 //    credentials.json, and the control API token) is replaced wherever it
-//    appears, in the encodings a copy commonly takes: raw, JSON-escaped,
-//    base64, hex and URL-encoded.
+//    appears, in the encodings a copy commonly takes: raw, JSON-escaped
+//    (once or twice), base64, hex and URL-encoded.
 // 2. A scan. Anything still shaped like a well-known key stops the run
 //    before anything is committed. A finding names the file, the line and
 //    the kind of key, never the text.
@@ -70,6 +70,8 @@ export const encodingsOf = (secret) => {
   const forms = new Set([
     secret,
     JSON.stringify(secret).slice(1, -1),
+    // JSON stored inside a JSON string, as a schedule body is in schedules.jsonl.
+    JSON.stringify(JSON.stringify(secret).slice(1, -1)).slice(1, -1),
     Buffer.from(secret).toString('base64'),
     Buffer.from(secret).toString('base64').replace(/=+$/, ''),
     Buffer.from(secret).toString('base64url'),

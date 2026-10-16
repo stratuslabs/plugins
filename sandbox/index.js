@@ -103,22 +103,43 @@ export const sandboxProfile = ({ write, read, network }) => {
  * What one agent's commands may touch, from the plugin's config (shared
  * keys, overridden or added to per agent under `agents.<id>`).
  */
+const within = (target, root) => target === root || target.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+
 export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homedir()) => {
   const resolved = resolvePluginAgentConfig(config, agentId, { mergeKeys: [] });
   const shared = config ?? {};
   const own = (shared.agents && typeof shared.agents === 'object' ? shared.agents[agentId] : undefined) ?? {};
   // Lists add up: every agent reads the shared paths, and its own besides.
-  const list = (key) => [...strings(shared[key]), ...strings(own[key])].map((target) => real(expandHome(target, home)));
+  const raw = (key) => [...strings(shared[key]), ...strings(own[key])].map((target) => path.resolve(expandHome(target, home)));
   // The workspace is checked on its own: a cwd or configured write path
   // must never stand in for a missing one.
-  const ownWorkspace = typeof workspace === 'string' && workspace.length > 0 ? real(workspace) : undefined;
-  const write = ownWorkspace
-    ? [...new Set([ownWorkspace, ...(typeof cwd === 'string' && cwd.length > 0 ? [real(cwd)] : []), ...list('writePaths')])]
-    : [];
+  const lexicalWorkspace = typeof workspace === 'string' && workspace.length > 0 ? path.resolve(workspace) : undefined;
+  const ownWorkspace = lexicalWorkspace ? real(lexicalWorkspace) : undefined;
+  const writePaths = raw('writePaths');
+  const extras = [...(typeof cwd === 'string' && cwd.length > 0 ? [path.resolve(cwd)] : []), ...writePaths];
+  const roots = ownWorkspace ? [{ lexical: lexicalWorkspace, real: ownWorkspace }, ...writePaths.map((lexical) => ({ lexical, real: real(lexical) }))] : [];
+  const write = ownWorkspace ? [ownWorkspace] : [];
+  if (ownWorkspace) {
+    for (const lexical of extras) {
+      const target = real(lexical);
+      // A path named inside another writable path can be replaced by the
+      // agent, so it may be a symlink the agent planted. Allow it only where
+      // it really is inside that path; never promote where it points.
+      const parents = roots.filter((root) => root.lexical !== lexical && (within(lexical, root.lexical) || within(lexical, root.real)));
+      if (parents.length > 0) {
+        const parent = parents.find((root) => within(target, root.real));
+        if (!parent) {
+          throw new Error(`stratus-plugin-sandbox will not run the command: ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
+        }
+        continue;
+      }
+      write.push(target);
+    }
+  }
   return {
     workspace: ownWorkspace,
-    write,
-    read: list('readPaths'),
+    write: [...new Set(write)],
+    read: raw('readPaths').map(real),
     network: resolved.network !== false,
   };
 };

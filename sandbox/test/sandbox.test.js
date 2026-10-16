@@ -193,3 +193,53 @@ test('no workspace refuses the command even when a cwd or write paths are known'
   assert.equal(existsSync(path.join(cwd, '.tmp')), false);
   assert.equal(existsSync(path.join(cwd, 'a.txt')), false);
 });
+
+test('a cwd or write path inside the workspace that was swapped for a symlink out of it is refused, not allowed', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-swap-')));
+  const workspace = path.join(root, 'workspace');
+  const outside = path.join(root, 'home');
+  await mkdir(workspace);
+  await mkdir(outside);
+  // An agent can do this between two calls: cd .. && rm -rf project && ln -s "$HOME" project
+  const project = path.join(workspace, 'project');
+  await symlink(outside, project);
+  assert.throws(() => sandboxSettings({}, 'nova', workspace, project), /resolves outside/);
+  assert.throws(() => sandboxSettings({ writePaths: [project] }, 'nova', workspace, undefined), /resolves outside/);
+  // Through a symlinked workspace path too.
+  const linked = path.join(root, 'linked');
+  await symlink(workspace, linked);
+  assert.throws(() => sandboxSettings({}, 'nova', linked, path.join(linked, 'project')), /resolves outside/);
+
+  // A real directory inside the workspace is still fine, and adds nothing the workspace doesn't cover.
+  const sub = path.join(workspace, 'sub');
+  await mkdir(sub);
+  assert.deepEqual(sandboxSettings({}, 'nova', workspace, sub).write, [workspace]);
+  // A cwd the operator configured outside the workspace is still allowed where it is.
+  assert.deepEqual(sandboxSettings({}, 'nova', workspace, outside).write, [workspace, outside]);
+
+  // The same swap under a configured write path: the cwd lives in a writable repo folder.
+  const code = path.join(root, 'code');
+  await mkdir(code);
+  const repo = path.join(code, 'repo');
+  await symlink(outside, repo);
+  assert.throws(() => sandboxSettings({ writePaths: [code] }, 'nova', workspace, repo), /resolves outside/);
+  // ...and a real repo folder there is covered by the write path it's in.
+  const real2 = path.join(code, 'real');
+  await mkdir(real2);
+  assert.deepEqual(sandboxSettings({ writePaths: [code] }, 'nova', workspace, real2).write, [workspace, code]);
+});
+
+test('the executor refuses a command whose cwd was swapped out of the workspace', { skip: !onMac }, async () => {
+  const { workspace, outside } = await setup();
+  const project = path.join(workspace, 'project');
+  await symlink(outside, project);
+  let registered;
+  createPlugin({}).setup({
+    executors: { register: (entry) => { registered = entry; } },
+    workspaces: { forAgent: () => workspace, prepare: () => workspace, all: async () => [workspace] },
+  });
+  const session = { id: 's1', agent: { id: 'nova', name: 'Nova' }, status: 'running', messages: [] };
+  const result = await registered.executor.execute({ id: 'c1', toolName: 'shell.run', input: { command: 'echo pwned > secret.txt' } }, shellIn(project), session);
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(await readFile(path.join(outside, 'secret.txt'), 'utf8'), 'token\n');
+});

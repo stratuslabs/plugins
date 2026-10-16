@@ -56,6 +56,7 @@ published under `@stratusagent`.
 | [`plugin-mcp`](https://github.com/stratuslabs/agent/tree/main/packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, discovered at connect | `gated`, whatever the server says |
 | [`channel-slack`](https://github.com/stratuslabs/agent/tree/main/packages/channel-slack) | Slack as a channel: DMs, mentions, threads, approval buttons | — |
 | [`control-api`](https://github.com/stratuslabs/agent/tree/main/packages/control-api) · [`dashboard`](https://github.com/stratuslabs/agent/tree/main/packages/dashboard) | The HTTP + WebSocket control API, and the web dashboard on it | — |
+| [`tool-spawn`](./spawn) (this repository) | `agent.spawn`: several tasks at once in short-lived sub-agents with only the tools you hand them | `safe`; each sub-agent's calls are judged again |
 
 ## Third-party
 

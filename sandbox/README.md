@@ -23,9 +23,9 @@ Runs every command an agent composes under the macOS sandbox. A command can writ
 
 - **Write:** the agent's workspace (`~/.stratus/agents/<id>/workspace`), the command's own working directory if the shell is configured with a different one, and any `writePaths` you list. Temporary files go to `<workspace>/.tmp` (set as `TMPDIR`), because the shared temporary directory isn't writable.
 - **Read:** everything it can write, plus `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/opt/homebrew`, `/usr/local`, `/private/etc`, `/private/var/db`, `/dev`, Xcode, and any `readPaths`. Not the rest of your home directory, not `~/.ssh`, not `~/.stratus`, and not other agents' workspaces.
-- **Network:** on by default (git fetch and push, package installs). Set `network: false`, shared or per agent, to turn it off.
+- **Network:** on by default (git fetch and push, package installs), IP only: a command can't connect to local Unix sockets such as Docker's, apart from the system resolver's. Set `network: false`, shared or per agent, to turn it off.
 
-`readPaths` and `writePaths` add up: an agent gets the shared list plus its own. Paths are resolved through symlinks, so a symlinked workspace is allowed where it actually is. A working directory or write path named inside another writable path must also resolve inside it: if an agent swaps such a folder for a symlink that points elsewhere, the command is refused rather than given the target. `~` expands to the daemon user's home.
+`readPaths` and `writePaths` add up: an agent gets the shared list plus its own. Paths are resolved through symlinks, so a symlinked workspace is allowed where it actually is. A working directory, write path or read path named inside a writable path must also resolve inside it: if an agent swaps such a folder for a symlink that points elsewhere, the command is refused rather than given the target. `~` expands to the daemon user's home.
 
 If a tool needs a file outside these, such as a git identity file or a credential helper, list it in `readPaths`. A command that's denied fails with `Operation not permitted`, and the failed output reaches the agent.
 

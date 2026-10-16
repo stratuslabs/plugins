@@ -54,7 +54,11 @@ test('the profile denies by default and allows exactly what it was given', () =>
   assert.doesNotMatch(profile, /network/);
   assert.match(profile, /\(allow signal \(target same-sandbox\)\)/);
   assert.doesNotMatch(profile, /\bsignal\b(?! \(target same-sandbox\))/);
-  assert.match(sandboxProfile({ write: ['/w'], read: [], network: true }), /\(allow network\*\)/);
+  const online = sandboxProfile({ write: ['/w'], read: [], network: true });
+  // IP traffic only: a bare network* would also reach every Unix socket the
+  // user can open, the Docker socket included.
+  assert.doesNotMatch(online, /\(allow network\*\)/);
+  assert.match(online, /\(allow network-outbound \(remote ip\)/);
   // A path that would end the string early is refused, not spliced in.
   assert.throws(() => sandboxProfile({ write: ['/w") (allow file-write* (subpath "/'], read: [], network: true }), /cannot express/);
 });
@@ -145,6 +149,9 @@ test('the profile names each Mach service it allows instead of allowing every lo
   assert.doesNotMatch(profile, /\bmach-lookup(?! \(global-name ")/, 'a bare mach-lookup allows every service');
   assert.match(profile, /^\(allow mach-lookup [^\n]*\(global-name "com\.apple\.trustd"\)/m);
   assert.doesNotMatch(profile, /pasteboard|SecurityServer|securityd/);
+  // Preferences go through cfprefsd outside the file rules; without it a
+  // command reads only the plist files the profile lets it read.
+  assert.doesNotMatch(profile, /cfprefsd/);
 });
 
 test('a command cannot read the clipboard or the keychain, and still resolves names and users', { skip: !onMac || !existsSync('/usr/bin/pbpaste') }, async () => {
@@ -242,4 +249,57 @@ test('the executor refuses a command whose cwd was swapped out of the workspace'
   const result = await registered.executor.execute({ id: 'c1', toolName: 'shell.run', input: { command: 'echo pwned > secret.txt' } }, shellIn(project), session);
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.equal(await readFile(path.join(outside, 'secret.txt'), 'utf8'), 'token\n');
+});
+
+test('a read path inside a writable path that was swapped for a symlink out of it is refused, not allowed', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-readswap-')));
+  const workspace = path.join(root, 'workspace');
+  const outside = path.join(root, 'ssh');
+  await mkdir(workspace);
+  await mkdir(outside);
+  const shared = path.join(workspace, 'shared');
+  await symlink(outside, shared);
+  assert.throws(() => sandboxSettings({ readPaths: [shared] }, 'nova', workspace, undefined), /resolves outside/);
+  // A real folder there is fine, and one outside every writable path is read where it points.
+  const real3 = path.join(root, 'workspace', 'docs');
+  await mkdir(real3);
+  assert.deepEqual(sandboxSettings({ readPaths: [real3] }, 'nova', workspace, undefined).read, [real3]);
+  const link = path.join(root, 'opt-link');
+  await symlink(outside, link);
+  assert.deepEqual(sandboxSettings({ readPaths: [link] }, 'nova', workspace, undefined).read, [outside]);
+});
+
+test('with the network on, a command reaches TCP but not a Unix socket outside the sandbox', { skip: !onMac }, async () => {
+  const net = await import('node:net');
+  const { run, outside } = await setup();
+  const socketPath = path.join(outside, 'd.sock');
+  const unix = net.createServer((c) => c.end('UNIX-REACHED\n'));
+  const tcp = net.createServer((c) => c.end('TCP-REACHED\n'));
+  await new Promise((resolve) => unix.listen(socketPath, resolve));
+  await new Promise((resolve) => tcp.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = tcp.address().port;
+    const viaTcp = await run(`/usr/bin/nc -w 2 127.0.0.1 ${port} </dev/null`);
+    assert.match(viaTcp.out, /TCP-REACHED/, viaTcp.out);
+    const viaUnix = await run(`/usr/bin/nc -w 2 -U '${socketPath}' </dev/null`);
+    assert.doesNotMatch(viaUnix.out, /UNIX-REACHED/);
+  } finally {
+    unix.close();
+    tcp.close();
+  }
+});
+
+test('a command cannot read preferences through cfprefsd', { skip: !onMac }, async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { run } = await setup();
+  const domain = `com.stratuslabs.sandbox-probe-${process.pid}`;
+  const marker = `prefs-probe-${process.pid}`;
+  execFileSync('/usr/bin/defaults', ['write', domain, 'k', marker]);
+  try {
+    assert.equal(execFileSync('/usr/bin/defaults', ['read', domain, 'k'], { encoding: 'utf8' }).trim(), marker);
+    const read = await run(`/usr/bin/defaults read ${domain} k`);
+    assert.doesNotMatch(read.out, new RegExp(marker));
+  } finally {
+    try { execFileSync('/usr/bin/defaults', ['delete', domain]); } catch {}
+  }
 });

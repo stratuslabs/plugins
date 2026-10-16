@@ -31,8 +31,9 @@ const SYSTEM_READ = [
 
 /**
  * The Mach services a command may look up: name and user lookups, DNS,
- * network configuration, certificate trust, preferences, notifications and
- * logging. Nothing else, so shared per-user services such as the pasteboard
+ * network configuration, certificate trust, notifications and logging.
+ * Not cfprefsd: preferences are then read from their plist files, under the
+ * file rules, rather than asked of a daemon outside them. Nothing else, so shared per-user services such as the pasteboard
  * (pbpaste) and the keychain (security) are out of reach. Verified with
  * curl, git, node and python over HTTPS, dig, ssh, npm and id.
  */
@@ -50,8 +51,6 @@ const MACH_SERVICES = [
   'com.apple.trustd',
   'com.apple.trustd.agent',
   'com.apple.ocspd',
-  'com.apple.cfprefsd.daemon',
-  'com.apple.cfprefsd.agent',
 ];
 
 /** Paths are spliced into the profile as strings: no quote or backslash may end one early. */
@@ -95,7 +94,18 @@ export const sandboxProfile = ({ write, read, network }) => {
     '(allow file-read-metadata)',
     `(allow file-read* (literal "/") ${readRules})`,
     `(allow file-write* ${writeRules} (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty") (literal "/dev/dtracehelper"))`,
-    ...(network ? ['(allow network*)'] : []),
+    // IP traffic only. A bare network* also lets a command connect to any
+    // Unix socket the user can reach, such as Docker's, which is a way
+    // around every file rule here. The one Unix socket allowed is the
+    // system resolver's, so names still resolve.
+    ...(network
+      ? [
+        '(allow system-socket)',
+        '(allow network-outbound (remote ip) (literal "/private/var/run/mDNSResponder"))',
+        '(allow network-inbound (local ip))',
+        '(allow network-bind (local ip))',
+      ]
+      : []),
   ].join('\n');
 };
 
@@ -136,10 +146,20 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
       write.push(target);
     }
   }
+  // The same holds for a read path: one named inside a writable path may
+  // have been swapped for a symlink to somewhere the agent may not read.
+  const read = raw('readPaths').map((lexical) => {
+    const target = real(lexical);
+    const parents = roots.filter((root) => within(lexical, root.lexical) || within(lexical, root.real));
+    if (parents.length > 0 && !parents.some((root) => within(target, root.real))) {
+      throw new Error(`stratus-plugin-sandbox will not run the command: read path ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
+    }
+    return target;
+  });
   return {
     workspace: ownWorkspace,
     write: [...new Set(write)],
-    read: raw('readPaths').map(real),
+    read,
     network: resolved.network !== false,
   };
 };

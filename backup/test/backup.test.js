@@ -334,3 +334,23 @@ test('init waits its turn: it refuses while a backup run holds the lock, and cha
   assert.equal(origin, remote);
   assert.equal(JSON.parse(readFileSync(path.join(home, 'backup', 'settings.json'), 'utf8')).remote, remote);
 });
+
+test('a config named with --config or STRATUS_CONFIG that is missing fails the run; a missing default does not', async () => {
+  const { home, remote } = await setUp();
+  const gone = path.join(tmp(), 'missing.json');
+  await assert.rejects(now(home, { configPath: gone, env: {}, fetchImpl: notFound }), (error) => error.message.includes(gone) && /--config/.test(error.message));
+  await assert.rejects(now(home, { env: { STRATUS_CONFIG: gone }, fetchImpl: notFound }), (error) => error.message.includes(gone) && /STRATUS_CONFIG/.test(error.message));
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('a skipped skill whose name holds a stored secret is reported with the secret replaced', async () => {
+  const { home } = await setUp();
+  mkdirSync(path.join(home, 'skills', 'linked'), { recursive: true });
+  execFileSync('ln', ['-s', '/etc/hosts', path.join(home, 'skills', 'linked', `${NAMED}.md`)]);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  const linked = result.skipped.filter((item) => item.path.startsWith('home/skills/linked/'));
+  assert.equal(linked.length, 1, JSON.stringify(result.skipped));
+  assert.equal(linked[0].reason, 'symbolic link');
+  assert.ok(linked[0].path.includes(REDACTED), linked[0].path);
+  assert.ok(!JSON.stringify(result.skipped).includes(NAMED), JSON.stringify(result.skipped));
+});

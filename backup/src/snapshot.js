@@ -173,7 +173,12 @@ export const buildSnapshot = async (home, { configPath, env, cwd } = {}) => {
   const manifest = { format: 1, config: undefined, redactedConfigPaths: [], soulsWithoutId: [], skipped };
 
   const config = resolveConfigPath(home, { configPath, env, cwd });
-  if (await exists(config.file)) {
+  const present = await exists(config.file);
+  if (!present && config.source !== 'default') {
+    // An absent default config is a valid home; an absent one that was named is a mistake to stop on.
+    throw new Error(`The config named by ${config.source}, ${config.file}, does not exist, so the backup would leave it out. Not running.`);
+  }
+  if (present) {
     const { bytes } = await readStable(config.file, { follow: true });
     let parsed;
     try {

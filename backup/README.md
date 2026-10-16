@@ -26,7 +26,8 @@ Linux.
 
 The trusted config is the one `stratus serve` would use: `--config`, then
 `STRATUS_CONFIG`, then `~/.stratus/config.json`. Pass the same `--config` to
-`now` and `enable` if your service uses one.
+`now` and `enable` if your service uses one. A config named by `--config` or
+`STRATUS_CONFIG` that doesn't exist fails the run rather than being left out.
 
 In skills, only regular files are copied. Nested `.git` directories,
 symbolic links, hard-linked files and files that keep changing while read
@@ -42,9 +43,9 @@ encoded form. They need encryption first, which is planned.
    token, is replaced with `[redacted by stratus-backup]` wherever it
    appears in the snapshot: raw, JSON-escaped (once or twice), base64, hex
    and URL-encoded. A file name holding one stops the run instead, since a
-   renamed file would not restore. In the config, string values under keys named like credentials (`token`,
-   `apiKey`, `secret`, `password`, ...) and every value in an `env` block are
-   replaced too.
+   renamed file would not restore. In the config, every string under a key named like a credential (`token`,
+   `apiKey`, `secret`, `password`, ...) or in an `env` block is replaced
+   too, at any depth, arrays included.
 2. **A scan.** Anything still shaped like a well-known key (Anthropic,
    OpenAI, Slack, GitHub, AWS, Google, Stripe, Fly.io, private keys) stops
    the run before anything is committed. The error gives the file, line and

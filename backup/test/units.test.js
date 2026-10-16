@@ -128,3 +128,19 @@ test('a known secret written with lower-case or mixed percent escapes is redacte
   const { count } = redactBuffer(Buffer.from('P%40SS%2FWORD%2BWITH=ODD%26CHARS'), needles);
   assert.equal(count, 0);
 });
+
+test('every string inside an env block or a credential-named container is redacted, arrays included', () => {
+  const { config, replaced } = redactConfig({
+    plugins: { shell: { env: { LIST: ['first-secret', { deep: 'second-secret' }], COUNT: 3 } } },
+    apiKeys: ['arbitrary-secret'],
+    credentials: { github: { value: 'third-secret' } },
+    names: ['kept'],
+  });
+  assert.deepEqual(config.plugins.shell.env.LIST, [REDACTED, { deep: REDACTED }]);
+  assert.equal(config.plugins.shell.env.COUNT, 3);
+  assert.deepEqual(config.apiKeys, [REDACTED]);
+  assert.equal(config.credentials.github.value, REDACTED);
+  assert.deepEqual(config.names, ['kept']);
+  assert.deepEqual(replaced.sort(), ['apiKeys.0', 'credentials.github.value', 'plugins.shell.env.LIST.0', 'plugins.shell.env.LIST.1.deep']);
+  assert.ok(!JSON.stringify(config).includes('secret"'), JSON.stringify(config));
+});

@@ -228,6 +228,13 @@ const assertPathsHoldNoKnownSecret = (entries, needles) => {
   }
 };
 
+/** A path as it may be shown: stored secrets and key-shaped text replaced. */
+const shownPath = (entryPath, needles) => {
+  let shown = redactBuffer(Buffer.from(entryPath), needles).buffer.toString();
+  for (const [, pattern] of KEY_PATTERNS) shown = shown.replace(pattern, REDACTED);
+  return shown;
+};
+
 /** Key-shaped text in a path. The finding names the path with the match replaced. */
 const scanPath = (entryPath) => {
   const findings = scanBuffer(entryPath, Buffer.from(entryPath));
@@ -276,7 +283,9 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     const head = await revParse(repo, localRef(settings.branch));
     const pushed = head !== remote;
     if (pushed) await push(repo, settings.branch);
-    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped: manifest.skipped, manifest };
+    // Skipped paths are printed and logged, so they get the same redaction the manifest did.
+    const skipped = manifest.skipped.map((item) => ({ ...item, path: shownPath(item.path, needles) }));
+    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest };
     await writeJson(statusFile(home), { lastRun: startedAt, ok: true, commit: head, pushed, unchanged: result.unchanged, skipped: manifest.skipped.length });
     return result;
   } catch (error) {

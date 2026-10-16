@@ -179,25 +179,23 @@ const SENSITIVE_KEY = /(token|secret|password|passwd|passphrase|api[-_]?key|priv
 
 /**
  * The trusted config with every value that looks like a credential replaced:
- * string values under a key named like one, and every value of an `env`
- * block (tool-shell's, for one, is where operators put keys). Returns the
- * redacted object and the paths that were replaced, so restore can say what
- * to fill back in.
+ * every string under a key named like one, and every string in an `env`
+ * block (tool-shell's, for one, is where operators put keys), however deep
+ * in arrays or objects it sits. Returns the redacted object and the paths
+ * that were replaced, so restore can say what to fill back in.
  */
 export const redactConfig = (config) => {
   const replaced = [];
-  const walk = (value, trail, inEnv) => {
-    if (Array.isArray(value)) return value.map((item, index) => walk(item, [...trail, index], inEnv));
+  const walk = (value, trail, sensitive) => {
+    if (typeof value === 'string' && sensitive) {
+      replaced.push(trail.join('.'));
+      return REDACTED;
+    }
+    if (Array.isArray(value)) return value.map((item, index) => walk(item, [...trail, index], sensitive));
     if (value === null || typeof value !== 'object') return value;
     const out = {};
     for (const [key, child] of Object.entries(value)) {
-      const here = [...trail, key];
-      if (typeof child === 'string' && (inEnv || SENSITIVE_KEY.test(key))) {
-        out[key] = REDACTED;
-        replaced.push(here.join('.'));
-      } else {
-        out[key] = walk(child, here, key === 'env' || inEnv);
-      }
+      out[key] = walk(child, [...trail, key], sensitive || key === 'env' || SENSITIVE_KEY.test(key));
     }
     return out;
   };

@@ -29,6 +29,31 @@ const SYSTEM_READ = [
   '/private/etc', '/private/var/db', '/dev', '/Applications/Xcode.app',
 ];
 
+/**
+ * The Mach services a command may look up: name and user lookups, DNS,
+ * network configuration, certificate trust, preferences, notifications and
+ * logging. Nothing else, so shared per-user services such as the pasteboard
+ * (pbpaste) and the keychain (security) are out of reach. Verified with
+ * curl, git, node and python over HTTPS, dig, ssh, npm and id.
+ */
+const MACH_SERVICES = [
+  'com.apple.system.opendirectoryd.libinfo',
+  'com.apple.system.opendirectoryd.membership',
+  'com.apple.system.DirectoryService.libinfo_v1',
+  'com.apple.system.notification_center',
+  'com.apple.system.logger',
+  'com.apple.logd',
+  'com.apple.diagnosticd',
+  'com.apple.dnssd.service',
+  'com.apple.SystemConfiguration.configd',
+  'com.apple.SystemConfiguration.DNSConfiguration',
+  'com.apple.trustd',
+  'com.apple.trustd.agent',
+  'com.apple.ocspd',
+  'com.apple.cfprefsd.daemon',
+  'com.apple.cfprefsd.agent',
+];
+
 /** Paths are spliced into the profile as strings: no quote or backslash may end one early. */
 const sbplString = (value) => {
   if (/["\\\n\r\0]/.test(value)) {
@@ -61,7 +86,8 @@ export const sandboxProfile = ({ write, read, network }) => {
   return [
     '(version 1)',
     '(deny default)',
-    '(allow process-exec process-fork sysctl-read mach-lookup ipc-posix-shm pseudo-tty)',
+    '(allow process-exec process-fork sysctl-read ipc-posix-shm pseudo-tty)',
+    `(allow mach-lookup ${MACH_SERVICES.map((name) => `(global-name ${sbplString(name)})`).join(' ')})`,
     // A command may signal its own children, never the daemon or another
     // process the same user owns: sandbox-exec execs the command, so $PPID
     // is the unsandboxed host.

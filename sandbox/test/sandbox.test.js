@@ -140,6 +140,40 @@ test('a command can signal its own children but no process outside the sandbox',
   }
 });
 
+test('the profile names each Mach service it allows instead of allowing every lookup', () => {
+  const profile = sandboxProfile({ write: ['/w'], read: [], network: true });
+  assert.doesNotMatch(profile, /\bmach-lookup(?! \(global-name ")/, 'a bare mach-lookup allows every service');
+  assert.match(profile, /^\(allow mach-lookup [^\n]*\(global-name "com\.apple\.trustd"\)/m);
+  assert.doesNotMatch(profile, /pasteboard|SecurityServer|securityd/);
+});
+
+test('a command cannot read the clipboard or the keychain, and still resolves names and users', { skip: !onMac || !existsSync('/usr/bin/pbpaste') }, async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { run, root } = await setup();
+  const before = execFileSync('/usr/bin/pbpaste');
+  const marker = `sandbox-clipboard-probe-${process.pid}`;
+  execFileSync('/usr/bin/pbcopy', { input: marker });
+  const keychain = path.join(root, 'probe.keychain-db');
+  try {
+    // Control: the host reads both, so a refusal below is the wall.
+    assert.equal(execFileSync('/usr/bin/pbpaste', { encoding: 'utf8' }), marker);
+    execFileSync('/usr/bin/security', ['create-keychain', '-p', 'probe', keychain]);
+    execFileSync('/usr/bin/security', ['add-generic-password', '-a', 'probe', '-s', 'sandbox-probe', '-w', marker, '-A', keychain]);
+    assert.equal(execFileSync('/usr/bin/security', ['find-generic-password', '-s', 'sandbox-probe', '-w', keychain], { encoding: 'utf8' }).trim(), marker);
+
+    const clipboard = await run('/usr/bin/pbpaste');
+    assert.doesNotMatch(clipboard.out, new RegExp(marker));
+    const secret = await run(`/usr/bin/security find-generic-password -s sandbox-probe -w '${keychain}'`);
+    assert.doesNotMatch(secret.out, new RegExp(marker));
+    const who = await run('/usr/bin/id -un');
+    assert.equal(who.ok, true, who.out);
+    assert.equal(who.out.trim(), os.userInfo().username);
+  } finally {
+    execFileSync('/usr/bin/pbcopy', { input: before });
+    try { execFileSync('/usr/bin/security', ['delete-keychain', keychain]); } catch {}
+  }
+});
+
 test('no workspace refuses the command even when a cwd or write paths are known', async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-nows-')));
   const cwd = path.join(root, 'cwd');

@@ -314,3 +314,23 @@ test('two runs that find the same stale lock never both take it', async () => {
   assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8'), String(process.pid));
   await results[0].value();
 });
+
+test('every push URL origin has is checked, not only the first', async () => {
+  const { home, remote } = await setUp();
+  const gitDir = repoDir(home);
+  execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', remote]);
+  execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', 'git@github.com:owner/second.git']);
+  const publicSecond = async (url) => (url.endsWith('/repos/owner/second') ? { status: 200 } : { status: 404 });
+  await assert.rejects(now(home, { env: {}, fetchImpl: publicSecond }), /public repository/);
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('init waits its turn: it refuses while a backup run holds the lock, and changes nothing', async () => {
+  const { home, remote } = await setUp();
+  writeFileSync(path.join(home, 'backup', 'run.lock'), String(process.pid));
+  const other = bareRemote();
+  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }), /Another backup is running/);
+  const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
+  assert.equal(origin, remote);
+  assert.equal(JSON.parse(readFileSync(path.join(home, 'backup', 'settings.json'), 'utf8')).remote, remote);
+});

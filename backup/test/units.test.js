@@ -112,3 +112,19 @@ test('enable resolves a relative --config against the directory it was called fr
   const output = lines.join('\n');
   assert.ok(output.includes(path.join(elsewhere, 'conf', 'stratus.json')), output);
 });
+
+test('a known secret written with lower-case or mixed percent escapes is redacted too', () => {
+  const secret = 'p@ss/word+with=odd&chars';
+  const needles = needlesFor(new Set([secret]));
+  const upper = encodeURIComponent(secret);
+  const lower = upper.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+  const mixed = 'p%40ss%2fword%2Bwith=odd%26chars';
+  for (const form of [lower, mixed]) {
+    const { buffer, count } = redactBuffer(Buffer.from(`before ${form} after`), needles);
+    assert.equal(count, 1, form);
+    assert.equal(buffer.toString(), `before ${REDACTED} after`);
+  }
+  // Letters in the secret itself still match only as written.
+  const { count } = redactBuffer(Buffer.from('P%40SS%2FWORD%2BWITH=ODD%26CHARS'), needles);
+  assert.equal(count, 0);
+});

@@ -82,11 +82,30 @@ export const encodingsOf = (secret) => {
   return [...forms].filter((form) => form.length >= MIN_SECRET_LENGTH);
 };
 
-/** Builds the replacement list once per run, longest first so no form is left half-replaced. */
-export const needlesFor = (secrets) =>
-  [...new Set([...secrets].flatMap(encodingsOf))]
+const hexDigit = (digit) => (/[A-F]/.test(digit) ? `[${digit}${digit.toLowerCase()}]` : digit);
+
+/**
+ * A pattern for the secret percent-encoded the way any encoder may write it:
+ * each byte either as it is or as %XX with either case of hex digits, since
+ * encoders differ in which characters they escape. The secret's own letters
+ * still match only as written. Run over the buffer read as latin1, byte for
+ * byte.
+ */
+export const percentPatternOf = (secret) => {
+  const parts = [...Buffer.from(secret)].map((byte) => {
+    const hex = byte.toString(16).toUpperCase().padStart(2, '0');
+    return `(?:\\x${hex}|%${hexDigit(hex[0])}${hexDigit(hex[1])})`;
+  });
+  return new RegExp(parts.join(''), 'g');
+};
+
+/** Builds the replacement list once per run, longest first so no form is left half-replaced, then the percent patterns. */
+export const needlesFor = (secrets) => [
+  ...[...new Set([...secrets].flatMap(encodingsOf))]
     .sort((a, b) => b.length - a.length)
-    .map((form) => Buffer.from(form));
+    .map((form) => Buffer.from(form)),
+  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).map(percentPatternOf),
+];
 
 const replacement = Buffer.from(REDACTED);
 
@@ -95,6 +114,16 @@ export const redactBuffer = (buffer, needles) => {
   let current = buffer;
   let count = 0;
   for (const needle of needles) {
+    if (needle instanceof RegExp) {
+      const text = current.toString('latin1');
+      let found = 0;
+      const replaced = text.replace(needle, () => { found += 1; return REDACTED; });
+      if (found > 0) {
+        count += found;
+        current = Buffer.from(replaced, 'latin1');
+      }
+      continue;
+    }
     let index = current.indexOf(needle);
     if (index === -1) continue;
     const parts = [];

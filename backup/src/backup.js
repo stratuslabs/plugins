@@ -82,14 +82,18 @@ export const assertNotPublic = async (remote, fetchImpl = globalThis.fetch) => {
  */
 const urlsGitUses = async (remote, repo) => {
   const urls = new Set([remote]);
+  // A remote can have several URLs, and git pushes to every push URL.
   const add = (result) => {
-    const url = result.stdout.trim();
-    if (result.code === 0 && url) urls.add(url);
+    if (result.code !== 0) return;
+    for (const line of result.stdout.split('\n')) {
+      const url = line.trim();
+      if (url) urls.add(url);
+    }
   };
   add(await git(os.devNull, ['ls-remote', '--get-url', remote], { allowFailure: true, env: { GIT_DIR: undefined } }));
   if (repo !== undefined) {
-    add(await git(repo, ['remote', 'get-url', 'origin'], { allowFailure: true }));
-    add(await git(repo, ['remote', 'get-url', '--push', 'origin'], { allowFailure: true }));
+    add(await git(repo, ['remote', 'get-url', '--all', 'origin'], { allowFailure: true }));
+    add(await git(repo, ['remote', 'get-url', '--push', '--all', 'origin'], { allowFailure: true }));
   }
   return [...urls];
 };
@@ -102,21 +106,28 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
   if (!BRANCH_PATTERN.test(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
   await assertNoneArePublic(remote, undefined, fetchImpl);
   await mkdir(backupDir(home), { recursive: true, mode: 0o700 });
-  const previous = await readJson(settingsFile(home));
-  const repo = repoDir(home);
-  await initRepository(repo, remote);
-  let existing;
+  // Changing origin and the settings is one step a running backup must not
+  // see half of, so init takes the same lock a run does.
+  const release = await takeLock(home);
   try {
-    await assertNoneArePublic(remote, repo, fetchImpl);
-    ({ remote: existing } = await syncWithRemote(repo, branch));
-  } catch (error) {
-    // Settings are not changed, so origin must not be either: put back the
-    // remote the settings still name, so later runs push where they check.
-    if (previous?.remote) await initRepository(repo, previous.remote).catch(() => {});
-    throw error;
+    const previous = await readJson(settingsFile(home));
+    const repo = repoDir(home);
+    await initRepository(repo, remote);
+    let existing;
+    try {
+      await assertNoneArePublic(remote, repo, fetchImpl);
+      ({ remote: existing } = await syncWithRemote(repo, branch));
+    } catch (error) {
+      // Settings are not changed, so origin must not be either: put back the
+      // remote the settings still name, so later runs push where they check.
+      if (previous?.remote) await initRepository(repo, previous.remote).catch(() => {});
+      throw error;
+    }
+    await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
+    return { branch, adopted: existing !== undefined };
+  } finally {
+    await release();
   }
-  await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
-  return { branch, adopted: existing !== undefined };
 };
 
 const lockText = async (file) => readFile(file, 'utf8').catch(() => '');
@@ -231,10 +242,12 @@ const scanPath = (entryPath) => {
  * commits and pushes it. Returns { commit, pushed, unchanged }.
  */
 export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () => new Date() } = {}) => {
-  const settings = await readSettings(home);
+  await readSettings(home);
   const release = await takeLock(home);
   const startedAt = clock().toISOString();
   try {
+    // Read again under the lock: an init that finished meanwhile may have moved the remote.
+    const settings = await readSettings(home);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
     const { entries, manifest } = await buildSnapshot(home, { configPath, env, cwd });
     const needles = needlesFor(await collectKnownSecrets(home));

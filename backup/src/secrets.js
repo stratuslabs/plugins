@@ -2,8 +2,9 @@
 //
 // 1. Replacement. Every value the home knows to be secret (each string in
 //    credentials.json, and the control API token) is replaced wherever it
-//    appears, in the encodings a copy commonly takes: raw, JSON-escaped
-//    (once or twice), base64, hex and URL-encoded.
+//    appears, in the encodings a copy commonly takes: raw, JSON-escaped (in
+//    any valid escape spelling, at any depth), percent-encoded, base64 and
+//    hex.
 // 2. A scan. Anything still shaped like a well-known key stops the run
 //    before anything is committed. A finding names the file, the line and
 //    the kind of key, never the text.
@@ -111,29 +112,47 @@ export const encodingsOf = (secret) => {
   return [...forms].filter((form) => form.length >= MIN_SECRET_LENGTH);
 };
 
-const hexDigit = (digit) => (/[A-F]/.test(digit) ? `[${digit}${digit.toLowerCase()}]` : digit);
+const hexDigit = (digit) => (/[A-Fa-f]/.test(digit) ? `[${digit.toUpperCase()}${digit.toLowerCase()}]` : digit);
+const hexOf = (number, width) => number.toString(16).toUpperCase().padStart(width, '0');
+
+/** JSON's short escapes, the character after the backslash. */
+const SHORT_ESCAPES = new Map([['"', '"'], ['\\', '\\'], ['/', '/'], ['\b', 'b'], ['\f', 'f'], ['\n', 'n'], ['\r', 'r'], ['\t', 't']]);
 
 /**
- * A pattern for the secret percent-encoded the way any encoder may write it:
- * each byte either as it is or as %XX with either case of hex digits, since
- * encoders differ in which characters they escape. The secret's own letters
- * still match only as written. Run over the buffer read as latin1, byte for
- * byte.
+ * One character of a secret, in every spelling a copy can take: its own
+ * bytes, each byte percent-encoded (either case of hex digit), a JSON
+ * \uXXXX escape (either case) or JSON short escape. An escape may sit under
+ * any depth of further JSON escaping, so its backslash is "one or more".
+ * Matched over the buffer read as latin1, byte for byte.
  */
-export const percentPatternOf = (secret) => {
-  const parts = [...Buffer.from(secret)].map((byte) => {
-    const hex = byte.toString(16).toUpperCase().padStart(2, '0');
-    return `(?:\\x${hex}|%${hexDigit(hex[0])}${hexDigit(hex[1])})`;
-  });
-  return new RegExp(parts.join(''), 'g');
+const characterPattern = (char) => {
+  const bytes = [...Buffer.from(char)].map((byte) => `(?:\\x${hexOf(byte, 2)}|%${hexDigit(hexOf(byte, 2)[0])}${hexDigit(hexOf(byte, 2)[1])})`).join('');
+  const units = [];
+  for (let index = 0; index < char.length; index += 1) {
+    const hex = hexOf(char.charCodeAt(index), 4);
+    units.push(`\\\\+u${[...hex].map(hexDigit).join('')}`);
+  }
+  const alternatives = [bytes, units.join('')];
+  const short = SHORT_ESCAPES.get(char);
+  if (short === '\\') alternatives.push('\\\\+');
+  else if (short !== undefined) alternatives.push(`\\\\+\\x${hexOf(short.charCodeAt(0), 2)}`);
+  return `(?:${alternatives.join('|')})`;
 };
 
-/** Builds the replacement list once per run, longest first so no form is left half-replaced, then the percent patterns. */
+/**
+ * A pattern for the secret in any mix of those spellings. The secret's own
+ * letters still match only as written. This one pattern stands in for the
+ * raw, JSON-escaped (at any depth) and percent-encoded needles: an encoder's
+ * choice of which characters to escape cannot slip past it.
+ */
+export const escapePatternOf = (secret) => new RegExp([...secret].map(characterPattern).join(''), 'g');
+
+/** Builds the replacement list once per run, longest first so no form is left half-replaced, then the escape patterns. */
 export const needlesFor = (secrets) => [
   ...[...new Set([...secrets].flatMap(encodingsOf))]
     .sort((a, b) => b.length - a.length)
     .map((form) => Buffer.from(form)),
-  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).map(percentPatternOf),
+  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).map(escapePatternOf),
 ];
 
 const replacement = Buffer.from(REDACTED);

@@ -4,6 +4,7 @@
 // the branch, allowed findings), status.json (the last run), and repo/, a
 // bare clone that holds the history. None of it is ever in a snapshot.
 
+import { execFileSync } from 'node:child_process';
 import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -132,10 +133,25 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
 
 const lockText = async (file) => readFile(file, 'utf8').catch(() => '');
 
-/** Creates file holding this pid, all at once, or fails with EEXIST: never an empty lock. */
+/**
+ * When a process started, as ps prints it, or undefined if ps cannot say.
+ * Stored beside the pid so a pid the OS later hands to another process is
+ * not mistaken for the backup that wrote the lock.
+ */
+const processStart = (pid) => {
+  try {
+    const text = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Creates file holding this pid and its start time, all at once, or fails with EEXIST: never an empty lock. */
 const createLock = async (file) => {
   const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  await writeFile(temporary, String(process.pid), { mode: 0o600 });
+  const started = processStart(process.pid);
+  await writeFile(temporary, started ? `${process.pid}\n${started}` : String(process.pid), { mode: 0o600 });
   try {
     await link(temporary, file);
   } finally {
@@ -154,6 +170,22 @@ const isAlive = (pid) => {
 };
 
 /**
+ * Whether the process that wrote a lock still runs: its pid is alive and,
+ * when the lock recorded one, that pid started when the writer did. A lock
+ * from an older version holds only the pid and is judged by it alone, as
+ * is any lock when ps cannot report a start time.
+ */
+const holderOf = (text) => {
+  const [first, ...rest] = text.split('\n');
+  const pid = Number(first.trim());
+  const started = rest.join('\n').trim() || undefined;
+  if (!isAlive(pid)) return { pid, live: false };
+  if (started === undefined) return { pid, live: true };
+  const current = processStart(pid);
+  return { pid, live: current === undefined || current === started };
+};
+
+/**
  * Removes the lock only if it still names the dead pid that was read, under
  * a second lock, so two runs that both found the same stale lock cannot
  * delete each other's fresh one.
@@ -164,8 +196,8 @@ const reclaimStale = async (file, seen) => {
     await createLock(guard);
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    const holder = Number((await lockText(guard)).trim());
-    if (isAlive(holder)) throw new Error(`Another backup is running (pid ${holder}).`);
+    const holder = holderOf(await lockText(guard));
+    if (holder.live) throw new Error(`Another backup is running (pid ${holder.pid}).`);
     // Left by a run that died mid-takeover: clear it and let the caller try again.
     await rm(guard, { force: true });
     return;
@@ -187,8 +219,8 @@ export const takeLock = async (home, { onStale } = {}) => {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const seen = await lockText(file);
-      const pid = Number(seen.trim());
-      if (isAlive(pid)) throw new Error(`Another backup is running (pid ${pid}).`);
+      const holder = holderOf(seen);
+      if (holder.live) throw new Error(`Another backup is running (pid ${holder.pid}).`);
       await onStale?.();
       await reclaimStale(file, seen);
     }

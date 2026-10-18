@@ -41,8 +41,8 @@ encoded form. They need encryption first, which is planned.
 
 1. **Replacement.** Every value in `credentials.json`, and the control API
    token, is replaced with `[redacted by stratus-backup]` wherever it
-   appears in the snapshot: raw, JSON-escaped (once or twice), base64, hex
-   and URL-encoded. A file name holding one stops the run instead, since a
+   appears in the snapshot: raw, JSON-escaped (in any valid escape spelling, at
+   any depth), percent-encoded, base64 and hex. A file name holding one stops the run instead, since a
    renamed file would not restore. A stored secret shorter than 8
    characters is too likely to be an ordinary word to replace everywhere,
    so it stops the run too, naming where it is stored (Codex's fixed

@@ -215,6 +215,18 @@ test('a second run while one holds the lock is refused; a lock left by a dead pr
   assert.equal(result.pushed, true);
 });
 
+test('a lock whose pid was reused by another process is taken over; one naming this process as it started is not', async () => {
+  const { home } = await setUp();
+  mkdirSync(path.join(home, 'backup'), { recursive: true });
+  const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { env: { ...process.env, LC_ALL: 'C' } }).toString().trim();
+  writeFileSync(path.join(home, 'backup', 'run.lock'), `${process.pid}\n${started}`);
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /Another backup is running/);
+  // Same pid, but the process holding it started at another time: the backup that wrote the lock is gone.
+  writeFileSync(path.join(home, 'backup', 'run.lock'), `${process.pid}\nMon Jan  1 00:00:00 2001`);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(result.pushed, true);
+});
+
 test('a file name holding a known secret or a key-shaped value stops the run without naming it', async () => {
   const { home, remote } = await setUp();
   mkdirSync(path.join(home, 'skills', 'leak'), { recursive: true });
@@ -311,7 +323,7 @@ test('two runs that find the same stale lock never both take it', async () => {
   const results = await Promise.allSettled([first, second]);
   assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'rejected'], JSON.stringify(results.map((r) => r.reason?.message)));
   assert.match(results[1].reason.message, /Another backup is running/);
-  assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8'), String(process.pid));
+  assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8').split('\n')[0], String(process.pid));
   await results[0].value();
 });
 

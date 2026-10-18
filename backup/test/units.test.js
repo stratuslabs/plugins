@@ -144,3 +144,27 @@ test('every string inside an env block or a credential-named container is redact
   assert.deepEqual(replaced.sort(), ['apiKeys.0', 'credentials.github.value', 'plugins.shell.env.LIST.0', 'plugins.shell.env.LIST.1.deep']);
   assert.ok(!JSON.stringify(config).includes('secret"'), JSON.stringify(config));
 });
+
+test('a known secret written with any valid JSON escape spelling is redacted, at any nesting depth', () => {
+  const secret = 'pä/ss"wo\\rd-1234';
+  const needles = needlesFor(new Set([secret]));
+  const unicode = (text, digits = (hex) => hex) => [...text].map((char) => `\\u${digits(char.charCodeAt(0).toString(16).padStart(4, '0'))}`).join('');
+  const once = [
+    'p\\u00e4\\/ss\\"wo\\\\rd-1234',
+    'p\\u00E4/ss\\"wo\\\\rd-1234',
+    unicode(secret),
+    unicode(secret, (hex) => hex.toUpperCase()),
+  ];
+  const decode = (form) => JSON.parse(`"${form}"`);
+  for (const form of once) assert.equal(decode(form), secret, form);
+  // Twice escaped, as a schedule body is inside schedules.jsonl.
+  const twice = JSON.stringify(once[0]).slice(1, -1);
+  assert.equal(decode(decode(twice)), secret);
+  for (const form of [...once, twice]) {
+    const { buffer, count } = redactBuffer(Buffer.from(`before ${form} after`), needles);
+    assert.equal(count, 1, form);
+    assert.equal(buffer.toString(), `before ${REDACTED} after`);
+  }
+  // An escape is not a licence to change the secret's own letters.
+  assert.equal(redactBuffer(Buffer.from('P\\u00e4/SS"WO\\\\RD-1234'), needles).count, 0);
+});

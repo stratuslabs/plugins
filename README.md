@@ -57,6 +57,14 @@ published under `@stratusagent`.
 | [`channel-slack`](https://github.com/stratuslabs/agent/tree/main/packages/channel-slack) | Slack as a channel: DMs, mentions, threads, approval buttons | — |
 | [`control-api`](https://github.com/stratuslabs/agent/tree/main/packages/control-api) · [`dashboard`](https://github.com/stratuslabs/agent/tree/main/packages/dashboard) | The HTTP + WebSocket control API, and the web dashboard on it | — |
 
+## In this repository
+
+Plugins that live here rather than in the agent's core.
+
+| Package | Contributes | Notes |
+| --- | --- | --- |
+| [`@stratusagent/plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`, skill `a2ui-screens` | An agent shows a native screen as A2UI v1.0 JSON, validated against the catalogs you configure. Both tools `safe`. |
+
 ## Third-party
 
 Nothing listed yet. Open a pull request adding a row.

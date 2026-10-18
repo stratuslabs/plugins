@@ -45,6 +45,10 @@ validation error as a JSON string, so the model can fix its own output:
   with the catalog's component schemas, plus `common_types.json`.
 - Each component validates against its own catalog definition, so an error
   names the component and the field rather than a failed `oneOf`.
+- Every function call inside a component (`{ "@call": ... }`, including calls
+  nested in another call's args) must name a function the catalog defines, or
+  the `@index` system function, and match that function's own schema. A call
+  may not name a different catalog.
 - One call is one surface. `createSurface` must come first and name the
   call's `catalogId`. Nothing may follow `deleteSurface`. A component may not
   name a different catalog.

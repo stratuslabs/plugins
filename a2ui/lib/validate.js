@@ -29,6 +29,9 @@ export const MESSAGE_KINDS = {
 /** Kinds that are valid A2UI but need a renderer round trip ui.render does not carry. */
 const UNSUPPORTED_KINDS = ['callRendererFunction', 'agentFunctionResponse'];
 
+/** The function every renderer provides inside list templates (common_types IndexSystemFunction). */
+const SYSTEM_INDEX_FUNCTION = '@index';
+
 /** The failure the model is handed, in A2UI's standard validation error shape. */
 export class A2uiValidationError extends Error {
   constructor({ surfaceId = '', path = '', message }) {
@@ -226,6 +229,7 @@ export const compileCatalog = (catalog, source) => {
   addFormats(ajv);
   let messageValidators;
   let componentValidators;
+  let functionValidators;
   try {
     ajv.addSchema(COMMON_TYPES);
     ajv.addSchema({ ...catalog, $id: CATALOG_ALIAS });
@@ -249,6 +253,22 @@ export const compileCatalog = (catalog, source) => {
         }),
       ]),
     );
+    // Each catalog function, and the one system function, checked the way
+    // common_types' FunctionCall combines them, but by name: a catalog's
+    // `$defs.anyFunction` can be looser than its functions.
+    const functionSchema = (index, target) => ({
+      $id: `${SPEC_BASE}stratus/function/${index}.json`,
+      allOf: [{ $ref: `${SPEC_BASE}common_types.json#/$defs/FunctionCommon` }, { $ref: target }],
+      unevaluatedProperties: false,
+    });
+    const functions = isObject(catalog.functions) ? catalog.functions : {};
+    functionValidators = new Map([
+      ...Object.keys(functions).map((name, index) => [
+        name,
+        ajv.compile(functionSchema(index, `${CATALOG_ALIAS}#/functions/${pointerEscape(name)}`)),
+      ]),
+      [SYSTEM_INDEX_FUNCTION, ajv.compile(functionSchema('index', `${SPEC_BASE}common_types.json#/$defs/IndexSystemFunction`))],
+    ]);
   } catch (error) {
     throw catalogError(source, `does not compile as JSON Schema 2020-12: ${error.message}`);
   }
@@ -267,8 +287,52 @@ export const compileCatalog = (catalog, source) => {
     catalogDefs,
     messageValidators,
     componentValidators,
+    functionValidators,
     childSlots,
   };
+};
+
+/**
+ * The first function call anywhere inside `value` that this catalog cannot
+ * run: one that names another catalog, names no function the catalog
+ * defines, or does not match that function's own schema. Calls nested in a
+ * call's args are checked too.
+ */
+const functionProblem = (compiled, value, at) => {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = functionProblem(compiled, item, `${at}/${index}`);
+      if (found) {
+        return found;
+      }
+    }
+    return undefined;
+  }
+  if (!isObject(value)) {
+    return undefined;
+  }
+  if (Object.hasOwn(value, '@call')) {
+    const name = value['@call'];
+    if (Object.hasOwn(value, 'catalogId') && value.catalogId !== compiled.catalogId) {
+      return { at: `${at}/catalogId`, message: `ui.render checks one catalog per call; this function call names "${value.catalogId}".` };
+    }
+    const validate = typeof name === 'string' ? compiled.functionValidators.get(name) : undefined;
+    if (!validate) {
+      const known = [...compiled.functionValidators.keys()].join(', ');
+      return { at: `${at}/@call`, message: `Unknown function ${JSON.stringify(name)}. This catalog has: ${known}.` };
+    }
+    if (!validate(value)) {
+      const { at: inner, message } = describeAjvError(bestError(validate.errors));
+      return { at: `${at}${inner}`, message: `${name}: ${message}` };
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const found = functionProblem(compiled, child, `${at}${pointer(key)}`);
+    if (found) {
+      return found;
+    }
+  }
+  return undefined;
 };
 
 /** Find the component that made a message invalid, and say what is wrong with it. */
@@ -288,6 +352,12 @@ const componentProblem = (compiled, components, at) => {
     if (!validate) {
       const known = [...compiled.componentValidators.keys()].join(', ');
       return { at: `${here}/component`, message: `Unknown component "${component.component}". This catalog has: ${known}.` };
+    }
+    // Function calls first: a bad call also fails the component's schema,
+    // and the function's own error says more.
+    const call = functionProblem(compiled, component, here);
+    if (call) {
+      return { at: call.at, message: `${component.component} "${component.id ?? '?'}": ${call.message}` };
     }
     if (!validate(component)) {
       const { at: inner, message } = describeAjvError(bestError(validate.errors));
@@ -341,7 +411,7 @@ export const validateRender = (input, catalogs, { maxMessagesBytes }) => {
     if (!isObject(message)) {
       throw new A2uiValidationError({ surfaceId, path: at, message: 'Each message must be an object.' });
     }
-    const kinds = Object.keys(message).filter((key) => key in MESSAGE_KINDS || UNSUPPORTED_KINDS.includes(key));
+    const kinds = Object.keys(message).filter((key) => Object.hasOwn(MESSAGE_KINDS, key) || UNSUPPORTED_KINDS.includes(key));
     if (kinds.length !== 1) {
       throw new A2uiValidationError({
         surfaceId,

@@ -129,3 +129,78 @@ test('a declared content-length over the cap is refused before reading', async (
   await assert.rejects(setUp({ catalogs: [{ url: URL_ }] }, { fetchImpl }), /larger than/);
   assert.equal(read, false);
 });
+
+/** The parsed A2UI error from a call that must fail. */
+const failureOf = async (promise) => {
+  try {
+    await promise;
+  } catch (error) {
+    assert.ok(error instanceof A2uiValidationError, String(error));
+    return JSON.parse(error.message);
+  }
+  return assert.fail('expected the call to fail');
+};
+
+const screen = (components) => ({
+  catalogId: BASIC.catalogId,
+  messages: [{ version: 'v1.0', createSurface: { surfaceId: 's1', catalogId: BASIC.catalogId, components } }],
+});
+const button = (action) => [
+  { id: 'root', component: 'Button', child: 'label', action },
+  { id: 'label', component: 'Text', text: 'Go' },
+];
+const openUrl = (extra = {}) => ({ functionCall: { '@call': 'openUrl', args: { url: 'https://example.com' }, ...extra } });
+
+test('a message key inherited from Object.prototype is not a message kind', async () => {
+  const tools = await setUp({ catalogs: [{ path: BASIC_PATH }] });
+  for (const key of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+    const message = JSON.parse(`{"version":"v1.0",${JSON.stringify(key)}:{}}`);
+    const d = await failureOf(tools.get('ui.render').execute({ catalogId: BASIC.catalogId, messages: [message] }));
+    assert.equal(d.path, '/messages/0', key);
+    assert.match(d.message, /exactly one of/, key);
+  }
+});
+
+test('function calls are checked against the catalog\'s own function schemas, even when a loose anyFunction passes', async (t) => {
+  const loose = { ...BASIC, $defs: { ...BASIC.$defs, anyFunction: {} } };
+  const tools = await setUp({ catalogs: [{ url: URL_ }] }, { fetchImpl: async () => new Response(JSON.stringify(loose)) });
+  const render = (components) => tools.get('ui.render').execute(screen(components));
+  await t.test('an unknown function', async () => {
+    const d = await failureOf(render(button({ functionCall: { '@call': 'Bogus' } })));
+    assert.equal(d.path, '/messages/0/createSurface/components/0/action/functionCall/@call');
+    assert.match(d.message, /Unknown function "Bogus".*openUrl/);
+  });
+  await t.test('a known function with bad args', async () => {
+    const d = await failureOf(render(button({ functionCall: { '@call': 'openUrl', args: {} } })));
+    assert.match(d.path, /^\/messages\/0\/createSurface\/components\/0\/action\/functionCall\/args/);
+    assert.match(d.message, /openUrl/);
+  });
+  await t.test('a nested call inside a property value', async () => {
+    const d = await failureOf(render([{ id: 'root', component: 'Text', text: { '@call': 'formatString', args: { nope: 1 } } }]));
+    assert.match(d.path, /^\/messages\/0\/createSurface\/components\/0\/text/);
+  });
+});
+
+test('valid function calls, and the @index system function, are still accepted', async () => {
+  const tools = await setUp({ catalogs: [{ path: BASIC_PATH }] });
+  const render = (components) => tools.get('ui.render').execute(screen(components));
+  assert.deepEqual(await render(button(openUrl())), { surfaceId: 's1', accepted: true });
+  assert.deepEqual(await render([{ id: 'root', component: 'Text', text: { '@call': '@index' } }]), { surfaceId: 's1', accepted: true });
+  const nested = { '@call': 'formatString', args: { value: 'Item ${/n}' } };
+  assert.deepEqual(await render([{ id: 'root', component: 'Text', text: nested }]), { surfaceId: 's1', accepted: true });
+});
+
+test('a nested function call may not name another catalog', async (t) => {
+  const tools = await setUp({ catalogs: [{ path: BASIC_PATH }] });
+  await t.test('another catalog', async () => {
+    const d = await failureOf(tools.get('ui.render').execute(screen(button(openUrl({ catalogId: 'https://example.com/other' })))));
+    assert.equal(d.path, '/messages/0/createSurface/components/0/action/functionCall/catalogId');
+    assert.match(d.message, /one catalog per call/);
+  });
+  await t.test('its own catalog, named explicitly, is fine', async () => {
+    assert.deepEqual(await tools.get('ui.render').execute(screen(button(openUrl({ catalogId: BASIC.catalogId })))), {
+      surfaceId: 's1',
+      accepted: true,
+    });
+  });
+});

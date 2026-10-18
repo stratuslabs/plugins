@@ -304,7 +304,15 @@ export const status = async (home) => {
 
 export const allow = async (home, id) => {
   if (!/^[0-9a-f]{16}$/.test(id)) throw new Error(`${JSON.stringify(id)} is not a finding id (16 hex characters from a failed run).`);
-  const settings = await readSettings(home);
-  if (!settings.allow.includes(id)) settings.allow.push(id);
-  await writeJson(settingsFile(home), settings);
+  await readSettings(home);
+  // A read-modify-write of the settings, so it takes the lock init and runs
+  // take: two allows keep both ids, and an init's new remote is not undone.
+  const release = await takeLock(home);
+  try {
+    const settings = await readSettings(home);
+    if (!settings.allow.includes(id)) settings.allow.push(id);
+    await writeJson(settingsFile(home), settings);
+  } finally {
+    await release();
+  }
 };

@@ -354,3 +354,44 @@ test('a skipped skill whose name holds a stored secret is reported with the secr
   assert.ok(linked[0].path.includes(REDACTED), linked[0].path);
   assert.ok(!JSON.stringify(result.skipped).includes(NAMED), JSON.stringify(result.skipped));
 });
+
+test('a stored secret too short to redact stops the run, naming where it is stored, never its value', async () => {
+  const { home, remote } = await setUp();
+  const file = path.join(home, 'credentials.json');
+  const credentials = JSON.parse(readFileSync(file, 'utf8'));
+  credentials.named.shared['short.pin'] = 'pa55wd7';
+  writeFileSync(file, JSON.stringify(credentials));
+  await assert.rejects(
+    now(home, { env: {}, fetchImpl: notFound }),
+    (error) => /shorter than 8 characters/.test(error.message) && error.message.includes('named.shared.short.pin') && !error.message.includes('pa55wd7'),
+  );
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('the codex sign-in marker is not a short secret: a codex login home still backs up', async () => {
+  const { home, remote } = await setUp();
+  const file = path.join(home, 'credentials.json');
+  const credentials = JSON.parse(readFileSync(file, 'utf8'));
+  credentials.codex = { type: 'oauth_token', value: 'chatgpt' };
+  credentials.agentSignIns = { blair: { codex: { type: 'oauth_token', value: 'chatgpt' } } };
+  writeFileSync(file, JSON.stringify(credentials));
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(result.pushed, true);
+  assert.ok(refOf(remote, 'refs/heads/mini'));
+});
+
+test('allow takes the backup lock: it refuses while a run or an init holds it, and changes nothing', async () => {
+  const { home } = await setUp();
+  const settingsPath = path.join(home, 'backup', 'settings.json');
+  const before = readFileSync(settingsPath, 'utf8');
+  writeFileSync(path.join(home, 'backup', 'run.lock'), String(process.pid));
+  await assert.rejects(allow(home, '0123456789abcdef'), /Another backup is running/);
+  assert.equal(readFileSync(settingsPath, 'utf8'), before);
+});
+
+test('two allows one after another keep both ids', async () => {
+  const { home } = await setUp();
+  await allow(home, '0123456789abcdef');
+  await allow(home, 'fedcba9876543210');
+  assert.deepEqual(JSON.parse(readFileSync(path.join(home, 'backup', 'settings.json'), 'utf8')).allow, ['0123456789abcdef', 'fedcba9876543210']);
+});

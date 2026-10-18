@@ -43,7 +43,10 @@ encoded form. They need encryption first, which is planned.
    token, is replaced with `[redacted by stratus-backup]` wherever it
    appears in the snapshot: raw, JSON-escaped (once or twice), base64, hex
    and URL-encoded. A file name holding one stops the run instead, since a
-   renamed file would not restore. In the config, every string under a key named like a credential (`token`,
+   renamed file would not restore. A stored secret shorter than 8
+   characters is too likely to be an ordinary word to replace everywhere,
+   so it stops the run too, naming where it is stored (Codex's fixed
+   `chatgpt` sign-in marker is not a secret and is skipped). In the config, every string under a key named like a credential (`token`,
    `apiKey`, `secret`, `password`, ...) or in an `env` block is replaced
    too, at any depth, arrays included.
 2. **A scan.** Anything still shaped like a well-known key (Anthropic,

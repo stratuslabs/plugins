@@ -32,13 +32,26 @@ const readIfPresent = async (file) => {
   }
 };
 
-const collectStrings = (value, out, key) => {
+/**
+ * Codex's "sign-in" is a marker that the machine uses its own `codex login`;
+ * the stored value is the fixed word "chatgpt", never a secret.
+ */
+const isCodexMarker = (key, value) =>
+  key === 'codex' && value !== null && typeof value === 'object' && value.type === 'oauth_token' && value.value === 'chatgpt';
+
+const collectStrings = (value, out, key, at, short) => {
   if (typeof value === 'string') {
-    if (!NON_SECRET_KEYS.has(key) && value.trim().length >= MIN_SECRET_LENGTH) out.add(value.trim());
+    if (NON_SECRET_KEYS.has(key)) return;
+    const trimmed = value.trim();
+    if (trimmed.length >= MIN_SECRET_LENGTH) out.add(trimmed);
+    else if (trimmed.length > 0) short.push(at);
   } else if (Array.isArray(value)) {
-    for (const item of value) collectStrings(item, out, key);
+    value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short));
   } else if (value !== null && typeof value === 'object') {
-    for (const [childKey, child] of Object.entries(value)) collectStrings(child, out, childKey);
+    for (const [childKey, child] of Object.entries(value)) {
+      if (isCodexMarker(childKey, child)) continue;
+      collectStrings(child, out, childKey, at ? `${at}.${childKey}` : childKey, short);
+    }
   }
 };
 
@@ -58,10 +71,26 @@ export const collectKnownSecrets = async (home) => {
     } catch {
       throw new Error(`${credentialsFile} is not valid JSON, so the secrets it holds cannot be kept out of the backup. Fix the file first.`);
     }
-    collectStrings(parsed, secrets, undefined);
+    // A secret too short to replace safely (it could be an ordinary word in
+    // any file) is not silently treated as non-secret: the run stops, naming
+    // where it is stored, never its value.
+    const short = [];
+    collectStrings(parsed, secrets, undefined, '', short);
+    if (short.length > 0) {
+      throw new Error(
+        `${credentialsFile} stores ${short.length === 1 ? 'a value' : 'values'} shorter than ${MIN_SECRET_LENGTH} characters `
+        + `(${short.join(', ')}), too short to redact safely, so the backup stops rather than commit it unredacted. `
+        + 'Replace it with a longer secret, or remove it.',
+      );
+    }
   }
   const token = await readIfPresent(path.join(home, 'gateway-token'));
-  if (token !== undefined && token.trim().length >= MIN_SECRET_LENGTH) secrets.add(token.trim());
+  if (token !== undefined && token.trim().length > 0) {
+    if (token.trim().length < MIN_SECRET_LENGTH) {
+      throw new Error(`The control API token in gateway-token is shorter than ${MIN_SECRET_LENGTH} characters, too short to redact safely, so the backup stops. Rotate it to a longer token.`);
+    }
+    secrets.add(token.trim());
+  }
   return secrets;
 };
 

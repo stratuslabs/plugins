@@ -63,7 +63,7 @@ export const createRenderTool = (catalogs, { maxMessagesBytes = DEFAULT_MAX_MESS
 export const createCatalogTool = (catalogs) => ({
   name: CATALOG_TOOL_NAME,
   description:
-    'Read an A2UI catalog: its design instructions and the schema of every component and function it offers. '
+    'Read an A2UI catalog: its design instructions, the schema of every component and function it offers, and the shared definitions those schemas refer to (commonTypes, catalogDefs). '
     + 'Without catalogId, lists the catalogs you can build screens from.',
   risk: 'safe',
   parameters: {
@@ -94,6 +94,10 @@ export const createCatalogTool = (catalogs) => ({
       instructions: catalog.instructions ?? null,
       components: catalog.components,
       functions: catalog.functions,
+      // What the schemas above point at: a "common_types.json#/$defs/X" ref
+      // is commonTypes.X, and a "#/$defs/X" ref is catalogDefs.X.
+      commonTypes: catalog.commonTypes,
+      catalogDefs: catalog.catalogDefs,
     };
   },
 });

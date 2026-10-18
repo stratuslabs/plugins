@@ -150,6 +150,57 @@ const bestError = (errors) => {
   return pool.reduce((best, error) => (rank(error) > rank(best) ? error : best), pool[0]);
 };
 
+/** Every `$ref` string anywhere under `node`. */
+const refsIn = (node, found = []) => {
+  if (Array.isArray(node)) {
+    node.forEach((item) => refsIn(item, found));
+  } else if (isObject(node)) {
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '$ref' && typeof value === 'string') {
+        found.push(value);
+      } else {
+        refsIn(value, found);
+      }
+    }
+  }
+  return found;
+};
+
+/**
+ * The definitions a catalog's component and function schemas point at, so
+ * ui.catalog can hand the model self-contained shapes: the common_types
+ * `$defs` they reach (followed through common_types' own local refs), and
+ * the catalog's own `$defs` they name with `#/$defs/...`.
+ */
+const referencedDefinitions = (catalog) => {
+  const commonTypes = {};
+  const catalogDefs = {};
+  const commonDefs = isObject(COMMON_TYPES.$defs) ? COMMON_TYPES.$defs : {};
+  const ownDefs = isObject(catalog.$defs) ? catalog.$defs : {};
+  const pending = [...refsIn(catalog.components), ...refsIn(catalog.functions ?? {})].map((ref) => ({ ref, inCommon: false }));
+  while (pending.length > 0) {
+    const { ref, inCommon } = pending.pop();
+    const common = /(?:^|\/)common_types\.json#\/\$defs\/([^/]+)$/.exec(ref) ?? (inCommon ? /^#\/\$defs\/([^/]+)$/.exec(ref) : null);
+    if (common) {
+      const name = common[1].replaceAll('~1', '/').replaceAll('~0', '~');
+      if (!(name in commonTypes) && name in commonDefs) {
+        commonTypes[name] = commonDefs[name];
+        pending.push(...refsIn(commonDefs[name]).map((next) => ({ ref: next, inCommon: true })));
+      }
+      continue;
+    }
+    const own = inCommon ? null : /^#\/\$defs\/([^/]+)$/.exec(ref);
+    if (own) {
+      const name = own[1].replaceAll('~1', '/').replaceAll('~0', '~');
+      if (!(name in catalogDefs) && name in ownDefs) {
+        catalogDefs[name] = ownDefs[name];
+        pending.push(...refsIn(ownDefs[name]).map((next) => ({ ref: next, inCommon: false })));
+      }
+    }
+  }
+  return { commonTypes, catalogDefs };
+};
+
 const catalogError = (source, message) => new Error(`@stratusagent/plugin-a2ui: catalog ${source}: ${message}`);
 
 /**
@@ -202,6 +253,7 @@ export const compileCatalog = (catalog, source) => {
     throw catalogError(source, `does not compile as JSON Schema 2020-12: ${error.message}`);
   }
 
+  const { commonTypes, catalogDefs } = referencedDefinitions(catalog);
   const childSlots = new Map(Object.entries(catalog.components).map(([name, schema]) => [name, childSlotsOf(schema, catalog)]));
 
   return {
@@ -211,6 +263,8 @@ export const compileCatalog = (catalog, source) => {
     instructions: typeof catalog.instructions === 'string' ? catalog.instructions : undefined,
     components: catalog.components,
     functions: isObject(catalog.functions) ? catalog.functions : {},
+    commonTypes,
+    catalogDefs,
     messageValidators,
     componentValidators,
     childSlots,
@@ -303,9 +357,13 @@ export const validateRender = (input, catalogs, { maxMessagesBytes }) => {
     const messageSurface = isObject(body) && typeof body.surfaceId === 'string' ? body.surfaceId : undefined;
     const reportedSurface = surfaceId ?? messageSurface ?? '';
 
+    // Each component is checked against its own catalog schema whether or
+    // not the envelope passed: a catalog's `$defs.anyComponent` can be looser
+    // than its components, and the renderer needs the component to be right.
     const validate = compiled.messageValidators[kind];
-    if (!validate(message)) {
-      const found = isObject(body) ? componentProblem(compiled, body.components, `${at}/${kind}/components`) : undefined;
+    const envelopeOk = validate(message);
+    const found = isObject(body) ? componentProblem(compiled, body.components, `${at}/${kind}/components`) : undefined;
+    if (!envelopeOk || found) {
       const { at: where, message: what } = found ?? (() => {
         const described = describeAjvError(bestError(validate.errors));
         return { at: `${at}${described.at}`, message: described.message };

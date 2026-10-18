@@ -7,7 +7,7 @@ leaves the agent.
 
 | Tool | Risk | What it does |
 | --- | --- | --- |
-| `ui.catalog` | `safe` | Lists the configured catalogs, or returns one catalog's `instructions` and its component and function schemas. |
+| `ui.catalog` | `safe` | Lists the configured catalogs, or returns one catalog's `instructions`, its component and function schemas, and the definitions those schemas refer to (`commonTypes`, `catalogDefs`). |
 | `ui.render` | `safe` | Validates A2UI messages for one surface and hands them to the client. |
 
 It also contributes one skill, `a2ui-screens`: when a screen beats a text
@@ -90,8 +90,9 @@ skills: [a2ui-screens]
 
 - Each catalog is `{ path }` or `{ url }`. `id` is optional; when given, it
   must equal the catalog's own `catalogId`.
-- A URL must be `https`, or `http` on localhost. It is fetched once, at
-  startup, with a 15 second timeout and a 2 MB limit.
+- A URL must be `https`, or `http` on localhost, and so must every redirect
+  it follows (at most 5). It is fetched once, at startup, with a 15 second
+  timeout and a 2 MB limit enforced while the body streams.
 - Every catalog is loaded and compiled at setup. One that cannot be read,
   is not an A2UI v1.0 catalog, or does not compile refuses the plugin, so a
   bad catalog shows up at startup and not in the middle of a turn.

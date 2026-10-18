@@ -36,6 +36,8 @@ needs approval, say so in text and use the backend's own flow.
 
 1. Call `ui.catalog` with no arguments to see which catalogs you have, then with
    a `catalogId` to read that catalog's instructions and component schemas.
+   A `common_types.json#/$defs/X` ref in a schema is `commonTypes.X` in the
+   same result, and a `#/$defs/X` ref is `catalogDefs.X`.
    Follow the catalog's instructions.
 2. Call `ui.render` with that `catalogId` and the messages for **one surface**:
    - `createSurface` first, with a new `surfaceId` and the same `catalogId`.

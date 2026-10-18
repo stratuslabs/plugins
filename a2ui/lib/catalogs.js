@@ -11,6 +11,43 @@ const expandHome = (path) => (path === '~' || path.startsWith('~/') ? `${homedir
 
 const isLoopback = (hostname) => hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
 
+const MAX_REDIRECTS = 5;
+
+/** Plain http only for this machine: a catalog decides what the agent is told and what a screen may contain. */
+const checkTransport = (url) => {
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    throw new Error(`must be https (plain http only for localhost)${url.href ? `; got ${url.href}` : ''}.`);
+  }
+};
+
+/** The body as text, refusing as soon as it passes the cap instead of buffering all of it first. */
+const readCapped = async (response) => {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_CATALOG_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`is larger than ${MAX_CATALOG_BYTES} bytes.`);
+  }
+  if (!response.body) {
+    return '';
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > MAX_CATALOG_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`is larger than ${MAX_CATALOG_BYTES} bytes.`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
+};
+
 const readUrl = async (raw, fetchImpl) => {
   let url;
   try {
@@ -18,20 +55,26 @@ const readUrl = async (raw, fetchImpl) => {
   } catch {
     throw new Error(`"${raw}" is not a URL.`);
   }
-  // A catalog decides what the agent is told and what a screen may contain,
-  // so it is not fetched over plain HTTP from anywhere but this machine.
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
-    throw new Error('must be https (plain http only for localhost).');
+  checkTransport(url);
+  // Redirects are followed here, not by fetch, so every hop meets the same
+  // transport rule as the configured URL.
+  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  for (let hops = 0; ; hops += 1) {
+    const response = await fetchImpl(url, { signal, redirect: 'manual', headers: { accept: 'application/json' } });
+    if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
+      await response.body?.cancel().catch(() => {});
+      if (hops >= MAX_REDIRECTS) {
+        throw new Error(`redirected more than ${MAX_REDIRECTS} times.`);
+      }
+      url = new URL(response.headers.get('location'), url);
+      checkTransport(url);
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`answered HTTP ${response.status}.`);
+    }
+    return readCapped(response);
   }
-  const response = await fetchImpl(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: 'application/json' } });
-  if (!response.ok) {
-    throw new Error(`answered HTTP ${response.status}.`);
-  }
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_CATALOG_BYTES) {
-    throw new Error(`is larger than ${MAX_CATALOG_BYTES} bytes.`);
-  }
-  return text;
 };
 
 const readEntry = async (entry, fetchImpl) => {

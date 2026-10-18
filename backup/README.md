@@ -1,11 +1,11 @@
-# stratus-backup
+# @stratusagent/plugin-backup
 
 A nightly, model-free copy of a Stratus home (`~/.stratus`) in a private git
 repository. A script does the work, not an agent: no agent can call it, and
 it runs whether or not the daemon is up.
 
 ```bash
-npm install -g stratus-backup
+npm install -g @stratusagent/plugin-backup   # installs the stratus-backup command
 stratus-backup init git@github.com:you/stratus-home-backup.git   # one branch per machine, named after the host
 stratus-backup now                                                # first snapshot
 stratus-backup enable                                             # every night at 03:30 (--at to change)

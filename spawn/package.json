@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/tool-spawn",
+  "name": "@stratusagent/plugin-spawn",
   "version": "0.1.0",
   "description": "agent.spawn: run several tasks at once in short-lived sub-agents with only the tools you hand them.",
   "type": "module",

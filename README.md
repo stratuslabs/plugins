@@ -56,15 +56,19 @@ published under `@stratusagent`.
 | [`plugin-mcp`](https://github.com/stratuslabs/agent/tree/main/packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, discovered at connect | `gated`, whatever the server says |
 | [`channel-slack`](https://github.com/stratuslabs/agent/tree/main/packages/channel-slack) | Slack as a channel: DMs, mentions, threads, approval buttons | — |
 | [`control-api`](https://github.com/stratuslabs/agent/tree/main/packages/control-api) · [`dashboard`](https://github.com/stratuslabs/agent/tree/main/packages/dashboard) | The HTTP + WebSocket control API, and the web dashboard on it | — |
-| [`tool-spawn`](./spawn) (this repository) | `agent.spawn`: several tasks at once in short-lived sub-agents with only the tools you hand them | `safe`; each sub-agent's calls are judged again |
 
 ## In this repository
 
-Plugins that live here rather than in the agent's core.
+Optional packages that live here rather than in the agent's core. Each is
+published as `@stratusagent/plugin-<name>` from its directory `<name>/`,
+whatever it contributes (tools, a channel, an executor, or a command), so the
+name says it is optional and outside core. Third-party plugins are
+encouraged to use `stratus-plugin-<name>` or `@scope/stratus-plugin-<name>`.
 
 | Package | Contributes | Notes |
 | --- | --- | --- |
-| [`stratus-plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
+| [`@stratusagent/plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
+| [`@stratusagent/plugin-spawn`](./spawn) | `agent.spawn`: several tasks at once in short-lived sub-agents with only the tools you hand them | `safe`; each sub-agent's calls are judged again |
 
 ## Third-party
 

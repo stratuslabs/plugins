@@ -1,4 +1,4 @@
-# stratus-plugin-sandbox
+# @stratusagent/plugin-sandbox
 
 Runs every command an agent composes under the macOS sandbox. A command can write only the agent's workspace, and can read only the system, the usual toolchain locations, and paths you list. It's the boundary for an agent you want locked down: the permission engine judges a command's arguments, but a program it approved can still run whatever its config names (git hooks, filters, a repository's `core.sshCommand`). Under this executor, those programs run inside the same walls.
 
@@ -6,7 +6,7 @@ Runs every command an agent composes under the macOS sandbox. A command can writ
 // ~/.stratus/config.json (a trusted config only)
 {
   "plugins": {
-    "stratus-plugin-sandbox": {
+    "@stratusagent/plugin-sandbox": {
       "enabled": true,
       "network": true,                              // default; false cuts every command off the network
       "readPaths": ["~/.stratus/integrations/shared"],

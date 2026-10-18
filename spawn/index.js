@@ -22,7 +22,7 @@ const readMaxTasks = (config) => {
     return DEFAULT_MAX_TASKS;
   }
   if (!Number.isInteger(value) || value < 1 || value > MAX_TASKS_CEILING) {
-    throw new Error(`@stratusagent/tool-spawn: maxTasks must be a whole number from 1 to ${MAX_TASKS_CEILING}.`);
+    throw new Error(`@stratusagent/plugin-spawn: maxTasks must be a whole number from 1 to ${MAX_TASKS_CEILING}.`);
   }
   return value;
 };
@@ -124,7 +124,7 @@ export const createPlugin = (config = {}) => ({
   setup(context) {
     if (!context.subAgents) {
       throw new Error(
-        '@stratusagent/tool-spawn needs a Stratus host that can run sub-agents (PluginContext.subAgents), and this one cannot. Update Stratus.',
+        '@stratusagent/plugin-spawn needs a Stratus host that can run sub-agents (PluginContext.subAgents), and this one cannot. Update Stratus.',
       );
     }
     context.tools.register(createSpawnTool(context.subAgents, config));

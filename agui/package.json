@@ -1,5 +1,5 @@
 {
-  "name": "stratus-plugin-agui",
+  "name": "@stratusagent/plugin-agui",
   "version": "0.0.0-spike",
   "private": true,
   "description": "SPIKE: serve a Stratus agent to AG-UI 1.0 clients (Server-Sent Events over a loopback HTTP endpoint).",

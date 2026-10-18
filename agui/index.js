@@ -395,13 +395,13 @@ export const createPlugin = (config = {}) => ({
   name: 'agui',
   setup(context) {
     if (typeof config.agent !== 'string' || !config.agent) {
-      throw new Error('stratus-plugin-agui needs "agent": the id of the agent AG-UI clients talk to.');
+      throw new Error('@stratusagent/plugin-agui needs "agent": the id of the agent AG-UI clients talk to.');
     }
     if (config.port !== undefined && (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535)) {
-      throw new Error('stratus-plugin-agui: "port" must be a TCP port number.');
+      throw new Error('@stratusagent/plugin-agui: "port" must be a TCP port number.');
     }
     if (!context.channels) {
-      throw new Error('stratus-plugin-agui needs a host that registers channels (PluginContext.channels).');
+      throw new Error('@stratusagent/plugin-agui needs a host that registers channels (PluginContext.channels).');
     }
     context.channels.register({ adapter: createAguiAdapter(config), agents: [config.agent] });
   },

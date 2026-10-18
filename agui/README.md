@@ -1,4 +1,4 @@
-# stratus-plugin-agui (spike)
+# @stratusagent/plugin-agui (spike)
 
 **A spike for Post-V1 #36, "Should Stratus Agent speak AG-UI 1.0?"** Not
 published, not for production. It exists so you can point an AG-UI client
@@ -14,7 +14,7 @@ with a Server-Sent Events stream of AG-UI 1.0 events for one Stratus turn.
 // ~/.stratus/config.json (a trusted config only)
 {
   "plugins": {
-    "stratus-plugin-agui": { "enabled": true, "agent": "blair", "port": 4319, "token": "pick-one" }
+    "@stratusagent/plugin-agui": { "enabled": true, "agent": "blair", "port": 4319, "token": "pick-one" }
   }
 }
 ```

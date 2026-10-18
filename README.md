@@ -57,6 +57,14 @@ published under `@stratusagent`.
 | [`channel-slack`](https://github.com/stratuslabs/agent/tree/main/packages/channel-slack) | Slack as a channel: DMs, mentions, threads, approval buttons | — |
 | [`control-api`](https://github.com/stratuslabs/agent/tree/main/packages/control-api) · [`dashboard`](https://github.com/stratuslabs/agent/tree/main/packages/dashboard) | The HTTP + WebSocket control API, and the web dashboard on it | — |
 
+## In this repository
+
+Plugins that live here rather than in the agent's core.
+
+| Package | Contributes | Notes |
+| --- | --- | --- |
+| [`stratus-plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
+
 ## Third-party
 
 Nothing listed yet. Open a pull request adding a row.

@@ -92,7 +92,10 @@ dot. An SSH host is checked as
 the hostname `ssh -G` resolves it to, given the user and port git connects
 with, so a `Host` or `Match` alias for github.com is caught too; if ssh can't resolve the host, nothing is pushed. A custom ssh
 set in `GIT_SSH_COMMAND` or `core.sshCommand` that reads a different config
-is not followed.
+is not followed, and neither is a `ProxyCommand` or `ProxyJump` that ends
+up at GitHub under another host name. The check is a guard against the
+common mistake, not a guarantee: the repository being private is what
+keeps a backup private.
 Other hosts (GitLab, Bitbucket, your own server) are not checked: making
 sure the repository is private there is up to you.
 

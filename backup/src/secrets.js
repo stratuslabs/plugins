@@ -21,7 +21,11 @@ export const REDACTED = '[redacted by stratus-backup]';
 /** Shorter strings are too likely to be ordinary words to replace everywhere. */
 const MIN_SECRET_LENGTH = 8;
 
-/** Keys in credentials.json that hold a label, not a secret. */
+/**
+ * Fields that hold a label, not a secret, in a credential record: an object
+ * whose `value` is the secret ({ type, value, baseUrl }). Anywhere else (a
+ * named credential called `source`, say) the same key names a secret.
+ */
 const NON_SECRET_KEYS = new Set(['type', 'baseUrl', 'provider', 'kind', 'createdAt', 'updatedAt', 'source']);
 
 const readIfPresent = async (file) => {
@@ -40,18 +44,21 @@ const readIfPresent = async (file) => {
 const isCodexMarker = (key, value) =>
   key === 'codex' && value !== null && typeof value === 'object' && value.type === 'oauth_token' && value.value === 'chatgpt';
 
-const collectStrings = (value, out, key, at, short) => {
+const isCredentialRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) && typeof value.value === 'string';
+
+const collectStrings = (value, out, key, at, short, inRecord = false) => {
   if (typeof value === 'string') {
-    if (NON_SECRET_KEYS.has(key)) return;
+    if (inRecord && key !== 'value' && NON_SECRET_KEYS.has(key)) return;
     const trimmed = value.trim();
     if (trimmed.length >= MIN_SECRET_LENGTH) out.add(trimmed);
     else if (trimmed.length > 0) short.push(at);
   } else if (Array.isArray(value)) {
     value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short));
   } else if (value !== null && typeof value === 'object') {
+    const record = isCredentialRecord(value);
     for (const [childKey, child] of Object.entries(value)) {
       if (isCodexMarker(childKey, child)) continue;
-      collectStrings(child, out, childKey, at ? `${at}.${childKey}` : childKey, short);
+      collectStrings(child, out, childKey, at ? `${at}.${childKey}` : childKey, short, record);
     }
   }
 };
@@ -121,7 +128,8 @@ const SHORT_ESCAPES = new Map([['"', '"'], ['\\', '\\'], ['/', '/'], ['\b', 'b']
 /**
  * One character of a secret, in every spelling a copy can take: its own
  * bytes, each byte percent-encoded (either case of hex digit), a JSON
- * \uXXXX escape (either case) or JSON short escape. An escape may sit under
+ * \uXXXX escape (either case) or JSON short escape, and a space as the
+ * + of form encoding. An escape may sit under
  * any depth of further JSON escaping, so its backslash is "one or more".
  * Matched over the buffer read as latin1, byte for byte.
  */
@@ -133,6 +141,8 @@ const characterPattern = (char) => {
     units.push(`\\\\+u${[...hex].map(hexDigit).join('')}`);
   }
   const alternatives = [bytes, units.join('')];
+  // Form encoding (application/x-www-form-urlencoded) writes a space as +.
+  if (char === ' ') alternatives.push('\\x2B');
   const short = SHORT_ESCAPES.get(char);
   if (short === '\\') alternatives.push('\\\\+');
   else if (short !== undefined) alternatives.push(`\\\\+\\x${hexOf(short.charCodeAt(0), 2)}`);

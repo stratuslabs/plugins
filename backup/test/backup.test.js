@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -406,4 +406,44 @@ test('two allows one after another keep both ids', async () => {
   await allow(home, '0123456789abcdef');
   await allow(home, 'fedcba9876543210');
   assert.deepEqual(JSON.parse(readFileSync(path.join(home, 'backup', 'settings.json'), 'utf8')).allow, ['0123456789abcdef', 'fedcba9876543210']);
+});
+
+test('a credential rotated while the snapshot is read is still replaced in its old value', async () => {
+  const { home, remote } = await setUp();
+  const old = 'rotated-away-secret-value-42';
+  const credentials = JSON.parse(readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+  credentials.named.shared['deploy.key'] = old;
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  appendFileSync(path.join(home, 'agents', 'blair', 'memory.jsonl'), `${JSON.stringify({ id: 'm9', agentId: 'blair', content: `deploy with ${old}` })}\n`);
+  const afterSnapshot = () => {
+    credentials.named.shared['deploy.key'] = 'the-new-secret-after-rotation';
+    writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  };
+  await now(home, { env: {}, fetchImpl: notFound, afterSnapshot });
+  const memory = treeOf(remote, 'refs/heads/mini')['home/agents/blair/memory.jsonl'];
+  assert.ok(!memory.includes(old), memory);
+  assert.ok(memory.includes(REDACTED));
+});
+
+test('a re-init to a new remote drops push URLs origin had, so runs push where they fetch', async () => {
+  const { home, remote } = await setUp();
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.pushurl', remote]);
+  const next = bareRemote();
+  await init(home, next, { branch: 'mini', fetchImpl: notFound });
+  const pushUrls = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', '--push', '--all', 'origin']).toString().trim().split('\n');
+  assert.deepEqual(pushUrls, [next]);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(refOf(next, 'refs/heads/mini'), result.commit);
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('a branch name git would refuse is refused at init, and nothing is saved', async () => {
+  const { home } = makeHome();
+  for (const branch of ['foo..bar', 'foo.lock', 'foo.']) {
+    assert.throws(() => execFileSync('git', ['check-ref-format', '--branch', branch], { stdio: 'ignore' }), undefined, branch);
+    await assert.rejects(init(home, bareRemote(), { branch, fetchImpl: notFound }), /not a usable branch name/, branch);
+  }
+  assert.equal(existsSync(path.join(home, 'backup', 'settings.json')), false);
+  execFileSync('git', ['check-ref-format', '--branch', 'old-mini.2']);
+  await init(home, bareRemote(), { branch: 'old-mini.2', fetchImpl: notFound });
 });

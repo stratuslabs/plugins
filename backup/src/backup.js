@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { BRANCH_PATTERN, commitSnapshot, git, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
+import { commitSnapshot, isUsableBranch, git, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
 import { KEY_PATTERNS, REDACTED, collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
@@ -104,7 +104,7 @@ const assertNoneArePublic = async (remote, repo, fetchImpl) => {
 };
 
 export const init = async (home, remote, { branch = defaultBranch(), fetchImpl } = {}) => {
-  if (!BRANCH_PATTERN.test(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
+  if (!isUsableBranch(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
   await assertNoneArePublic(remote, undefined, fetchImpl);
   await mkdir(backupDir(home), { recursive: true, mode: 0o700 });
   // Changing origin and the settings is one step a running backup must not
@@ -280,7 +280,7 @@ const scanPath = (entryPath) => {
  * Takes a snapshot, replaces every known secret, scans what is left, and
  * commits and pushes it. Returns { commit, pushed, unchanged }.
  */
-export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () => new Date() } = {}) => {
+export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () => new Date(), afterSnapshot } = {}) => {
   await readSettings(home);
   const release = await takeLock(home);
   const startedAt = clock().toISOString();
@@ -288,8 +288,13 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     // Read again under the lock: an init that finished meanwhile may have moved the remote.
     const settings = await readSettings(home);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
+    // The secrets are read before and after the snapshot, and both sets are
+    // replaced: a credential rotated while the files were read may sit in
+    // them in its old value or its new one.
+    const before = await collectKnownSecrets(home);
     const { entries, manifest } = await buildSnapshot(home, { configPath, env, cwd });
-    const needles = needlesFor(await collectKnownSecrets(home));
+    await afterSnapshot?.();
+    const needles = needlesFor(new Set([...before, ...await collectKnownSecrets(home)]));
     let replaced = 0;
     const redacted = entries.map((entry) => {
       const { buffer, count } = redactBuffer(entry.bytes, needles);

@@ -41,6 +41,14 @@ export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) 
 
 export const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * A branch name this accepts: the plain characters above, and git's own ref
+ * rules on top (git check-ref-format): no "..", and no ending in "." or
+ * ".lock". Checked at init so a bad name never reaches the settings.
+ */
+export const isUsableBranch = (branch) =>
+  typeof branch === 'string' && BRANCH_PATTERN.test(branch) && !branch.includes('..') && !branch.endsWith('.') && !branch.endsWith('.lock');
+
 export const localRef = (branch) => `refs/heads/${branch}`;
 const remoteRef = (branch) => `refs/remotes/origin/${branch}`;
 
@@ -54,6 +62,10 @@ export const initRepository = async (repo, remote) => {
   const existing = await git(repo, ['remote', 'get-url', 'origin'], { allowFailure: true });
   if (existing.code === 0) {
     await git(repo, ['remote', 'set-url', 'origin', remote]);
+    // set-url moves only the fetch URL. A push URL left from before would
+    // send every snapshot to the old destination, so the new remote is the
+    // only place origin pushes to.
+    await git(repo, ['config', '--unset-all', 'remote.origin.pushurl'], { allowFailure: true });
   } else {
     await git(repo, ['remote', 'add', 'origin', remote]);
   }

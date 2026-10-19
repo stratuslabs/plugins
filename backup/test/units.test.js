@@ -168,3 +168,26 @@ test('a known secret written with any valid JSON escape spelling is redacted, at
   // An escape is not a licence to change the secret's own letters.
   assert.equal(redactBuffer(Buffer.from('P\\u00e4/SS"WO\\\\RD-1234'), needles).count, 0);
 });
+
+test('a named credential called like a metadata field is still a secret; real record metadata is not', async () => {
+  const { collectKnownSecrets } = await import('../src/secrets.js');
+  const home = tmp();
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'openai-compatible-key-0001', baseUrl: 'http://localhost:11434/v1' },
+    named: { shared: { source: 'arbitrary-secret-123', provider: 'another-secret-456' }, agents: { blair: { kind: 'blair-own-secret-789' } } },
+  }));
+  const secrets = await collectKnownSecrets(home);
+  for (const value of ['openai-compatible-key-0001', 'arbitrary-secret-123', 'another-secret-456', 'blair-own-secret-789']) assert.ok(secrets.has(value), value);
+  assert.equal(secrets.has('http://localhost:11434/v1'), false);
+  assert.equal(secrets.has('api_key'), false);
+});
+
+test('a known secret with spaces written form-encoded, a space as +, is redacted', () => {
+  const secret = 'correct horse battery';
+  const needles = needlesFor(new Set([secret]));
+  for (const form of ['correct+horse+battery', 'correct+horse%20battery']) {
+    const { buffer, count } = redactBuffer(Buffer.from(`q=${form}&x=1`), needles);
+    assert.equal(count, 1, form);
+    assert.equal(buffer.toString(), `q=${REDACTED}&x=1`);
+  }
+});

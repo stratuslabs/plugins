@@ -218,3 +218,21 @@ test('a known secret written in mixed-case hex is redacted', () => {
     assert.equal(buffer.toString(), `before ${REDACTED} after`);
   }
 });
+
+test('a known secret base64-encoded with line wrapping is redacted', () => {
+  // Codex P1 4310391457: GNU base64 wraps at 76 columns by default, and
+  // openssl and PEM at 64, so a long secret's encoding spans lines.
+  const secret = `long-secret-${'x'.repeat(40)}-${'0123456789'.repeat(4)}`;
+  const needles = needlesFor(new Set([secret]));
+  const encoded = Buffer.from(secret).toString('base64');
+  assert.ok(encoded.length > 76);
+  const wrap = (text, width, eol) => text.match(new RegExp(`.{1,${width}}`, 'g')).join(eol);
+  for (const form of [wrap(encoded, 76, '\n'), wrap(encoded, 64, '\n'), wrap(encoded, 76, '\r\n'), `${wrap(encoded, 76, '\n')}\n`]) {
+    const { buffer, count } = redactBuffer(Buffer.from(`before ${form} after`), needles);
+    assert.ok(count >= 1, JSON.stringify(form));
+    const out = buffer.toString();
+    for (const line of form.split(/\r?\n/).filter((l) => l.length >= 8)) {
+      assert.ok(!out.includes(line), `${JSON.stringify(line)} survived: ${out}`);
+    }
+  }
+});

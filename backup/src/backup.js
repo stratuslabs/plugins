@@ -249,8 +249,11 @@ export class FindingsError extends Error {
 const assertPathsHoldNoKnownSecret = (entries, needles) => {
   const leaking = entries
     .map((entry) => redactBuffer(Buffer.from(entry.path), needles))
+    .map((result, index) => ({ ...result, entry: entries[index] }))
     .filter(({ count }) => count > 0)
-    .map(({ buffer }) => `  ${buffer.toString()}`);
+    // Shown as every other path is: a different key-shaped token in the
+    // same name must not ride out in this message.
+    .map(({ entry }) => `  ${shownPath(entry.path, needles)}`);
   if (leaking.length > 0) {
     throw new Error(
       'A file name holds a stored secret, so nothing was committed or pushed:\n'

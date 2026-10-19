@@ -262,6 +262,18 @@ test('a file name holding a known secret or a key-shaped value stops the run wit
   assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
 });
 
+test('a file name holding a known secret and a key-shaped token shows neither', async () => {
+  // Codex P2 4310391464: the known-secret path error ran before the key scan
+  // and showed the other token verbatim.
+  const { home, remote } = await setUp();
+  const token = ['gh', 'p_', 'C'.repeat(36)].join('');
+  mkdirSync(path.join(home, 'skills', 'both'), { recursive: true });
+  writeFileSync(path.join(home, 'skills', 'both', `${NAMED}-${token}.md`), 'harmless\n');
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), (error) =>
+    /file name/.test(error.message) && !error.message.includes(NAMED) && !error.message.includes(token));
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
 test('a known secret with characters JSON escapes is redacted inside a schedule body', async () => {
   const { home, remote } = await setUp();
   const secret = 'quote"back\\slash-0123456789';

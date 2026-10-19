@@ -158,12 +158,28 @@ export const escapePatternOf = (secret) => new RegExp([...secret].map(characterP
 /** The secret as hex, each digit in either case, since encoders differ and some mix them. */
 export const hexPatternOf = (secret) => new RegExp([...Buffer.from(secret).toString('hex')].map(hexDigit).join(''), 'g');
 
+/**
+ * The secret's base64 (standard and URL-safe) with a line break allowed
+ * between any two characters: GNU `base64` wraps at 76 columns by default,
+ * openssl and PEM at 64, so a long secret's encoding spans lines. Padding
+ * is optional, as it is in the contiguous forms.
+ */
+export const wrappedBase64PatternOf = (secret) => {
+  const forms = new Set([
+    Buffer.from(secret).toString('base64').replace(/=+$/, ''),
+    Buffer.from(secret).toString('base64url'),
+  ]);
+  const wrap = '(?:\\r?\\n)?';
+  const body = [...forms].map((form) => [...form].map((char) => char.replace(/[+/\\-]/g, '\\$&')).join(wrap));
+  return new RegExp(`(?:${body.join('|')})(?:${wrap}=){0,2}`, 'g');
+};
+
 /** Builds the replacement list once per run, longest first so no form is left half-replaced, then the escape patterns. */
 export const needlesFor = (secrets) => [
   ...[...new Set([...secrets].flatMap(encodingsOf))]
     .sort((a, b) => b.length - a.length)
     .map((form) => Buffer.from(form)),
-  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).flatMap((secret) => [escapePatternOf(secret), hexPatternOf(secret)]),
+  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).flatMap((secret) => [escapePatternOf(secret), hexPatternOf(secret), wrappedBase64PatternOf(secret)]),
 ];
 
 /**

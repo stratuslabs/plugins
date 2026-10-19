@@ -389,3 +389,83 @@ test('a skills directory swapped for a link while it is walked is not followed',
   assert.ok(!entries.some((entry) => entry.bytes.toString() === 'outside the home'), JSON.stringify(entries.map((e) => e.path)));
   assert.ok(skipped.some((s) => s.path === 'home/skills/notes'), JSON.stringify(skipped));
 });
+
+test('a whitespace-only gateway token stops the run instead of being skipped', async () => {
+  // Codex P2 4314240322: the short-credential rule covered credentials.json
+  // but not gateway-token, so eight spaces left an empty secret set.
+  const { collectKnownSecrets } = await import('../src/secrets.js');
+  for (const blank of ['        ', '\n', ' \t ']) {
+    const home = tmp();
+    writeFileSync(path.join(home, 'gateway-token'), blank);
+    await assert.rejects(collectKnownSecrets(home), /gateway-token is shorter than 8 characters/, JSON.stringify(blank));
+  }
+  const home = tmp();
+  writeFileSync(path.join(home, 'gateway-token'), '');
+  assert.equal((await collectKnownSecrets(home)).size, 0);
+});
+
+test('an agents directory swapped for a link while it is read stops the snapshot', async () => {
+  // Codex P2 4314240337: readdir and the state-file reads followed a
+  // directory replaced by a link after its lstat.
+  const { mkdirSync: mk, renameSync, symlinkSync: link } = await import('node:fs');
+  const { buildSnapshot } = await import('../src/snapshot.js');
+  const { makeHome } = await import('./helpers.js');
+  const outside = tmp();
+  mk(path.join(outside, 'blair'));
+  writeFileSync(path.join(outside, 'blair', 'memory.jsonl'), '{"content":"outside the home"}\n');
+  writeFileSync(path.join(outside, 'blair.md'), 'outside soul\n');
+
+  const swapTo = (target) => (dir) => {
+    renameSync(dir, `${dir}.old`);
+    link(target, dir);
+  };
+  // The agents directory, between its lstat and its listing.
+  {
+    const { home } = makeHome();
+    const agents = path.join(home, 'agents');
+    const hooks = { beforeList: (dir) => dir === agents && swapTo(outside)(dir) };
+    await assert.rejects(buildSnapshot(home, { hooks }), /changed while it was read/);
+  }
+  // Swapped for an empty directory, the listing alone would make a snapshot
+  // with no agents in it, which the next push would commit as deletions.
+  {
+    const { home } = makeHome();
+    const agents = path.join(home, 'agents');
+    const hooks = { beforeList: (dir) => dir === agents && swapTo(tmp())(dir) };
+    await assert.rejects(buildSnapshot(home, { hooks }), /changed while it was read/);
+  }
+  // One agent's directory, between its lstat and its state-file reads.
+  {
+    const { home } = makeHome();
+    const blair = path.join(home, 'agents', 'blair');
+    const hooks = { beforeRead: (file) => file === path.join(blair, 'memory.jsonl') && swapTo(path.join(outside, 'blair'))(blair) };
+    await assert.rejects(buildSnapshot(home, { hooks }), /changed while it was read/);
+  }
+  // Unchanged, the same home snapshots.
+  const { home } = makeHome();
+  const { entries } = await buildSnapshot(home, { hooks: {} });
+  assert.ok(entries.some((entry) => entry.path === 'home/agents/blair/memory.jsonl'));
+});
+
+test('a skill file replaced by a hard link after its lstat is skipped', async () => {
+  // Codex P2 4314240348: readStable returned the replacement's nlink, but
+  // walkSkills discarded it.
+  const { linkSync, mkdirSync: mk, renameSync } = await import('node:fs');
+  const { walkSkills } = await import('../src/snapshot.js');
+  const root = tmp();
+  writeFileSync(path.join(root, 'private.txt'), 'outside the home');
+  const skills = path.join(root, 'skills');
+  mk(skills);
+  const file = path.join(skills, 'SKILL.md');
+  writeFileSync(file, 'inside');
+  const entries = [];
+  const skipped = [];
+  const swap = (target) => {
+    if (target !== file) return;
+    renameSync(target, `${target}.old`);
+    linkSync(path.join(root, 'private.txt'), target);
+  };
+  await walkSkills(skills, 'home/skills', entries, skipped, { beforeRead: swap });
+  assert.ok(!entries.some((entry) => entry.bytes.toString() === 'outside the home'), JSON.stringify(entries.map((e) => e.path)));
+  assert.ok(skipped.some((s) => s.path === 'home/skills/SKILL.md' && s.reason === 'hard link'), JSON.stringify(skipped));
+});

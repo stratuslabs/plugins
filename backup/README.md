@@ -34,7 +34,12 @@ directory, or the file a worktree or submodule has),
 symbolic links (the skills directory itself included), hard-linked files and files that keep changing while read
 are skipped, and each run names what it skipped. A skills directory replaced
 by a link while it is read is skipped too, with anything read through it (a
-swap made and undone between two checks is not seen).
+swap made and undone between two checks is not seen). A file is judged by
+the link count of the file actually opened, so one replaced by a hard link
+after it was checked is skipped as well. The agents directory and each agent's
+directory are rechecked the same way after they are listed and read, but a
+swap there stops the run instead of skipping, since leaving an agent's state
+out would commit it as deleted.
 
 Running `init` again with another remote changes nothing if it fails. If it
 also can't undo its own changes to the backup repository, runs and restores
@@ -54,7 +59,7 @@ encoded form. They need encryption first, which is planned.
    appears in the snapshot: raw, JSON-escaped (in any valid escape spelling, at
    any depth), percent-encoded, base64 (line-wrapped too) and hex (spaced and
    wrapped too, as `od` and `xxd` print it). A file name holding one stops the run instead, since a
-   renamed file would not restore. A stored secret shorter than 8
+   renamed file would not restore. A stored secret (or a nonempty `gateway-token`) shorter than 8
    characters once surrounding whitespace is set aside (so one that is only whitespace) is too likely to be an ordinary word to replace everywhere,
    so it stops the run too, naming where it is stored (Codex's fixed
    `chatgpt` sign-in marker is not a secret and is skipped). In the config, every string under a key named like a credential (`token`,

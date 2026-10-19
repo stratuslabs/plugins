@@ -166,8 +166,14 @@ export const walkSkills = async (dir, relative, entries, skipped, hooks = {}, pa
       skipped.push({ path: rel, reason: 'hard link' });
     } else {
       try {
-        const { bytes, mode } = await readStable(full);
+        await hooks.beforeRead?.(full);
+        const { bytes, mode, nlink } = await readStable(full);
         if (!(await sameDirectories(chain))) throw new UnstableFileError(`${full} moved while it was read.`);
+        // The file opened may not be the one checked above: judge its own link count.
+        if (nlink > 1) {
+          skipped.push({ path: rel, reason: 'hard link' });
+          continue;
+        }
         entries.push({ path: rel, bytes, executable: (mode & 0o111) !== 0 });
       } catch (error) {
         if (!(error instanceof UnstableFileError) && error.code !== 'ELOOP') throw error;
@@ -177,10 +183,23 @@ export const walkSkills = async (dir, relative, entries, skipped, hooks = {}, pa
   }
 };
 
-/** A required state file: missing is fine, anything else unusual fails the run. */
-const addRequired = async (entries, file, rel, options) => {
+/** Fails the run when a directory on the way to a required file was swapped. */
+const assertSameDirectories = async (chain, file) => {
+  if (!(await sameDirectories(chain))) {
+    throw new UnstableFileError(`A directory on the way to ${file} changed while it was read (replaced by a link, say). Not running; try again.`);
+  }
+};
+
+/**
+ * A required state file: missing is fine, anything else unusual fails the
+ * run. `chain` is the directories checked on the way to it, rechecked after
+ * the read, since open follows a directory swapped for a link.
+ */
+const addRequired = async (entries, file, rel, { chain = [], hooks = {}, ...options } = {}) => {
   if (!(await exists(file))) return undefined;
+  await hooks.beforeRead?.(file);
   const { bytes, mode, nlink } = await readStable(file, options);
+  await assertSameDirectories(chain, file);
   if (nlink > 1) throw new Error(`${file} has another hard link. Break the link (copy the file over itself) and try again.`);
   entries.push({ path: rel, bytes, executable: false });
   return { bytes, mode };
@@ -204,7 +223,7 @@ export const exportSchedules = (fleetDb) => {
  * the config, which is redacted structurally here) and the manifest facts
  * restore needs.
  */
-export const buildSnapshot = async (home, { configPath, env, cwd } = {}) => {
+export const buildSnapshot = async (home, { configPath, env, cwd, hooks = {} } = {}) => {
   await assertMigrated(home);
   const entries = [];
   const skipped = [];
@@ -239,23 +258,29 @@ export const buildSnapshot = async (home, { configPath, env, cwd } = {}) => {
 
   const agentsDir = path.join(home, 'agents');
   let agentNames = [];
+  let agentsChain = [];
   try {
     const info = await lstat(agentsDir);
     if (info.isSymbolicLink()) throw new Error(`${agentsDir} is a symbolic link, which Stratus itself refuses. Not running.`);
+    agentsChain = [{ dir: agentsDir, dev: info.dev, ino: info.ino }];
+    await hooks.beforeList?.(agentsDir);
     agentNames = (await readdir(agentsDir)).sort();
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
+  // readdir follows a directory swapped for a link after its lstat.
+  await assertSameDirectories(agentsChain, agentsDir);
   for (const name of agentNames) {
     const full = path.join(agentsDir, name);
     const info = await lstat(full);
     if (name.endsWith('.md')) {
       // A soul may be a link: templates keep a soul edited in its own checkout.
-      const soul = await addRequired(entries, full, `home/agents/${name}`, { follow: true });
+      const soul = await addRequired(entries, full, `home/agents/${name}`, { follow: true, chain: agentsChain, hooks });
       if (soul && !frontmatterHasId(soul.bytes.toString('utf8'))) manifest.soulsWithoutId.push(name);
     } else if (info.isDirectory() && AGENT_ID.test(name)) {
+      const chain = [...agentsChain, { dir: full, dev: info.dev, ino: info.ino }];
       for (const file of ['memory.jsonl', 'whitelist.json']) {
-        await addRequired(entries, path.join(full, file), `home/agents/${name}/${file}`);
+        await addRequired(entries, path.join(full, file), `home/agents/${name}/${file}`, { chain, hooks });
       }
     } else if (info.isSymbolicLink() && !name.endsWith('.md')) {
       throw new Error(`${full} is a symbolic link, which Stratus itself refuses. Not running.`);

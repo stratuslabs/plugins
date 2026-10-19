@@ -137,7 +137,9 @@ export const collectKnownSecrets = async (home) => {
     }
   }
   const token = await readIfPresent(path.join(home, 'gateway-token'));
-  if (token !== undefined && token.trim().length > 0) {
+  // The same rule as credentials.json: an empty file holds nothing, but a
+  // nonempty one that trims short (whitespace only, say) still stops the run.
+  if (token !== undefined && token.length > 0) {
     if (token.trim().length < MIN_SECRET_LENGTH) {
       throw new Error(`The control API token in gateway-token is shorter than ${MIN_SECRET_LENGTH} characters, too short to redact safely, so the backup stops. Rotate it to a longer token.`);
     }

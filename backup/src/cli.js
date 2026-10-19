@@ -1,17 +1,21 @@
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { allow, assertRepositoryMatches, init, now, readSettings, repoDir, shownRemote, status, takeLock } from './backup.js';
+import { keygen } from './encrypt.js';
 import { restore } from './restore.js';
 import { commandFor, disable, enable, parseTime } from './timer.js';
 
 const USAGE = `stratus-backup: a nightly copy of ~/.stratus in a private git repository
 
-  stratus-backup init <remote> [--branch <name>]   set up; one branch per machine (default: hostname)
+  stratus-backup keygen --out <file>               make an age identity; keep the file off this machine
+  stratus-backup init <remote> --recipient <age1...> [--branch <name>]
+                                                   set up encrypted backups; one branch per machine (default: hostname)
+  stratus-backup init <remote> --plaintext         set up readable backups that only redaction protects
   stratus-backup now [--config <file>]             snapshot, redact, commit, push
   stratus-backup status                            the remote, the branch, the last run
-  stratus-backup restore <dir> [--commit <sha>] [--remote <url> --branch <name>] [--offline]
+  stratus-backup restore <dir> [--identity <file>] [--commit <sha>] [--remote <url> --branch <name>] [--offline]
                                                    restore into an empty or new directory
   stratus-backup enable [--at 03:30] [--dry-run]   run nightly from launchd or systemd
   stratus-backup disable                           remove the nightly run
@@ -29,6 +33,10 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
       config: { type: 'string' },
       commit: { type: 'string' },
       offline: { type: 'boolean' },
+      identity: { type: 'string' },
+      out: { type: 'string' },
+      plaintext: { type: 'boolean', default: false },
+      recipient: { type: 'string', multiple: true },
       remote: { type: 'string' },
       at: { type: 'string', default: '03:30' },
       'dry-run': { type: 'boolean', default: false },
@@ -42,9 +50,19 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     return;
   }
   switch (command) {
+    case 'keygen': {
+      if (!values.out) throw new Error('Name where to write the identity: stratus-backup keygen --out <file>');
+      const file = path.resolve(cwd, values.out);
+      const { recipient } = await keygen(file);
+      out(`Wrote an age identity to ${file}.`);
+      out(`Its public key: ${recipient}`);
+      out('Move that file off this machine (a password manager, say): it is the only way to read the backups, and nothing here needs it.');
+      out(`Then: stratus-backup init <remote> --recipient ${recipient}`);
+      return;
+    }
     case 'init': {
-      if (!argument) throw new Error('Name the private repository: stratus-backup init <remote>');
-      const result = await init(home, argument, { branch: values.branch });
+      if (!argument) throw new Error('Name the private repository: stratus-backup init <remote> --recipient <age1...>');
+      const result = await init(home, argument, { branch: values.branch, recipients: values.recipient, plaintext: values.plaintext });
       out(`Backing up ${home} to ${shownRemote(argument)}, branch ${result.branch}${result.adopted ? ' (continuing its existing history)' : ''}.`);
       out('Run `stratus-backup now` to take the first snapshot, and `stratus-backup enable` to run it nightly.');
       return;
@@ -55,6 +73,9 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
       out(result.unchanged ? `No changes since the last snapshot (${head}).` : `Snapshot ${head} committed.`);
       out(result.pushed ? 'Pushed.' : 'Remote already up to date.');
       if (result.replaced > 0) out(`Replaced ${result.replaced} occurrence(s) of stored secrets.`);
+      for (const warning of result.warnings ?? []) {
+        out(`Warning: ${warning.file}:${warning.line} holds text shaped like a ${warning.kind}. It is encrypted in the backup; remove it at the source if it is a real secret.`);
+      }
       for (const item of result.skipped) out(`Skipped ${item.path}: ${item.reason}.`);
       if (result.manifest.soulsWithoutId.length > 0) {
         out(`Souls with no id or name in their frontmatter (${result.manifest.soulsWithoutId.join(', ')}) get an id from their file path, `
@@ -68,7 +89,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
         out('Not set up. Run `stratus-backup init <remote>`.');
         return;
       }
-      out(`Remote ${shownRemote(result.settings.remote)}, branch ${result.settings.branch}.`);
+      out(`Remote ${shownRemote(result.settings.remote)}, branch ${result.settings.branch}, ${result.settings.recipients?.length ? `encrypted to ${result.settings.recipients.length} recipient(s)` : 'plaintext'}.`);
       if (!result.last) out('No run yet.');
       else if (result.last.ok) out(`Last run ${result.last.lastRun}: ok, ${result.last.commit?.slice(0, 12)}${result.last.pushed ? ', pushed' : ''}.`);
       else out(`Last run ${result.last.lastRun}: FAILED. ${result.last.error}`);
@@ -76,9 +97,12 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     }
     case 'restore': {
       if (!argument) throw new Error('Name the directory to restore into: stratus-backup restore <dir>');
+      // The identity is read here and handed to restore; it is never stored.
+      const identityFile = values.identity ?? env.STRATUS_BACKUP_IDENTITY;
+      const identity = identityFile ? readFileSync(path.resolve(cwd, identityFile), 'utf8') : undefined;
       let result;
       if (values.remote) {
-        result = await restore(path.resolve(cwd, argument), { remote: values.remote, branch: values.branch, commit: values.commit, offline: values.offline === true });
+        result = await restore(path.resolve(cwd, argument), { remote: values.remote, branch: values.branch, commit: values.commit, offline: values.offline === true, identity });
       } else {
         // This machine's repository is the one init and runs change, so a
         // restore from it holds their lock from reading the settings on.
@@ -89,7 +113,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
           // The same stop a run obeys: a repository a failed init could not
           // undo may hold another remote's history.
           await assertRepositoryMatches(home, settings.remote);
-          result = await restore(path.resolve(cwd, argument), { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true });
+          result = await restore(path.resolve(cwd, argument), { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true, identity });
         } finally {
           await release();
         }

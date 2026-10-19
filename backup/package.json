@@ -1,15 +1,29 @@
 {
   "name": "@stratusagent/plugin-backup",
   "version": "0.1.0",
-  "description": "A nightly, model-free copy of a Stratus home in a private git repository, with every stored secret replaced before commit.",
+  "description": "A nightly, model-free copy of a Stratus home in a private git repository, encrypted with age before it is committed.",
   "type": "module",
-  "bin": { "stratus-backup": "./bin/stratus-backup.js" },
+  "bin": {
+    "stratus-backup": "./bin/stratus-backup.js"
+  },
   "exports": "./src/backup.js",
-  "files": ["bin", "src", "README.md"],
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
   "license": "MIT",
-  "engines": { "node": ">=22.13" },
-  "os": ["darwin", "linux"],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "scripts": {
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "age-encryption": "0.3.1"
   }
 }

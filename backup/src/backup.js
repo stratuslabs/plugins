@@ -8,13 +8,15 @@ import { execFileSync } from 'node:child_process';
 import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, restoreRefs, revParse, saveBranchRefs, syncWithRemote } from './git.js';
+import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, listTree, localRef, push, restoreRefs, revParse, saveBranchRefs, syncWithRemote, writeBlob } from './git.js';
+import { assertRecipients, encryptSnapshot, isEncryptedTree } from './encrypt.js';
 import { KEY_PATTERNS, REDACTED, collectKnownSecrets, credentialSourcesState, needlesFor, redactBuffer, scanBuffer, scanLimits } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
 export const backupDir = (home) => path.join(home, 'backup');
 const settingsFile = (home) => path.join(backupDir(home), 'settings.json');
 const statusFile = (home) => path.join(backupDir(home), 'status.json');
+const encryptionCacheFile = (home) => path.join(backupDir(home), 'encryption-cache.json');
 // Left by a re-init whose rollback did not finish: the repository may hold
 // refs or an origin from the remote it did not switch to, so runs stop until
 // an init succeeds.
@@ -218,8 +220,39 @@ const pushUrlsOf = async (repo) => {
   return result.code === 0 ? result.stdout.split('\n').filter(Boolean) : [];
 };
 
-export const init = async (home, remote, { branch = defaultBranch(), fetchImpl, beforeArm, afterRepositoryChanged } = {}) => {
+/** Whether these settings make encrypted snapshots. Settings from before encryption existed are plaintext. */
+export const isEncrypted = (settings) => Array.isArray(settings?.recipients) && settings.recipients.length > 0;
+
+/**
+ * Refuses a branch whose snapshots are in the other format: its history
+ * stays as it is whatever comes next, so plaintext commits would sit under
+ * encrypted ones (or the reverse) and look protected when they are not.
+ */
+const assertBranchFormat = async (repo, branch, encrypted) => {
+  const tip = await revParse(repo, localRef(branch));
+  if (tip === undefined) return;
+  const holdsEncrypted = isEncryptedTree((await listTree(repo, tip)).map((item) => item.path));
+  if (holdsEncrypted === encrypted) return;
+  throw new Error(
+    holdsEncrypted
+      ? `Branch ${branch} holds encrypted snapshots. Plaintext ones would sit in the same history; use a new branch (--branch) or a new repository for them.`
+      : `Branch ${branch} already holds plaintext snapshots, and they stay readable in its history whatever comes after. `
+        + 'Use a new branch (--branch) or a new repository for encrypted backups, and delete the old branch once you have moved.',
+  );
+};
+
+export const init = async (home, remote, { branch = defaultBranch(), recipients, plaintext = false, fetchImpl, beforeArm, afterRepositoryChanged } = {}) => {
   if (!isUsableBranch(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
+  if (plaintext && recipients?.length > 0) throw new Error('Pick one: --recipient for encrypted snapshots, or --plaintext.');
+  if (!plaintext) {
+    if (!recipients?.length) {
+      throw new Error(
+        'Backups are encrypted by default. Run `stratus-backup keygen --out <file>`, keep that file somewhere other than this machine, '
+          + 'and init again with --recipient <the age1... key it prints>. Or pass --plaintext for a readable backup that only redaction protects.',
+      );
+    }
+    assertRecipients(recipients);
+  }
   await assertNoneArePublic(remote, undefined, fetchImpl);
   await mkdir(backupDir(home), { recursive: true, mode: 0o700 });
   // Changing origin and the settings is one step a running backup must not
@@ -252,7 +285,8 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl, 
       await afterRepositoryChanged?.();
       await assertNoneArePublic(remote, repo, fetchImpl);
       ({ remote: existing } = await syncWithRemote(repo, branch));
-      await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
+      await assertBranchFormat(repo, branch, !plaintext);
+      await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [], ...(plaintext ? { plaintext: true } : { recipients }) });
     } catch (error) {
       // Settings are not changed, so the repository must not be either: the
       // branch refs go back, and origin is put back to the remote the
@@ -515,8 +549,10 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     };
     // The CLI prints from the returned manifest, so it is the redacted one.
     const shownManifest = JSON.parse(manifestEntry.bytes.toString('utf8'));
+    const encrypted = isEncrypted(settings);
     redacted.push(manifestEntry);
-    assertPathsHoldNoKnownSecret(redacted, needles);
+    // An encrypted snapshot commits paths only inside its ciphertext index.
+    if (!encrypted) assertPathsHoldNoKnownSecret(redacted, needles);
     const allowed = new Set(settings.allow);
     const findings = redacted
       // A content finding names its file too, so the file is shown the way a
@@ -526,11 +562,37 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
         ...scanPath(entry.path),
       ])
       .filter((f) => !allowed.has(f.id));
-    if (findings.length > 0) throw new FindingsError(findings);
+    // Ciphertext is the guarantee for an encrypted snapshot, so a finding
+    // there is reported, not a reason to skip the night's backup.
+    if (findings.length > 0 && !encrypted) throw new FindingsError(findings);
+    const warnings = encrypted ? findings : [];
 
     const repo = repoDir(home);
     const { remote } = await syncWithRemote(repo, settings.branch);
-    const commit = await commitSnapshot(repo, settings.branch, redacted, `Snapshot ${startedAt}`);
+    await assertBranchFormat(repo, settings.branch, encrypted);
+    let staged = redacted;
+    let saveCache;
+    if (encrypted) {
+      const parent = await revParse(repo, localRef(settings.branch));
+      const parentTree = new Map(parent === undefined ? [] : (await listTree(repo, parent)).map((item) => [item.path, item.oid]));
+      const sealed = await encryptSnapshot({
+        entries: redacted.filter((entry) => entry !== manifestEntry),
+        manifest: shownManifest,
+        recipients: settings.recipients,
+        cacheFile: encryptionCacheFile(home),
+        parentTree,
+      });
+      const oids = new Map();
+      staged = [];
+      for (const entry of sealed.entries) {
+        const oid = entry.oid ?? (await writeBlob(repo, entry.bytes));
+        oids.set(entry.path, oid);
+        staged.push({ path: entry.path, oid, executable: false });
+      }
+      saveCache = () => sealed.saveCache((file) => oids.get(file));
+    }
+    const commit = await commitSnapshot(repo, settings.branch, staged, `Snapshot ${startedAt}`);
+    await saveCache?.();
     const head = await revParse(repo, localRef(settings.branch));
     const pushed = head !== remote;
     if (pushed) {
@@ -541,7 +603,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     }
     // Skipped paths are printed and logged, so they get the same redaction the manifest did.
     const skipped = manifest.skipped.map((item) => ({ ...item, path: shownPath(item.path, needles) }));
-    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest: shownManifest };
+    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest: shownManifest, encrypted, warnings };
     await writeJson(statusFile(home), { lastRun: startedAt, ok: true, commit: head, pushed, unchanged: result.unchanged, skipped: manifest.skipped.length });
     return result;
   } catch (error) {

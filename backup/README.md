@@ -6,10 +6,37 @@ it runs whether or not the daemon is up.
 
 ```bash
 npm install -g @stratusagent/plugin-backup   # installs the stratus-backup command
-stratus-backup init git@github.com:you/stratus-home-backup.git   # one branch per machine, named after the host
+stratus-backup keygen --out ~/backup-identity.txt                 # prints its public key, age1...
+# Move backup-identity.txt off this machine (a password manager). Lose it and the backups are unreadable.
+stratus-backup init git@github.com:you/stratus-home-backup.git --recipient age1...   # one branch per machine, named after the host
 stratus-backup now                                                # first snapshot
 stratus-backup enable                                             # every night at 03:30 (--at to change)
 ```
+
+## Encrypted by default
+
+Every file of a snapshot is encrypted with [age](https://age-encryption.org)
+on this machine before it is committed, to the recipients (public keys)
+given to `init`. The remote holds a `format.json` marker, an encrypted index,
+and one encrypted blob per file under a random name, so not even file names
+are readable there. This machine never holds the identity (private key)
+that decrypts them: only the operator does, for restore. A lost identity is
+a lost backup.
+
+Unchanged files keep their ciphertext, so a quiet night still makes no
+commit. A local `backup/encryption-cache.json` (never committed) remembers
+which blob holds which file. Changing the recipients (`init` again with a
+new `--recipient`) re-encrypts everything on the next run. Old commits stay
+encrypted to the old key until the branch is deleted. Pass `--recipient`
+more than once to encrypt to several keys, for example yours and an offline
+spare.
+
+`init --plaintext` makes readable snapshots instead, protected only by
+redaction (below), which can't catch every form a secret can take. A branch
+never switches between the two: its history would keep the old format, so
+`init` refuses and asks for a new branch or repository. The format uses the
+standard age file format (X25519 recipients), via the reference
+TypeScript implementation (`age-encryption`).
 
 Requires Node 22.13 or later and `git` on the PATH, with push access to the
 repository already set up (an SSH key or a credential helper). macOS and
@@ -49,10 +76,15 @@ from a fresh repository and moves the old one aside to
 `backup/repo.suspect-<time>`, never deleting it.
 
 **Sessions and workspaces are not backed up yet.** They hold arbitrary tool
-output, and a scan cannot promise to find a secret a tool wrote in some
-encoded form. They need encryption first, which is planned.
+output, and they are the largest state in a home. Encryption (above) makes
+them safe to push; the size and database-consistency work is still to do.
 
 ## How secrets are kept out
+
+Both layers run on every snapshot. On an encrypted branch they are defense
+in depth: a scan finding is printed as a warning and the backup still runs,
+because ciphertext is the guarantee. On a plaintext branch they are the
+only protection, and a finding stops the run.
 
 1. **Replacement.** Every value in `credentials.json`, and the control API
    token, is replaced with `[redacted by stratus-backup]` wherever it
@@ -117,8 +149,15 @@ also in `~/.stratus/logs/backup.log`; on Linux it is in the user journal.
 ## Restoring
 
 ```bash
-stratus-backup restore ~/restored-home --remote git@github.com:you/stratus-home-backup.git --branch old-mini
+stratus-backup restore ~/restored-home --remote git@github.com:you/stratus-home-backup.git --branch old-mini \
+  --identity ~/backup-identity.txt
 ```
+
+An encrypted backup needs its identity: `--identity <file>`, or a file
+named by `STRATUS_BACKUP_IDENTITY`. It is read for the restore and never
+stored. Every file is decrypted and checked against the checksum in the
+encrypted index before the first one is written, so a wrong identity or a
+tampered blob leaves the target empty.
 
 Restore writes only into an empty or new directory, never over a home, and
 only plain files under the snapshot's `home/`. Add `--commit <sha>` for an
@@ -140,7 +179,8 @@ about each such soul; add an `id:` to it.
 
 ## Not yet
 
-- Sessions and workspaces (needs encryption).
+- Sessions and workspaces. Encryption makes them safe to push; they still
+  need their own size and database-consistency work.
 - A memory store other than the built-in file store. `now` refuses rather
   than back up no memories.
 - The memory index's recall counts.

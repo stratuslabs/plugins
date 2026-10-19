@@ -150,6 +150,9 @@ export const syncWithRemote = async (repo, branch) => {
   return { remote };
 };
 
+/** Stores bytes as a blob, with no filter applied, and returns its oid. */
+export const writeBlob = async (repo, bytes) => (await git(repo, ['hash-object', '-w', '--no-filters', '--stdin'], { input: bytes })).stdout.trim();
+
 /**
  * Commits the entries as the branch's next snapshot. Returns the new commit,
  * or undefined when the tree is identical to the last one.
@@ -160,8 +163,10 @@ export const commitSnapshot = async (repo, branch, entries, message) => {
   try {
     const lines = [];
     for (const entry of [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
-      const { stdout } = await git(repo, ['hash-object', '-w', '--no-filters', '--stdin'], { input: entry.bytes });
-      lines.push(`${entry.executable ? '100755' : '100644'} ${stdout.trim()}\t${entry.path}`);
+      // An entry may name a blob already in the repository (an encrypted
+      // file whose plaintext did not change keeps its ciphertext).
+      const oid = entry.oid ?? (await writeBlob(repo, entry.bytes));
+      lines.push(`${entry.executable ? '100755' : '100644'} ${oid}\t${entry.path}`);
     }
     await git(repo, ['update-index', '-z', '--add', '--index-info'], {
       input: Buffer.from(lines.map((line) => `${line}\0`).join('')),

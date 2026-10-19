@@ -11,7 +11,7 @@ const USAGE = `stratus-backup: a nightly copy of ~/.stratus in a private git rep
   stratus-backup init <remote> [--branch <name>]   set up; one branch per machine (default: hostname)
   stratus-backup now [--config <file>]             snapshot, redact, commit, push
   stratus-backup status                            the remote, the branch, the last run
-  stratus-backup restore <dir> [--commit <sha>] [--remote <url> --branch <name>]
+  stratus-backup restore <dir> [--commit <sha>] [--remote <url> --branch <name>] [--offline]
                                                    restore into an empty or new directory
   stratus-backup enable [--at 03:30] [--dry-run]   run nightly from launchd or systemd
   stratus-backup disable                           remove the nightly run
@@ -28,6 +28,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
       branch: { type: 'string' },
       config: { type: 'string' },
       commit: { type: 'string' },
+      offline: { type: 'boolean' },
       remote: { type: 'string' },
       at: { type: 'string', default: '03:30' },
       'dry-run': { type: 'boolean', default: false },
@@ -75,10 +76,10 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     }
     case 'restore': {
       if (!argument) throw new Error('Name the directory to restore into: stratus-backup restore <dir>');
-      let options = { remote: values.remote, branch: values.branch, commit: values.commit };
+      let options = { remote: values.remote, branch: values.branch, commit: values.commit, offline: values.offline === true };
       if (!values.remote) {
         const settings = await readSettings(home);
-        options = { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit };
+        options = { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true };
       }
       const result = await restore(path.resolve(cwd, argument), options);
       out(`Restored ${result.commit.slice(0, 12)} into ${path.resolve(cwd, argument)}.`);

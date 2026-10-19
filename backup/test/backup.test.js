@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -175,6 +175,20 @@ test('restore rebuilds the home in an empty directory, schedules included', asyn
   assert.ok(!readdirSync(target).includes('manifest.json'));
   assert.deepEqual(result.manifest.redactedConfigPaths, ['plugins.@stratusagent/tool-shell.env.DEPLOY_KEY']);
   assert.deepEqual(readdirSync(path.dirname(target)), ['restored'], 'no staging directory is left behind');
+});
+
+test('restore stops when it cannot check the remote for newer snapshots, unless asked to go offline', async () => {
+  // Codex P1 4310180288: an unreachable origin silently restored the
+  // cached local branch, which may be older than what the remote holds.
+  const { home, remote } = await setUp();
+  const snapshot = await now(home, { env: {}, fetchImpl: notFound });
+  renameSync(remote, `${remote}.away`);
+  const target = path.join(tmp(), 'restored');
+  await assert.rejects(restore(target, { repo: repoDir(home), branch: 'mini' }), /Could not check origin for newer snapshots.*--offline/s);
+  assert.ok(!existsSync(target), 'nothing restored');
+  assert.deepEqual(readdirSync(path.dirname(target)), [], 'no staging directory is left behind');
+  const result = await restore(target, { repo: repoDir(home), branch: 'mini', offline: true });
+  assert.equal(result.commit, snapshot.commit, 'the local copy, on request');
 });
 
 test('restore never writes into a directory that holds anything', async () => {

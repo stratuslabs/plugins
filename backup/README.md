@@ -83,7 +83,9 @@ stratus-backup restore ~/restored-home --remote git@github.com:you/stratus-home-
 
 Restore writes only into an empty or new directory, never over a home, and
 only plain files under the snapshot's `home/`. Add `--commit <sha>` for an
-older snapshot. Then, with the daemon stopped, move the directory to
+older snapshot. If the remote can't be reached, restore stops rather than
+bring back a copy that may be older than the remote's; `--offline` restores
+the latest snapshot this machine already has. Then, with the daemon stopped, move the directory to
 `~/.stratus`, run `stratus setup` to sign in again, and re-add Slack tokens
 and named credentials. Restore lists the config values that were redacted.
 The memory index rebuilds itself. Recall counts are not kept.

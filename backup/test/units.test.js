@@ -17,6 +17,18 @@ test('a known secret is replaced in each encoding a copy commonly takes', () => 
   }
 });
 
+test('a secret that is part of the redaction marker is never written back by it', () => {
+  // Codex P1 4310180286: replacing `stratus-backup` with a marker that
+  // contains `stratus-backup` left the secret in the snapshot.
+  for (const secrets of [['stratus-backup'], ['redacted by'], ['redacted'], ['stratus-backup', 'redacted', '[removed]']]) {
+    const needles = needlesFor(new Set(secrets));
+    const { buffer, count } = redactBuffer(Buffer.from(`a ${secrets.join(' and ')} z [redacted by stratus-backup]`), needles);
+    const out = buffer.toString();
+    assert.ok(count > 0, secrets.join(','));
+    for (const secret of secrets) assert.ok(!out.includes(secret), `${secret} survived: ${out}`);
+  }
+});
+
 test('config values under credential-like keys and in env blocks are redacted, others kept', () => {
   const { config, replaced } = redactConfig({
     provider: 'anthropic',

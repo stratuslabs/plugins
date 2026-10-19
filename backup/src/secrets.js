@@ -166,17 +166,38 @@ export const needlesFor = (secrets) => [
   ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).flatMap((secret) => [escapePatternOf(secret), hexPatternOf(secret)]),
 ];
 
-const replacement = Buffer.from(REDACTED);
+/**
+ * Markers in order of preference. The empty one contains no secret by
+ * construction, so one of them always qualifies.
+ */
+const MARKERS = [REDACTED, '[redacted]', '[removed]', '***', ''];
 
-/** Replaces every needle in a buffer. Works on bytes, so binary files are covered too. */
-export const redactBuffer = (buffer, needles) => {
+const matches = (needle, text) => {
+  if (needle instanceof RegExp) {
+    needle.lastIndex = 0;
+    const found = needle.test(text);
+    needle.lastIndex = 0;
+    return found;
+  }
+  return Buffer.from(text).includes(needle);
+};
+
+/**
+ * Codex P1 4310180286: the marker must not itself contain a secret, or
+ * replacing `stratus-backup` with `[redacted by stratus-backup]` writes the
+ * secret straight back. The first marker no needle matches is used.
+ */
+const markerFor = (needles) => MARKERS.find((marker) => !needles.some((needle) => matches(needle, marker)));
+
+const redactPass = (buffer, needles, marker) => {
+  const replacement = Buffer.from(marker);
   let current = buffer;
   let count = 0;
   for (const needle of needles) {
     if (needle instanceof RegExp) {
       const text = current.toString('latin1');
       let found = 0;
-      const replaced = text.replace(needle, () => { found += 1; return REDACTED; });
+      const replaced = text.replace(needle, () => { found += 1; return marker; });
       if (found > 0) {
         count += found;
         current = Buffer.from(replaced, 'latin1');
@@ -197,6 +218,25 @@ export const redactBuffer = (buffer, needles) => {
     current = Buffer.concat(parts);
   }
   return { buffer: current, count };
+};
+
+/**
+ * Replaces every needle in a buffer. Works on bytes, so binary files are
+ * covered too. Passes repeat until one finds nothing, since a replacement
+ * can join the text around it into a new occurrence; a buffer that will
+ * not come clean is refused rather than written with a secret in it.
+ */
+export const redactBuffer = (buffer, needles) => {
+  const marker = markerFor(needles);
+  let current = buffer;
+  let count = 0;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const result = redactPass(current, needles, marker);
+    if (result.count === 0) return { buffer: current, count };
+    current = result.buffer;
+    count += result.count;
+  }
+  throw new Error('A known secret kept reappearing while it was being redacted; not writing this file.');
 };
 
 /** Shapes of well-known keys. Names only: a finding never carries the match. */

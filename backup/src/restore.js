@@ -41,7 +41,7 @@ const writeSchedules = (file, jsonl) => {
  * repository, or of `remote`/`branch` when this machine has none, into
  * `target`. Returns the manifest so the caller can say what to re-enter.
  */
-export const restore = async (target, { repo, remote, branch, commit } = {}) => {
+export const restore = async (target, { repo, remote, branch, commit, offline = false } = {}) => {
   const destination = path.resolve(target);
   if (!(await isEmptyOrAbsent(destination))) {
     throw new Error(`${destination} is not empty. Restore only writes into an empty or new directory, never over a home.`);
@@ -60,6 +60,14 @@ export const restore = async (target, { repo, remote, branch, commit } = {}) => 
   try {
     if (branch !== undefined) {
       const listed = await git(repo, ['ls-remote', '--heads', 'origin', branch], { allowFailure: true });
+      if (listed.code !== 0 && !offline) {
+        // Restoring what this machine cached when the remote may hold newer
+        // snapshots would bring back stale state and call it a recovery.
+        throw new Error(
+          'Could not check origin for newer snapshots (git ls-remote failed). Not restoring a copy that may be stale; '
+            + 'rerun when the remote is reachable, or pass --offline to restore the latest snapshot this machine has.',
+        );
+      }
       if (listed.code === 0 && listed.stdout.trim()) await syncWithRemote(repo, branch);
     }
     const ref = commit ?? (branch !== undefined ? `refs/heads/${branch}` : undefined);

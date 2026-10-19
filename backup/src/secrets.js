@@ -22,9 +22,9 @@ export const REDACTED = '[redacted by stratus-backup]';
 const MIN_SECRET_LENGTH = 8;
 
 /**
- * Fields that hold a label, not a secret, in a credential record: an object
- * whose `value` is the secret ({ type, value, baseUrl }). Anywhere else (a
- * named credential called `source`, say) the same key names a secret.
+ * Fields that hold a label, not a secret, in a credential record
+ * ({ type, value, baseUrl }). Anywhere else (a named credential called
+ * `source`, say) the same key names a secret.
  */
 const NON_SECRET_KEYS = new Set(['type', 'baseUrl', 'provider', 'kind', 'createdAt', 'updatedAt', 'source']);
 
@@ -44,9 +44,28 @@ const readIfPresent = async (file) => {
 const isCodexMarker = (key, value) =>
   key === 'codex' && value !== null && typeof value === 'object' && value.type === 'oauth_token' && value.value === 'chatgpt';
 
-const isCredentialRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) && typeof value.value === 'string';
+/**
+ * Top-level namespaces of credentials.json that hold no credential records:
+ * named credentials and channel tokens are maps of name to secret string, so
+ * a name like `value` or `source` there is a secret, never a label.
+ */
+const NAMESPACES = new Set(['named', 'channels', 'agentSignIns']);
 
-const collectStrings = (value, out, key, at, short, inRecord = false) => {
+/** A stored sign-in as the runtime writes it: { type, value, baseUrl? }. */
+const isCredentialRecord = (value) =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+  && (value.type === 'api_key' || value.type === 'oauth_token') && typeof value.value === 'string';
+
+/**
+ * Whether the object at this path is in a place credential records live: a
+ * provider sign-in at the top level, or agentSignIns.<agent>.<provider>.
+ * Location first, then shape, so a map of named secrets that happens to hold
+ * one called `value` is never mistaken for a record.
+ */
+const isRecordLocation = (keys) =>
+  (keys.length === 1 && !NAMESPACES.has(keys[0])) || (keys.length === 3 && keys[0] === 'agentSignIns');
+
+const collectStrings = (value, out, key, at, short, inRecord = false, keys = []) => {
   if (typeof value === 'string') {
     if (inRecord && key !== 'value' && NON_SECRET_KEYS.has(key)) return;
     // The exact value is the secret: its encodings include any surrounding
@@ -57,12 +76,12 @@ const collectStrings = (value, out, key, at, short, inRecord = false) => {
       out.add(trimmed);
     } else if (value.length > 0) short.push(at); // whitespace-only counts as short too
   } else if (Array.isArray(value)) {
-    value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short));
+    value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short, false, [...keys, null]));
   } else if (value !== null && typeof value === 'object') {
-    const record = isCredentialRecord(value);
+    const record = isRecordLocation(keys) && isCredentialRecord(value);
     for (const [childKey, child] of Object.entries(value)) {
-      if (isCodexMarker(childKey, child)) continue;
-      collectStrings(child, out, childKey, at ? `${at}.${childKey}` : childKey, short, record);
+      if (isRecordLocation([...keys, childKey]) && isCodexMarker(childKey, child)) continue;
+      collectStrings(child, out, childKey, at ? `${at}.${childKey}` : childKey, short, record, [...keys, childKey]);
     }
   }
 };

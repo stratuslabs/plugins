@@ -194,6 +194,33 @@ test('a named credential called like a metadata field is still a secret; real re
   assert.equal(secrets.has('api_key'), false);
 });
 
+test('credential records are recognized by where they live, not by a value field (Codex P1 4313378708)', async () => {
+  const { collectKnownSecrets } = await import('../src/secrets.js');
+  const home = tmp();
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'oauth_token', value: 'anthropic-setup-token-0001' },
+    agentSignIns: { blair: { anthropic: { type: 'oauth_token', value: 'blair-setup-token-0002', source: 'setup-token-label' } } },
+    named: {
+      shared: { value: 'named-value-secret-111', source: 'named-source-secret-222', provider: 'named-provider-333', baseUrl: 'named-baseurl-444' },
+      agents: {
+        nova: { value: 'nova-value-secret-555', kind: 'nova-kind-secret-666', type: 'nova-type-secret-777' },
+        // Shaped exactly like a record, but a named map: every entry is a secret.
+        ivy: { type: 'oauth_token', value: 'ivy-value-secret-aaa', source: 'ivy-source-secret-bbb' },
+      },
+    },
+    channels: { slack: { value: 'slack-value-secret-888', type: 'slack-type-secret-999' } },
+  }));
+  const secrets = await collectKnownSecrets(home);
+  for (const value of [
+    'anthropic-setup-token-0001', 'blair-setup-token-0002',
+    'named-value-secret-111', 'named-source-secret-222', 'named-provider-333', 'named-baseurl-444',
+    'nova-value-secret-555', 'nova-kind-secret-666', 'nova-type-secret-777',
+    'slack-value-secret-888', 'slack-type-secret-999',
+    'ivy-value-secret-aaa', 'ivy-source-secret-bbb',
+  ]) assert.ok(secrets.has(value), value);
+  assert.equal(secrets.has('setup-token-label'), false);
+});
+
 test('a known secret with spaces written form-encoded, a space as +, is redacted', () => {
   const secret = 'correct horse battery';
   const needles = needlesFor(new Set([secret]));

@@ -13,7 +13,7 @@
 // recognizes. That limit is stated in the README rather than papered over.
 
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const REDACTED = '[redacted by stratus-backup]';
@@ -92,12 +92,21 @@ const collectStrings = (value, out, key, at, short, inRecord = false, keys = [])
  * can set back, and a replace moves the inode, so two equal states mean no
  * credential source changed in between, even if its values went away and
  * back. Equal reads of the values alone could not tell that.
+ *
+ * Read with lstat, and a source that is not a plain file stops the run: a
+ * symlink (or any link in a chain of them) can point elsewhere and back
+ * while its target's state stays the same. Stratus writes both as plain files.
  */
 export const credentialSourcesState = async (home) => {
   const states = [];
   for (const name of ['credentials.json', 'gateway-token']) {
     try {
-      const { dev, ino, size, mtimeNs, ctimeNs } = await stat(path.join(home, name), { bigint: true });
+      const info = await lstat(path.join(home, name), { bigint: true });
+      if (!info.isFile()) {
+        const kind = info.isSymbolicLink() ? 'a symbolic link' : 'not a plain file';
+        throw new Error(`${name} is ${kind}, so a change to the secrets it holds could go unseen during the snapshot. Replace it with the file itself. Nothing was pushed.`);
+      }
+      const { dev, ino, size, mtimeNs, ctimeNs } = info;
       states.push(`${name}:${dev}:${ino}:${size}:${mtimeNs}:${ctimeNs}`);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;

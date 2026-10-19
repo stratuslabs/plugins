@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -972,4 +972,20 @@ test('a user name holding @ is read the way ssh and URLs read it, up to the last
     await assert.rejects(assertNotPublic('u@x@gh-work:owner/home.git', publicRepo), /owner\/home is a public repository/);
     await assert.rejects(assertNotPublic('ssh://u@x@gh-work/owner/home.git', publicRepo), /owner\/home is a public repository/);
   });
+});
+
+test('a credential source that is a symlink stops the run, since its target can change under any check', async () => {
+  // Codex P1 4315298158: switching a symlinked credentials.json from A to B
+  // and back left A's metadata unchanged, so a snapshot holding B passed.
+  // A link chain can change at any link, so a source must be a plain file.
+  for (const name of ['credentials.json', 'gateway-token']) {
+    const { home, remote } = await setUp();
+    const file = path.join(home, name);
+    const target = path.join(home, `${name}.real`);
+    renameSync(file, target);
+    symlinkSync(target, file);
+    const before = refOf(remote, 'refs/heads/mini');
+    await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), new RegExp(`${name.replace('.', '\\.')} is a symbolic link.*Nothing was pushed`, 's'), name);
+    assert.equal(refOf(remote, 'refs/heads/mini'), before, `${name}: nothing pushed`);
+  }
 });

@@ -68,7 +68,9 @@ encoded form. They need encryption first, which is planned.
    after the files, along with each credential file's inode, size and
    change time. If anything moved, even a credential rotated away and back
    to the same value, the snapshot is read again (three tries, then the run
-   stops), so the one committed was read while no credential changed. Every
+   stops), so the one committed was read while no credential changed. A
+   `credentials.json` or `gateway-token` that is a symlink stops the run:
+   its target can change and change back with no state of its own moving. Every
    value either read saw is replaced. A value stored only briefly and copied
    somewhere permanent before it was removed was never seen, so it cannot be
    replaced; the scan below is the backstop for key-shaped ones.

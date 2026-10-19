@@ -1029,3 +1029,25 @@ test('a file too big to scan for secrets stops the run and names the file', asyn
   }
   assert.equal(refOf(remote, 'refs/heads/mini'), before);
 });
+
+test('a credentials file renamed aside and back while the snapshot is read still forces a reread', async () => {
+  // Codex P1 4315644237: renaming the original file aside, storing B in a
+  // replacement, then renaming the original back keeps dev, inode, size and
+  // mtime. The rename moves the change time (measured on macOS APFS; Linux
+  // ext4, xfs, btrfs and tmpfs set it on rename too), so the state differs.
+  const { home } = await setUp();
+  const file = path.join(home, 'credentials.json');
+  const aside = `${file}.aside`;
+  const credentials = JSON.parse(readFileSync(file, 'utf8'));
+  credentials.named.shared['deploy.key'] = 'briefly-stored-secret-value-88';
+  const swap = () => {
+    renameSync(file, aside);
+    writeFileSync(file, JSON.stringify(credentials));
+    rmSync(file);
+    renameSync(aside, file);
+  };
+  let reads = 0;
+  await now(home, { env: {}, fetchImpl: notFound, afterSnapshot: () => { reads += 1; if (reads === 1) swap(); } });
+  assert.equal(reads, 2, 'the snapshot read while the original was aside is not the one committed');
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound, afterSnapshot: swap }), /changed while each of 3 snapshots/);
+});

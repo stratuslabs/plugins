@@ -98,7 +98,9 @@ const collectStrings = (value, out, key, at, short, inRecord = false, keys = [])
  * change time, or absent. Any write moves the change time, which no caller
  * can set back, and a replace moves the inode, so two equal states mean no
  * credential source changed in between, even if its values went away and
- * back. Equal reads of the values alone could not tell that.
+ * back. Equal reads of the values alone could not tell that. Renaming the
+ * file aside and back keeps its inode but also moves the change time (measured
+ * on macOS APFS; Linux ext4, xfs, btrfs and tmpfs set it on rename as well).
  *
  * Read with lstat, and a source that is not a plain file stops the run: a
  * symlink (or any link in a chain of them) can point elsewhere and back

@@ -6,7 +6,7 @@ import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import { resolvePluginAgentConfig } from '@stratusagent/plugins';
 
 /**
- * stratus-plugin-sandbox: an executor that runs every command an agent
+ * @stratusagent/plugin-sandbox: an executor that runs every command an agent
  * composes under the operating system's sandbox, so it can write only its
  * own workspace and read only the system's toolchains plus what the
  * operator lists. Selected with `"executor": "sandbox"` in a trusted config.
@@ -64,7 +64,7 @@ const SHM_READ = ['apple.shm.notification_center'];
 /** Paths are spliced into the profile as strings: no quote or backslash may end one early. */
 const sbplString = (value) => {
   if (/["\\\n\r\0]/.test(value)) {
-    throw new Error(`stratus-plugin-sandbox cannot express the path ${JSON.stringify(value)} in a sandbox profile.`);
+    throw new Error(`@stratusagent/plugin-sandbox cannot express the path ${JSON.stringify(value)} in a sandbox profile.`);
   }
   return `"${value}"`;
 };
@@ -149,7 +149,7 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
       if (parents.length > 0) {
         const parent = parents.find((root) => within(target, root.real));
         if (!parent) {
-          throw new Error(`stratus-plugin-sandbox will not run the command: ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
+          throw new Error(`@stratusagent/plugin-sandbox will not run the command: ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
         }
         continue;
       }
@@ -162,7 +162,7 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
     const target = real(lexical);
     const parents = roots.filter((root) => within(lexical, root.lexical) || within(lexical, root.real));
     if (parents.length > 0 && !parents.some((root) => within(target, root.real))) {
-      throw new Error(`stratus-plugin-sandbox will not run the command: read path ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
+      throw new Error(`@stratusagent/plugin-sandbox will not run the command: read path ${lexical} is inside writable ${parents[0].lexical} but resolves outside it, to ${target}.`);
     }
     return target;
   });
@@ -175,23 +175,23 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
 };
 
 export const createPlugin = (config = {}) => ({
-  name: 'stratus-plugin-sandbox',
+  name: '@stratusagent/plugin-sandbox',
   setup(context) {
     if (process.platform !== 'darwin') {
       throw new Error(
-        'stratus-plugin-sandbox runs commands under macOS sandbox-exec, and this host is not macOS. '
+        '@stratusagent/plugin-sandbox runs commands under macOS sandbox-exec, and this host is not macOS. '
         + 'Remove "executor": "sandbox" and the plugin from the config, or run on macOS.',
       );
     }
     if (!context.executors) {
-      throw new Error('This host hands plugins no executor handle, so stratus-plugin-sandbox cannot register one.');
+      throw new Error('This host hands plugins no executor handle, so @stratusagent/plugin-sandbox cannot register one.');
     }
     const workspaces = context.workspaces;
     const spawnFor = (settings) => (command, args, options) => {
       if (!settings.workspace) {
         // No workspace was named for this agent: refuse rather than guess
         // one, and before anything is created on the host.
-        throw new Error('stratus-plugin-sandbox has no workspace for this agent, so it will not run the command.');
+        throw new Error('@stratusagent/plugin-sandbox has no workspace for this agent, so it will not run the command.');
       }
       // Temporary files go inside the workspace, which is writable, rather
       // than to a shared directory, which isn't.

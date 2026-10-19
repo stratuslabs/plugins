@@ -1,4 +1,4 @@
-# @stratusagent/tool-spawn
+# @stratusagent/plugin-spawn
 
 `agent.spawn`: one tool call that runs several tasks at once, each in a
 short-lived **sub-agent**, and returns their answers together.
@@ -19,7 +19,7 @@ on an older one, `setup` fails and says so.
 // ~/.stratus/config.json (a trusted config only)
 {
   "plugins": {
-    "@stratusagent/tool-spawn": { "enabled": true, "maxTasks": 8 }
+    "@stratusagent/plugin-spawn": { "enabled": true, "maxTasks": 8 }
   }
 }
 ```

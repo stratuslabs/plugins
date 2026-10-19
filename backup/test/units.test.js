@@ -250,6 +250,24 @@ test('a credential with surrounding whitespace is kept exactly, so its encodings
   }
 });
 
+test('a whitespace-only credential stops the run instead of being skipped', async () => {
+  // Codex P1 4312863519: eight spaces trimmed to nothing, so the value was
+  // neither redacted nor reported short, and its base64 could be committed.
+  const { collectKnownSecrets } = await import('../src/secrets.js');
+  for (const blank of ['        ', '\t\n  \r\n', ' ']) {
+    const home = tmp();
+    writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ named: { shared: { blank } } }));
+    await assert.rejects(
+      collectKnownSecrets(home),
+      (error) => /shorter than 8 characters/.test(error.message) && error.message.includes('named.shared.blank'),
+      JSON.stringify(blank),
+    );
+  }
+  const home = tmp();
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ named: { shared: { empty: '' } } }));
+  assert.equal((await collectKnownSecrets(home)).size, 0);
+});
+
 test('status and init show the remote without its userinfo', async () => {
   const { mkdirSync } = await import('node:fs');
   const { main } = await import('../src/cli.js');

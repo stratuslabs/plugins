@@ -55,7 +55,7 @@ const collectStrings = (value, out, key, at, short, inRecord = false) => {
     if (trimmed.length >= MIN_SECRET_LENGTH) {
       out.add(value);
       out.add(trimmed);
-    } else if (trimmed.length > 0) short.push(at);
+    } else if (value.length > 0) short.push(at); // whitespace-only counts as short too
   } else if (Array.isArray(value)) {
     value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short));
   } else if (value !== null && typeof value === 'object') {

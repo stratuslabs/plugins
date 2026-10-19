@@ -45,8 +45,8 @@ encoded form. They need encryption first, which is planned.
    appears in the snapshot: raw, JSON-escaped (in any valid escape spelling, at
    any depth), percent-encoded, base64 (line-wrapped too) and hex (spaced and
    wrapped too, as `od` and `xxd` print it). A file name holding one stops the run instead, since a
-   renamed file would not restore. A stored secret shorter than 8
-   characters is too likely to be an ordinary word to replace everywhere,
+   renamed file would not restore. A stored secret shorter than 8 (or only whitespace)
+   characters, ignoring surrounding whitespace, is too likely to be an ordinary word to replace everywhere,
    so it stops the run too, naming where it is stored (Codex's fixed
    `chatgpt` sign-in marker is not a secret and is skipped). In the config, every string under a key named like a credential (`token`,
    `apiKey`, `secret`, `password`, ...) or in an `env` block is replaced

@@ -68,6 +68,20 @@ export const revParse = async (repo, ref) => {
   return result.code === 0 ? result.stdout.trim() : undefined;
 };
 
+/** The branch's local and remote-tracking refs as they stand, to put back with restoreRefs. */
+export const saveBranchRefs = async (repo, branch) => {
+  const saved = [];
+  for (const ref of [localRef(branch), remoteRef(branch)]) saved.push([ref, await revParse(repo, ref)]);
+  return saved;
+};
+
+/** Puts refs back as saveBranchRefs found them, deleting any that did not exist. */
+export const restoreRefs = async (repo, saved) => {
+  for (const [ref, oid] of saved) {
+    await git(repo, oid === undefined ? ['update-ref', '-d', ref] : ['update-ref', ref, oid], { allowFailure: true });
+  }
+};
+
 export const initRepository = async (repo, remote) => {
   await git(repo, ['init', '--bare', '--quiet', repo], { env: { GIT_DIR: undefined } });
   const existing = await git(repo, ['remote', 'get-url', 'origin'], { allowFailure: true });

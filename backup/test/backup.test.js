@@ -657,3 +657,41 @@ test('a git failure never stores or prints a credential carried in the remote UR
   assert.ok(initFailed, 'init should fail on the unreachable remote');
   assert.ok(!initFailed.message.includes(token), initFailed.message);
 });
+
+test('a re-init that fails leaves no branch adopted from the remote it did not switch to', async () => {
+  // Codex P1 4312074600: syncWithRemote adopts the new remote's branch before
+  // the settings are saved; a rollback that kept that ref would let a later
+  // run push the other remote's history to the old one.
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  const elsewhere = makeHome();
+  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await now(elsewhere.home, { env: {}, fetchImpl: notFound });
+  mkdirSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`));
+  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  const refs = execFileSync('git', ['--git-dir', repoDir(home), 'for-each-ref', '--format=%(refname)']).toString().trim();
+  assert.equal(refs, '');
+  rmSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`), { recursive: true });
+  await now(home, { env: {}, fetchImpl: notFound });
+  const log = execFileSync('git', ['--git-dir', remote, 'rev-list', 'refs/heads/mini']).toString().trim().split('\n');
+  assert.equal(log.length, 1, 'the old remote got only its own snapshot');
+});
+
+test('a failed run hides a credential that was rotated away while it ran', async () => {
+  // Codex P2 4312074616: the error is redacted with the secrets read before the snapshot too.
+  const { home } = await setUp();
+  const old = 'rotated-away-secret-value-42';
+  const credentials = JSON.parse(readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+  credentials.named.shared['deploy.key'] = old;
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  const afterSnapshot = () => {
+    credentials.named.shared['deploy.key'] = 'the-new-secret-after-rotation';
+    writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+    throw new Error(`ENOENT: no such file or directory, stat 'agents/${old}.md'`);
+  };
+  const failed = await now(home, { env: {}, fetchImpl: notFound, afterSnapshot }).then(() => undefined, (e) => e);
+  assert.ok(failed);
+  assert.ok(!failed.message.includes(old), failed.message);
+  const saved = readFileSync(path.join(home, 'backup', 'status.json'), 'utf8');
+  assert.ok(!saved.includes(old), saved);
+});

@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
+import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, restoreRefs, revParse, saveBranchRefs, syncWithRemote } from './git.js';
 import { KEY_PATTERNS, REDACTED, collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
@@ -169,6 +169,9 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
     // initRepository clears origin's push URLs, so a failed re-init has to
     // put back the ones it had, not only the fetch URL.
     const previousPushUrls = await pushUrlsOf(repo);
+    // syncWithRemote may adopt the new remote's branch; a rollback must drop
+    // it, or a later run could push that history to the old remote.
+    const previousRefs = await saveBranchRefs(repo, branch);
     await initRepository(repo, remote);
     let existing;
     try {
@@ -176,6 +179,7 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
       ({ remote: existing } = await syncWithRemote(repo, branch));
       await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
     } catch (error) {
+      await restoreRefs(repo, previousRefs).catch(() => {});
       // Settings are not changed, so origin must not be either: put back the
       // remote the settings still name, so later runs push where they check.
       if (previous?.remote) {
@@ -331,10 +335,10 @@ const shownPath = (entryPath, needles) => {
 };
 
 /** An error message as it may be stored or shown, redacted the way a path is. */
-const shownError = async (home, message) => {
+const shownError = async (home, message, earlier = new Set()) => {
   const secrets = await collectKnownSecrets(home).catch(() => new Set());
   try {
-    return shownPath(hideUrlCredentials(message), needlesFor(new Set(secrets)));
+    return shownPath(hideUrlCredentials(message), needlesFor(new Set([...earlier, ...secrets])));
   } catch {
     return 'The backup failed, and its error could not be shown without a stored secret in it.';
   }
@@ -357,6 +361,9 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   await readSettings(home);
   const release = await takeLock(home);
   const startedAt = clock().toISOString();
+  // Secrets read before the snapshot also redact a failure: one rotated away
+  // mid-run may still be named in the error.
+  let before = new Set();
   try {
     // Read again under the lock: an init that finished meanwhile may have moved the remote.
     const settings = await readSettings(home);
@@ -364,7 +371,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     // The secrets are read before and after the snapshot, and both sets are
     // replaced: a credential rotated while the files were read may sit in
     // them in its old value or its new one.
-    const before = await collectKnownSecrets(home);
+    before = await collectKnownSecrets(home);
     const { entries, manifest } = await buildSnapshot(home, { configPath, env, cwd });
     await afterSnapshot?.();
     const needles = needlesFor(new Set([...before, ...await collectKnownSecrets(home)]));
@@ -411,7 +418,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   } catch (error) {
     // A filesystem error can name a file after a stored secret, and this
     // message goes to status.json, the CLI and the nightly log.
-    error.message = await shownError(home, error.message);
+    error.message = await shownError(home, error.message, before);
     await writeJson(statusFile(home), { lastRun: startedAt, ok: false, error: error.message }).catch(() => {});
     throw error;
   } finally {

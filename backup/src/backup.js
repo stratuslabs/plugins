@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { commitSnapshot, isUsableBranch, git, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
+import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, revParse, syncWithRemote } from './git.js';
 import { KEY_PATTERNS, REDACTED, collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
@@ -334,7 +334,7 @@ const shownPath = (entryPath, needles) => {
 const shownError = async (home, message) => {
   const secrets = await collectKnownSecrets(home).catch(() => new Set());
   try {
-    return shownPath(String(message), needlesFor(new Set(secrets)));
+    return shownPath(hideUrlCredentials(message), needlesFor(new Set(secrets)));
   } catch {
     return 'The backup failed, and its error could not be shown without a stored secret in it.';
   }
@@ -419,16 +419,8 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   }
 };
 
-/**
- * The remote as it may be shown: a URL's userinfo (a user and a token or
- * password) is replaced, so status and init output never print a credential.
- * scp-style `git@host:path` has no password and is shown as written.
- */
-// A URL's userinfo and query can both carry a credential
-// (`?access_token=...`), so neither is shown; a fragment goes with the query.
-export const shownRemote = (remote) => String(remote)
-  .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@')
-  .replace(/^([a-z][a-z0-9+.-]*:\/\/[^?#]*)[?#].*$/is, (_, base) => `${base}?***`);
+/** The remote as it may be shown: no userinfo or query (see hideUrlCredentials). */
+export const shownRemote = (remote) => hideUrlCredentials(remote);
 
 export const status = async (home) => {
   const settings = await readJson(settingsFile(home));

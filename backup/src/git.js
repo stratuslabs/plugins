@@ -16,6 +16,17 @@ const AUTHOR = {
   GIT_COMMITTER_EMAIL: 'stratus-backup@localhost',
 };
 
+/**
+ * Text with every URL's userinfo and query hidden. A URL's userinfo (a user
+ * and a token or password) and its query (`?access_token=...`) can both carry
+ * a credential, and git echoes the whole remote URL in its fatal errors, so
+ * neither is shown; a fragment goes with the query. scp-style `git@host:path`
+ * has no password and is left as written.
+ */
+export const hideUrlCredentials = (text) => String(text)
+  .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]*@/gi, '$1***@')
+  .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#'"]*)[?#][^\s'"]*/gi, (_, base) => `${base}?***`);
+
 /** Runs git against the backup repository with hooks pointed at nothing. */
 export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) =>
   new Promise((resolve, reject) => {
@@ -30,7 +41,7 @@ export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) 
       (error, stdout, stderr) => {
         const result = { code: error ? (error.code ?? 1) : 0, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), raw: stdout };
         if (error && !allowFailure) {
-          reject(new Error(`git ${args[0]} failed: ${result.stderr.trim() || error.message}`));
+          reject(new Error(hideUrlCredentials(`git ${args[0]} failed: ${result.stderr.trim() || error.message}`)));
         } else {
           resolve(result);
         }

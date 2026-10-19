@@ -636,3 +636,24 @@ test('a re-init whose settings cannot be saved puts origin back', async () => {
   const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
   assert.equal(origin, remote);
 });
+
+test('a git failure never stores or prints a credential carried in the remote URL', async () => {
+  // Codex P2 4311860392: git echoes the full remote URL, query included, in its fatal errors.
+  const token = 'SUPERSECRET-123';
+  const leaky = `http://user:pw-${token}@127.0.0.1:1/x.git?access_token=${token}#${token}`;
+  const { home } = await setUp();
+  execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'set-url', 'origin', leaky]);
+  const settingsPath = path.join(home, 'backup', 'settings.json');
+  writeFileSync(settingsPath, JSON.stringify({ ...JSON.parse(readFileSync(settingsPath, 'utf8')), remote: leaky }));
+  const failed = await now(home, { env: {}, fetchImpl: notFound }).then(() => undefined, (e) => e);
+  assert.ok(failed, 'the run should fail on the unreachable remote');
+  assert.match(failed.message, /127\.0\.0\.1/);
+  assert.ok(!failed.message.includes(token), failed.message);
+  const saved = readFileSync(path.join(home, 'backup', 'status.json'), 'utf8');
+  assert.ok(!saved.includes(token), saved);
+  // init reaches the remote too, and its error goes straight to the CLI.
+  const fresh = makeHome();
+  const initFailed = await init(fresh.home, leaky, { branch: 'mini', fetchImpl: notFound }).then(() => undefined, (e) => e);
+  assert.ok(initFailed, 'init should fail on the unreachable remote');
+  assert.ok(!initFailed.message.includes(token), initFailed.message);
+});

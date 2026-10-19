@@ -1,0 +1,48 @@
+{
+  "name": "@stratusagent/plugin-a2ui",
+  "version": "0.1.0",
+  "description": "ui.render: an agent shows a native screen as A2UI v1.0 JSON, checked against the catalogs you configure.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "files": ["index.js", "lib/", "schemas/", "skills/", "README.md", "NOTICE"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        { "name": "ui.render", "risk": "safe" },
+        { "name": "ui.catalog", "risk": "safe" }
+      ],
+      "skills": [
+        { "id": "a2ui-screens", "path": "./skills/a2ui-screens/SKILL.md" }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "catalogs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "path": { "type": "string" },
+              "url": { "type": "string" }
+            }
+          }
+        },
+        "maxMessagesBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 }
+      },
+      "required": ["catalogs"]
+    }
+  }
+}

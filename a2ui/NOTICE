@@ -1,0 +1,11 @@
+@stratusagent/plugin-a2ui
+
+This package includes files from A2UI (https://github.com/a2ui-project/a2ui),
+copied unmodified at commit cbaa5ee, licensed under the Apache License,
+Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0):
+
+- schemas/v1_0/agent_to_renderer.json  (specification/v1_0/json/agent_to_renderer.json)
+- schemas/v1_0/common_types.json       (specification/v1_0/json/common_types.json)
+- test/fixtures/basic_catalog.json     (catalogs/basic/v1/catalog.json)
+- test/fixtures/00_incremental.json, 00_simple-login-form.json,
+  02_email-compose.json                (catalogs/basic/v1/examples/)

@@ -66,6 +66,14 @@ Plugins that live here rather than in the agent's core.
 | --- | --- | --- |
 | [`stratus-plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
 
+## In this repository
+
+Plugins that live here rather than in the agent's core.
+
+| Package | Contributes | Notes |
+| --- | --- | --- |
+| [`@stratusagent/plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`, skill `a2ui-screens` | An agent shows a native screen as A2UI v1.0 JSON, validated against the catalogs you configure. Both tools `safe`. |
+
 ## Third-party
 
 Nothing listed yet. Open a pull request adding a row.

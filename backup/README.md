@@ -93,6 +93,11 @@ the hostname `ssh -G` resolves it to, so a `Host` alias for github.com is
 caught too; if ssh can't resolve the host, nothing is pushed. A custom ssh
 set in `GIT_SSH_COMMAND` or `core.sshCommand` that reads a different config
 is not followed.
+Other hosts (GitLab, Bitbucket, your own server) are not checked: making
+sure the repository is private there is up to you.
+
+A run also refuses unless origin names exactly the remote the settings do:
+one URL, and no push URL to anywhere else, since git pushes to every one.
 
 ## How history is kept
 

@@ -233,7 +233,7 @@ test('a second run while one holds the lock is refused; a lock left by a dead pr
 test('a lock whose pid was reused by another process is taken over; one naming this process as it started is not', async () => {
   const { home } = await setUp();
   mkdirSync(path.join(home, 'backup'), { recursive: true });
-  const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { env: { ...process.env, LC_ALL: 'C' } }).toString().trim();
+  const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }).toString().trim();
   writeFileSync(path.join(home, 'backup', 'run.lock'), `${process.pid}\n${started}`);
   await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /Another backup is running/);
   // Same pid, but the process holding it started at another time: the backup that wrote the lock is gone.
@@ -360,7 +360,8 @@ test('every push URL origin has is checked, not only the first', async () => {
   execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', remote]);
   execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', 'git@github.com:owner/second.git']);
   const publicSecond = async (url) => (url.endsWith('/repos/owner/second') ? { status: 200 } : { status: 404 });
-  await assert.rejects(now(home, { env: {}, fetchImpl: publicSecond }), /public repository/);
+  // Refused by the origin check (two push URLs) before the privacy check is reached; either way nothing is pushed.
+  await assert.rejects(now(home, { env: {}, fetchImpl: publicSecond }), /origin is not the remote the settings name|public repository/);
   assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
 });
 
@@ -533,7 +534,9 @@ test('a re-init that fails puts back the push URLs origin had', async () => {
 test('a repository made public while the snapshot is built is caught before the push', async () => {
   // Codex P1 4311171728: the only privacy check ran before the snapshot.
   const { home, remote } = await setUp();
-  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.pushurl', 'git@github.com:owner/home.git']);
+  // Origin's own URL stays the settings' remote; a pushInsteadOf rewrite
+  // sends the push to GitHub, as a user's git config could.
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', `url.git@github.com:owner/home.git.pushInsteadOf`, remote]);
   let isPublic = false;
   const flips = async () => ({ status: isPublic ? 200 : 404 });
   const saved = { ...process.env };
@@ -562,6 +565,9 @@ test('restore --offline uses this machine\'s copy even when origin holds a newer
 });
 
 /** Puts a fake `ssh` first on PATH that resolves `gh-work` to `hostname`. */
+// A fake `ssh -G`: the host is the last argument after its last @.
+const SSH_G = '[ "$1" = "-G" ] || exit 2\nfor a; do h=$a; done; h=${h##*@}\n';
+
 const withFakeSsh = async (script, run) => {
   const bin = tmp();
   writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
@@ -576,7 +582,7 @@ const withFakeSsh = async (script, run) => {
 
 test('an SSH host alias that reaches GitHub is checked as the GitHub repository it reaches', async () => {
   // Codex P1 4311359164: `Host gh-work / HostName github.com` skipped the check.
-  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-work) echo "hostname github.com";; gh-443) echo "hostname ssh.github.com";; *) echo "hostname $2";; esac';
+  const aliases = `${SSH_G}case "$h" in gh-work) echo "hostname github.com";; gh-443) echo "hostname ssh.github.com";; *) echo "hostname $h";; esac`;
   await withFakeSsh(aliases, async () => {
     const seen = [];
     const publicRepo = async (url) => { seen.push(url); return { status: 200 }; };
@@ -592,6 +598,38 @@ test('an SSH host alias that reaches GitHub is checked as the GitHub repository 
     await assert.rejects(init(fresh.home, 'git@gh-work:owner/home.git', { branch: 'mini', fetchImpl: publicRepo }), /public repository/);
   });
   await assert.rejects(assertNotPublic('git@ssh.github.com:owner/home.git', async () => ({ status: 200 })), /public repository/);
+});
+
+test('an SSH alias is resolved as the remote user and port git connects with', async () => {
+  // Codex P1 4317183044: `Match originalhost gh-work user git` with
+  // `HostName github.com` applies only when ssh -G is told the user, so the
+  // check asked about the wrong host. A port is passed as well, since
+  // `Match exec` can test %p.
+  const realSsh = (() => { try { return execFileSync('sh', ['-c', 'command -v ssh']).toString().trim(); } catch { return ''; } })();
+  if (!realSsh) return;
+  const config = path.join(tmp(), 'ssh_config');
+  writeFileSync(config, [
+    'Match originalhost gh-work user git',
+    '  HostName github.com',
+    'Match originalhost gh-port exec "test %p = 2222"',
+    '  HostName github.com',
+    'Match originalhost gh-multi user u@x',
+    '  HostName github.com',
+    '',
+  ].join('\n'));
+  await withFakeSsh(`exec "${realSsh}" -F "${config}" "$@"`, async () => {
+    const publicRepo = async () => ({ status: 200 });
+    await assert.rejects(assertNotPublic('git@gh-work:owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('ssh://git@gh-work/owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('ssh://gh-port:2222/owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('u@x@gh-multi:owner/home.git', publicRepo), /owner\/home is a public repository/);
+    // git decodes an ssh:// URL before it connects, so the check does too.
+    await assert.rejects(assertNotPublic('ssh://u%40x@gh%2Dmulti/owner/home.git', publicRepo), /owner\/home is a public repository/);
+    // Without the matching user or port the alias reaches nowhere special.
+    await assertNotPublic('other@gh-work:owner/home.git', async () => { throw new Error('must not be called'); });
+    await assertNotPublic('ssh://gh-port:22/owner/home.git', async () => { throw new Error('must not be called'); });
+  });
+  await assert.rejects(assertNotPublic('-oProxyCommand=x@gh-work:owner/home.git', notFound), /Nothing was pushed/);
 });
 
 test('an SSH remote whose host ssh cannot resolve is refused, not assumed elsewhere', async () => {
@@ -624,7 +662,7 @@ test('a GitHub host written or resolved with a trailing DNS dot is still checked
     assert.equal(githubRepoOf(remote), 'owner/repo', remote);
     await assert.rejects(assertNotPublic(remote, async () => ({ status: 200 })), /public repository/, remote);
   }
-  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-dot) echo "hostname github.com.";; *) echo "hostname $2";; esac';
+  const aliases = `${SSH_G}case "$h" in gh-dot) echo "hostname github.com.";; *) echo "hostname $h";; esac`;
   await withFakeSsh(aliases, async () => {
     await assert.rejects(assertNotPublic('gh-dot:owner/repo.git', async () => ({ status: 200 })), /owner\/repo is a public repository/);
   });
@@ -968,7 +1006,7 @@ test('a user name holding @ is read the way ssh and URLs read it, up to the last
     await assert.rejects(assertNotPublic(remote, publicRepo), /owner\/home is a public repository/, remote);
   }
   await assert.rejects(assertNotPublic('u@x@github.com:owner', publicRepo), /Could not tell which GitHub repository/);
-  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-work) echo "hostname github.com";; *) echo "hostname $2";; esac';
+  const aliases = `${SSH_G}case "$h" in gh-work) echo "hostname github.com";; *) echo "hostname $h";; esac`;
   await withFakeSsh(aliases, async () => {
     await assert.rejects(assertNotPublic('u@x@gh-work:owner/home.git', publicRepo), /owner\/home is a public repository/);
     await assert.rejects(assertNotPublic('ssh://u@x@gh-work/owner/home.git', publicRepo), /owner\/home is a public repository/);
@@ -1050,4 +1088,59 @@ test('a credentials file renamed aside and back while the snapshot is read still
   await now(home, { env: {}, fetchImpl: notFound, afterSnapshot: () => { reads += 1; if (reads === 1) swap(); } });
   assert.equal(reads, 2, 'the snapshot read while the original was aside is not the one committed');
   await assert.rejects(now(home, { env: {}, fetchImpl: notFound, afterSnapshot: swap }), /changed while each of 3 snapshots/);
+});
+
+test('a live lock is judged the same from any time zone: its start time is recorded and read in UTC', async () => {
+  const { home } = await setUp();
+  const utcStart = execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' } }).toString().trim();
+  const zone = process.env.TZ;
+  // This process now reads times in Tokyo, as a run started from a shell with TZ set would.
+  process.env.TZ = 'Asia/Tokyo';
+  try {
+    writeFileSync(path.join(home, 'backup', 'run.lock'), `${process.pid}\n${utcStart}`);
+    await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /Another backup is running/);
+    const { takeLock } = await import('../src/backup.js');
+    rmSync(path.join(home, 'backup', 'run.lock'));
+    const release = await takeLock(home);
+    assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8').split('\n')[1], utcStart);
+    await release();
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+});
+
+test('releasing the lock never removes a lock another run holds by then', async () => {
+  const { takeLock } = await import('../src/backup.js');
+  const { home } = await setUp();
+  const release = await takeLock(home);
+  // Another run judged this one gone and took the lock over.
+  writeFileSync(path.join(home, 'backup', 'run.lock'), '424242\nsomeone else');
+  await release();
+  assert.equal(readFileSync(path.join(home, 'backup', 'run.lock'), 'utf8'), '424242\nsomeone else');
+});
+
+test('a run refuses an origin with any URL besides the one the settings name, and pushes nowhere', async () => {
+  const { home, remote } = await setUp();
+  const extra = bareRemote();
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.url', extra]);
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /origin is not the remote the settings name/);
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+  assert.equal(refOf(extra, 'refs/heads/mini'), undefined);
+
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--unset', 'remote.origin.url', extra]);
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.pushurl', extra]);
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /origin is not the remote the settings name/);
+  assert.equal(refOf(extra, 'refs/heads/mini'), undefined);
+});
+
+test('a re-init leaves origin with exactly the new URL, however many it had', async () => {
+  const { home } = await setUp();
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.url', bareRemote()]);
+  const next = bareRemote();
+  await init(home, next, { branch: 'mini', fetchImpl: notFound });
+  const urls = execFileSync('git', ['--git-dir', repoDir(home), 'config', '--get-all', 'remote.origin.url']).toString().trim().split('\n');
+  assert.deepEqual(urls, [next]);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(refOf(next, 'refs/heads/mini'), result.commit);
 });

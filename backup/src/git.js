@@ -100,7 +100,9 @@ export const initRepository = async (repo, remote) => {
   await git(repo, ['init', '--bare', '--quiet', repo], { env: { GIT_DIR: undefined } });
   const existing = await git(repo, ['remote', 'get-url', 'origin'], { allowFailure: true });
   if (existing.code === 0) {
-    await git(repo, ['remote', 'set-url', 'origin', remote]);
+    // --replace-all, not `remote set-url`: set-url fails outright when origin
+    // has several URLs, and git pushes to every one of them.
+    await git(repo, ['config', '--replace-all', 'remote.origin.url', remote]);
     // set-url moves only the fetch URL. A push URL left from before would
     // send every snapshot to the old destination, so the new remote is the
     // only place origin pushes to.

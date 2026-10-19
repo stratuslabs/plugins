@@ -73,29 +73,56 @@ const pointsAtGithub = (remote) => new RegExp(String.raw`^(?:[a-z+]+:\/\/${URL_U
 
 const GITHUB_HOST = new RegExp(`^${GH}$`, 'i');
 
-/** Host and path of an SSH remote (ssh://, git+ssh://, or scp-like host:path), else undefined. */
-const sshTargetOf = (remote) => {
-  remote = String(remote).replace(/[?#].*$/s, '');
-  const url = new RegExp(String.raw`^(?:ssh|git\+ssh|ssh\+git):\/\/${URL_USER}(\[[^\]]+\]|[^@/:]+)(?::\d+)?\/+(.*)$`, 'is').exec(remote);
-  if (url) return { host: url[1].replace(/^\[|\]$/g, ''), path: url[2] };
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return undefined;
-  // git reads `host:path` as SSH only when no slash comes before the colon.
-  const scp = new RegExp(String.raw`^${SCP_USER}(\[[^\]]+\]|[^@/:]+):(.*)$`, 's').exec(remote);
-  return scp ? { host: scp[1].replace(/^\[|\]$/g, ''), path: scp[2] } : undefined;
+/** git's url_decode: %XX becomes that byte; anything else stays as written. */
+const gitUrlDecode = (text) => {
+  const bytes = Buffer.from(text, 'utf8');
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 1) {
+    const hex = bytes.toString('latin1', i + 1, i + 3);
+    if (bytes[i] === 0x25 && /^[0-9a-f]{2}$/i.test(hex)) {
+      out.push(parseInt(hex, 16));
+      i += 2;
+    } else {
+      out.push(bytes[i]);
+    }
+  }
+  return Buffer.from(out).toString('utf8');
 };
 
 /**
- * The hostname ssh connects to for `host`, from the user's ssh config. An
- * answer this cannot get is a refusal: the remote may be GitHub under
- * another name. A custom ssh in GIT_SSH_COMMAND or core.sshCommand that
- * reads another config is not followed.
+ * What git hands ssh for an SSH remote (ssh://, git+ssh://, or scp-like
+ * host:path): the destination `[user@]host`, the port, and the path; else
+ * undefined. git decodes an ssh:// URL before it splits it, so this does too.
  */
-const sshHostnameOf = (host) => {
+const sshTargetOf = (remote) => {
+  remote = String(remote).replace(/[?#].*$/s, '');
+  if (/^(?:ssh|git\+ssh|ssh\+git):\/\//i.test(remote)) {
+    const url = /^[^:]+:\/\/(?:([^/]*)@)?(\[[^\]]+\]|[^@/:]+)(?::(\d+))?\/+(.*)$/s.exec(gitUrlDecode(remote));
+    if (!url) return undefined;
+    const host = url[2].replace(/^\[|\]$/g, '');
+    return { host, user: url[1], port: url[3], path: url[4] };
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return undefined;
+  // git reads `host:path` as SSH only when no slash comes before the colon.
+  const scp = /^(?:([^/:]*)@)?(\[[^\]]+\]|[^@/:]+):(.*)$/s.exec(remote);
+  return scp ? { host: scp[2].replace(/^\[|\]$/g, ''), user: scp[1], port: undefined, path: scp[3] } : undefined;
+};
+
+/**
+ * The hostname ssh connects to for a target, from the user's ssh config,
+ * asked with the destination and port git passes, so `Match user` and
+ * `Match exec "%p"` blocks apply as they will for the push. An answer this
+ * cannot get is a refusal: the remote may be GitHub under another name. A
+ * custom ssh in GIT_SSH_COMMAND or core.sshCommand that reads another config
+ * is not followed.
+ */
+const sshHostnameOf = ({ host, user, port }) => {
+  const destination = user === undefined ? host : `${user}@${host}`;
   const refuse = (why) => new Error(`Could not tell where SSH host ${host} connects (${why}), so could not confirm the remote is not a public GitHub repository. Nothing was pushed.`);
-  if (host.startsWith('-')) throw refuse('a host cannot start with "-"');
+  if (destination.startsWith('-')) throw refuse('a destination cannot start with "-"');
   let output;
   try {
-    output = execFileSync('ssh', ['-G', host], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+    output = execFileSync('ssh', ['-G', ...(port === undefined ? [] : ['-p', port]), destination], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
   } catch (error) {
     throw refuse(error.code === 'ENOENT' ? 'ssh is not installed' : 'ssh -G failed');
   }
@@ -117,7 +144,7 @@ export const assertNotPublic = async (remote, fetchImpl = globalThis.fetch) => {
     // so the host git will reach is the one ssh resolves, not the one written.
     const target = sshTargetOf(remote);
     if (target !== undefined) {
-      const reached = sshHostnameOf(target.host);
+      const reached = sshHostnameOf(target);
       if (GITHUB_HOST.test(reached)) return assertNotPublic(`git@github.com:${target.path}`, fetchImpl);
     }
     return;
@@ -173,8 +200,15 @@ export const assertRepositoryMatches = async (home, remote) => {
   if (await readFile(reinitFile(home)).then(() => true, (error) => error.code !== 'ENOENT')) {
     throw new Error(`An earlier init failed and could not undo its changes to the backup repository, so nothing was pushed. ${stop}`);
   }
-  const result = await git(repoDir(home), ['config', '--get', 'remote.origin.url'], { allowFailure: true });
-  if (result.code !== 0 || result.stdout.trim() !== remote) {
+  // git pushes to every URL origin has (every push URL, if it has any), so
+  // origin must name the settings' remote and nothing else.
+  const values = async (key) => {
+    const result = await git(repoDir(home), ['config', '--get-all', key], { allowFailure: true });
+    return result.code === 0 ? result.stdout.split('\n').filter(Boolean) : [];
+  };
+  const urls = await values('remote.origin.url');
+  const pushUrls = await values('remote.origin.pushurl');
+  if (urls.length !== 1 || urls[0] !== remote || pushUrls.some((url) => url !== remote)) {
     throw new Error(`The backup repository's origin is not the remote the settings name, so nothing was pushed. ${stop}`);
   }
 };
@@ -247,27 +281,35 @@ const lockText = async (file) => readFile(file, 'utf8').catch(() => '');
 /**
  * When a process started, as ps prints it, or undefined if ps cannot say.
  * Stored beside the pid so a pid the OS later hands to another process is
- * not mistaken for the backup that wrote the lock.
+ * not mistaken for the backup that wrote the lock. Always printed in UTC: ps
+ * renders the time in the caller's zone, and a run from a shell with TZ set
+ * and the nightly one (whose unit sets no TZ) must read the same text.
  */
 const processStart = (pid) => {
   try {
-    const text = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const text = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
     return text || undefined;
   } catch {
     return undefined;
   }
 };
 
-/** Creates file holding this pid and its start time, all at once, or fails with EEXIST: never an empty lock. */
+/**
+ * Creates file holding this pid and its start time, all at once, or fails
+ * with EEXIST: never an empty lock. Returns the text written, which is how
+ * the holder later knows the lock is still its own.
+ */
 const createLock = async (file) => {
   const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   const started = processStart(process.pid);
-  await writeFile(temporary, started ? `${process.pid}\n${started}` : String(process.pid), { mode: 0o600 });
+  const text = started ? `${process.pid}\n${started}` : String(process.pid);
+  await writeFile(temporary, text, { mode: 0o600 });
   try {
     await link(temporary, file);
   } finally {
     await rm(temporary, { force: true });
   }
+  return text;
 };
 
 const isAlive = (pid) => {
@@ -325,8 +367,12 @@ export const takeLock = async (home, { onStale } = {}) => {
   const file = path.join(backupDir(home), 'run.lock');
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await createLock(file);
-      return () => rm(file, { force: true });
+      const mine = await createLock(file);
+      // Released only while it still holds this run's text: a run that
+      // wrongly judged this one gone may hold it by now.
+      return async () => {
+        if ((await lockText(file)) === mine) await rm(file, { force: true });
+      };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const seen = await lockText(file);

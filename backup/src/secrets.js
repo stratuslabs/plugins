@@ -4,7 +4,7 @@
 //    credentials.json, and the control API token) is replaced wherever it
 //    appears, in the encodings a copy commonly takes: raw, JSON-escaped (in
 //    any valid escape spelling, at any depth), percent-encoded, base64 and
-//    hex.
+//    hex (either case of digit).
 // 2. A scan. Anything still shaped like a well-known key stops the run
 //    before anything is committed. A finding names the file, the line and
 //    the kind of key, never the text.
@@ -112,8 +112,6 @@ export const encodingsOf = (secret) => {
     Buffer.from(secret).toString('base64'),
     Buffer.from(secret).toString('base64').replace(/=+$/, ''),
     Buffer.from(secret).toString('base64url'),
-    Buffer.from(secret).toString('hex'),
-    Buffer.from(secret).toString('hex').toUpperCase(),
     encodeURIComponent(secret),
   ]);
   return [...forms].filter((form) => form.length >= MIN_SECRET_LENGTH);
@@ -157,12 +155,15 @@ const characterPattern = (char) => {
  */
 export const escapePatternOf = (secret) => new RegExp([...secret].map(characterPattern).join(''), 'g');
 
+/** The secret as hex, each digit in either case, since encoders differ and some mix them. */
+export const hexPatternOf = (secret) => new RegExp([...Buffer.from(secret).toString('hex')].map(hexDigit).join(''), 'g');
+
 /** Builds the replacement list once per run, longest first so no form is left half-replaced, then the escape patterns. */
 export const needlesFor = (secrets) => [
   ...[...new Set([...secrets].flatMap(encodingsOf))]
     .sort((a, b) => b.length - a.length)
     .map((form) => Buffer.from(form)),
-  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).map(escapePatternOf),
+  ...[...secrets].filter((secret) => secret.length >= MIN_SECRET_LENGTH).flatMap((secret) => [escapePatternOf(secret), hexPatternOf(secret)]),
 ];
 
 const replacement = Buffer.from(REDACTED);

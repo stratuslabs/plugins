@@ -310,7 +310,12 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     assertPathsHoldNoKnownSecret(redacted, needles);
     const allowed = new Set(settings.allow);
     const findings = redacted
-      .flatMap((entry) => [...scanBuffer(entry.path, entry.bytes), ...scanPath(entry.path)])
+      // A content finding names its file too, so the file is shown the way a
+      // path finding shows it: key-shaped text in the name replaced.
+      .flatMap((entry) => [
+        ...scanBuffer(entry.path, entry.bytes).map((finding) => ({ ...finding, file: shownPath(entry.path, needles) })),
+        ...scanPath(entry.path),
+      ])
       .filter((f) => !allowed.has(f.id));
     if (findings.length > 0) throw new FindingsError(findings);
 

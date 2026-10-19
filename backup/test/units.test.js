@@ -191,3 +191,18 @@ test('a known secret with spaces written form-encoded, a space as +, is redacted
     assert.equal(buffer.toString(), `q=${REDACTED}&x=1`);
   }
 });
+
+test('a known secret written in mixed-case hex is redacted', () => {
+  const secret = 'deadbeef-password';
+  const needles = needlesFor(new Set([secret]));
+  const hex = Buffer.from(secret).toString('hex');
+  let letters = 0;
+  const mixed = [...hex].map((digit) => (/[a-f]/.test(digit) && (letters += 1) % 2 === 0 ? digit.toUpperCase() : digit)).join('');
+  assert.notEqual(mixed, hex);
+  assert.notEqual(mixed, hex.toUpperCase());
+  for (const form of [hex, hex.toUpperCase(), mixed]) {
+    const { buffer, count } = redactBuffer(Buffer.from(`before ${form} after`), needles);
+    assert.equal(count, 1, form);
+    assert.equal(buffer.toString(), `before ${REDACTED} after`);
+  }
+});

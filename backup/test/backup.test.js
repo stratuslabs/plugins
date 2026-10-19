@@ -447,3 +447,21 @@ test('a branch name git would refuse is refused at init, and nothing is saved', 
   execFileSync('git', ['check-ref-format', '--branch', 'old-mini.2']);
   await init(home, bareRemote(), { branch: 'old-mini.2', fetchImpl: notFound });
 });
+
+test('a key-shaped file name whose contents also trip the scan is never printed raw', async () => {
+  const { home, remote } = await setUp();
+  mkdirSync(path.join(home, 'skills', 'shaped'), { recursive: true });
+  const name = ['gh', 'p_', 'C'.repeat(36)].join('');
+  const inside = ['gh', 'p_', 'D'.repeat(36)].join('');
+  writeFileSync(path.join(home, 'skills', 'shaped', name), `token ${inside}\n`);
+  let failure;
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), (error) => {
+    failure = error;
+    return error instanceof FindingsError;
+  });
+  assert.equal(failure.findings.length, 2);
+  for (const text of [failure.message, JSON.stringify(failure.findings), readFileSync(path.join(home, 'backup', 'status.json'), 'utf8')]) {
+    assert.ok(!text.includes(name) && !text.includes(inside), text);
+  }
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});

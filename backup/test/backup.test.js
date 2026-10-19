@@ -763,3 +763,28 @@ test('a skill that is a git worktree or submodule leaves its .git file out', asy
   assert.equal(files['home/skills/linked/.git'], undefined);
   assert.ok(result.skipped.some((s) => s.path === 'home/skills/linked/.git' && s.reason === 'nested git metadata'));
 });
+
+test('a skills root that is a symbolic link is skipped, not followed', async () => {
+  // Codex P1 4312620201: readdir on the root followed the link.
+  const { home, remote } = await setUp();
+  const elsewhere = tmp();
+  writeFileSync(path.join(elsewhere, 'tool-output.txt'), 'outside the home\n');
+  rmSync(path.join(home, 'skills'), { recursive: true, force: true });
+  execFileSync('ln', ['-s', elsewhere, path.join(home, 'skills')]);
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  const files = treeOf(remote, 'refs/heads/mini');
+  assert.ok(!Object.keys(files).some((name) => name.startsWith('home/skills/')), Object.keys(files).join(', '));
+  assert.deepEqual(result.skipped.filter((item) => item.path === 'home/skills'), [{ path: 'home/skills', reason: 'symbolic link' }]);
+});
+
+test('an explicit config path holding a stored secret is returned redacted', async () => {
+  // Codex P2 4312620211: the CLI prints result.manifest.config.path.
+  const { home } = await setUp();
+  const dir = path.join(tmp(), NAMED);
+  mkdirSync(dir);
+  const configPath = path.join(dir, 'config.json');
+  writeFileSync(configPath, readFileSync(path.join(home, 'config.json')));
+  const result = await now(home, { configPath, env: {}, fetchImpl: notFound });
+  assert.ok(result.manifest.config.path.includes(REDACTED), result.manifest.config.path);
+  assert.ok(!JSON.stringify(result).includes(NAMED), JSON.stringify(result.manifest));
+});

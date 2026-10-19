@@ -409,6 +409,8 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
       bytes: redactBuffer(Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`), needles).buffer,
       executable: false,
     };
+    // The CLI prints from the returned manifest, so it is the redacted one.
+    const shownManifest = JSON.parse(manifestEntry.bytes.toString('utf8'));
     redacted.push(manifestEntry);
     assertPathsHoldNoKnownSecret(redacted, needles);
     const allowed = new Set(settings.allow);
@@ -435,7 +437,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     }
     // Skipped paths are printed and logged, so they get the same redaction the manifest did.
     const skipped = manifest.skipped.map((item) => ({ ...item, path: shownPath(item.path, needles) }));
-    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest };
+    const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest: shownManifest };
     await writeJson(statusFile(home), { lastRun: startedAt, ok: true, commit: head, pushed, unchanged: result.unchanged, skipped: manifest.skipped.length });
     return result;
   } catch (error) {

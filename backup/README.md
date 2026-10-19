@@ -31,7 +31,7 @@ The trusted config is the one `stratus serve` would use: `--config`, then
 
 In skills, only regular files are copied. Nested `.git` metadata (a
 directory, or the file a worktree or submodule has),
-symbolic links, hard-linked files and files that keep changing while read
+symbolic links (the skills directory itself included), hard-linked files and files that keep changing while read
 are skipped, and each run names what it skipped.
 
 **Sessions and workspaces are not backed up yet.** They hold arbitrary tool

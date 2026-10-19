@@ -103,8 +103,19 @@ const frontmatterHasId = (text) => {
 
 /** Walks a skills tree: regular files only, no nested .git, no links, no hard-linked files. */
 const walkSkills = async (dir, relative, entries, skipped) => {
+  // readdir follows a link, so each directory, the root included, is checked
+  // with lstat first: a linked skills root would pull in a tree outside the home.
   let names;
   try {
+    const info = await lstat(dir);
+    if (info.isSymbolicLink()) {
+      skipped.push({ path: relative, reason: 'symbolic link' });
+      return;
+    }
+    if (!info.isDirectory()) {
+      skipped.push({ path: relative, reason: 'not a directory' });
+      return;
+    }
     names = await readdir(dir);
   } catch (error) {
     if (error.code === 'ENOENT') return;

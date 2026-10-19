@@ -236,3 +236,32 @@ test('a known secret base64-encoded with line wrapping is redacted', () => {
     }
   }
 });
+
+test('a credential with surrounding whitespace is kept exactly, so its encodings are redacted too', async () => {
+  const { collectKnownSecrets } = await import('../src/secrets.js');
+  const home = tmp();
+  const secret = ' long-password-0001 ';
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ named: { shared: { pad: secret } } }));
+  const secrets = await collectKnownSecrets(home);
+  assert.ok(secrets.has(secret));
+  const needles = needlesFor(secrets);
+  for (const form of [Buffer.from(secret).toString('base64'), Buffer.from(secret).toString('hex')]) {
+    assert.equal(redactBuffer(Buffer.from(`x=${form};`), needles).count, 1, form);
+  }
+});
+
+test('status and init show the remote without its userinfo', async () => {
+  const { mkdirSync } = await import('node:fs');
+  const { main } = await import('../src/cli.js');
+  const userHome = tmp();
+  mkdirSync(path.join(userHome, '.stratus', 'backup'), { recursive: true });
+  writeFileSync(path.join(userHome, '.stratus', 'backup', 'settings.json'), JSON.stringify({ remote: 'https://user:tok-SECRET-123@example.com/a/b.git', branch: 'mini' }));
+  const lines = [];
+  await main(['status'], { env: { HOME: userHome, PATH: '/usr/bin' }, out: (line) => lines.push(line) });
+  assert.ok(lines.some((line) => line.includes('https://***@example.com/a/b.git')), lines.join('\n'));
+  assert.ok(lines.every((line) => !line.includes('tok-SECRET-123') && !line.includes('user:')), lines.join('\n'));
+  const { shownRemote } = await import('../src/backup.js');
+  assert.equal(shownRemote('git@github.com:a/b.git'), 'git@github.com:a/b.git');
+  assert.equal(shownRemote('https://example.com/a.git'), 'https://example.com/a.git');
+  assert.equal(shownRemote('ssh://git:pw@host/a.git'), 'ssh://***@host/a.git');
+});

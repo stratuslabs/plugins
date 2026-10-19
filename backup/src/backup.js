@@ -341,6 +341,13 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   }
 };
 
+/**
+ * The remote as it may be shown: a URL's userinfo (a user and a token or
+ * password) is replaced, so status and init output never print a credential.
+ * scp-style `git@host:path` has no password and is shown as written.
+ */
+export const shownRemote = (remote) => String(remote).replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@');
+
 export const status = async (home) => {
   const settings = await readJson(settingsFile(home));
   const last = await readJson(statusFile(home));

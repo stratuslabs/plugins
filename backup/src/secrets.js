@@ -49,9 +49,13 @@ const isCredentialRecord = (value) => value !== null && typeof value === 'object
 const collectStrings = (value, out, key, at, short, inRecord = false) => {
   if (typeof value === 'string') {
     if (inRecord && key !== 'value' && NON_SECRET_KEYS.has(key)) return;
+    // The exact value is the secret: its encodings include any surrounding
+    // whitespace. The trimmed form is kept too, for copies pasted without it.
     const trimmed = value.trim();
-    if (trimmed.length >= MIN_SECRET_LENGTH) out.add(trimmed);
-    else if (trimmed.length > 0) short.push(at);
+    if (trimmed.length >= MIN_SECRET_LENGTH) {
+      out.add(value);
+      out.add(trimmed);
+    } else if (trimmed.length > 0) short.push(at);
   } else if (Array.isArray(value)) {
     value.forEach((item, index) => collectStrings(item, out, key, `${at}[${index}]`, short));
   } else if (value !== null && typeof value === 'object') {

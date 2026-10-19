@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { allow, init, now, readSettings, repoDir, status } from './backup.js';
+import { allow, init, now, readSettings, repoDir, shownRemote, status } from './backup.js';
 import { restore } from './restore.js';
 import { commandFor, disable, enable, parseTime } from './timer.js';
 
@@ -45,7 +45,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     case 'init': {
       if (!argument) throw new Error('Name the private repository: stratus-backup init <remote>');
       const result = await init(home, argument, { branch: values.branch });
-      out(`Backing up ${home} to ${argument}, branch ${result.branch}${result.adopted ? ' (continuing its existing history)' : ''}.`);
+      out(`Backing up ${home} to ${shownRemote(argument)}, branch ${result.branch}${result.adopted ? ' (continuing its existing history)' : ''}.`);
       out('Run `stratus-backup now` to take the first snapshot, and `stratus-backup enable` to run it nightly.');
       return;
     }
@@ -68,7 +68,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
         out('Not set up. Run `stratus-backup init <remote>`.');
         return;
       }
-      out(`Remote ${result.settings.remote}, branch ${result.settings.branch}.`);
+      out(`Remote ${shownRemote(result.settings.remote)}, branch ${result.settings.branch}.`);
       if (!result.last) out('No run yet.');
       else if (result.last.ok) out(`Last run ${result.last.lastRun}: ok, ${result.last.commit?.slice(0, 12)}${result.last.pushed ? ', pushed' : ''}.`);
       else out(`Last run ${result.last.lastRun}: FAILED. ${result.last.error}`);

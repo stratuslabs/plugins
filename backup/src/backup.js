@@ -43,19 +43,24 @@ export const defaultBranch = () => {
   return name || 'home';
 };
 
+// Every check that asks "is this GitHub?" uses this one host rule:
+// github.com, www.github.com or ssh.github.com, in any case, with or without
+// the trailing DNS dot (`github.com.` is the same host).
+const GH = String.raw`(?:www\.|ssh\.)?github\.com\.?`;
+
 /** owner/name for a github.com remote, in any of the URL forms git accepts. */
 export const githubRepoOf = (remote) => {
   // git drops a URL's query and fragment before it connects, so the lookup
   // drops them too: `owner/repo.git#label` pushes to owner/repo.
   remote = String(remote).replace(/[?#].*$/s, '');
-  const match = /^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(?:www\.|ssh\.)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?(?:ssh\.)?github\.com:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
+  const match = new RegExp(String.raw`^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?${GH}(?::\d+)?\/|(?:[^@/:]+@)?${GH}:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$`, 'i').exec(remote);
   return match ? `${match[1]}/${match[2]}` : undefined;
 };
 
 /** True when the remote's host is github.com, whether or not its path parses. */
-const pointsAtGithub = (remote) => /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?(?:www\.|ssh\.)?github\.com(?:[:/]|$)/i.test(remote);
+const pointsAtGithub = (remote) => new RegExp(String.raw`^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?${GH}(?:[:/]|$)`, 'i').test(remote);
 
-const GITHUB_HOST = /^(?:www\.|ssh\.)?github\.com$/i;
+const GITHUB_HOST = new RegExp(`^${GH}$`, 'i');
 
 /** Host and path of an SSH remote (ssh://, git+ssh://, or scp-like host:path), else undefined. */
 const sshTargetOf = (remote) => {
@@ -169,6 +174,7 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
     try {
       await assertNoneArePublic(remote, repo, fetchImpl);
       ({ remote: existing } = await syncWithRemote(repo, branch));
+      await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
     } catch (error) {
       // Settings are not changed, so origin must not be either: put back the
       // remote the settings still name, so later runs push where they check.
@@ -179,7 +185,6 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
       }
       throw error;
     }
-    await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
     return { branch, adopted: existing !== undefined };
   } finally {
     await release();
@@ -419,7 +424,11 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
  * password) is replaced, so status and init output never print a credential.
  * scp-style `git@host:path` has no password and is shown as written.
  */
-export const shownRemote = (remote) => String(remote).replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@');
+// A URL's userinfo and query can both carry a credential
+// (`?access_token=...`), so neither is shown; a fragment goes with the query.
+export const shownRemote = (remote) => String(remote)
+  .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@')
+  .replace(/^([a-z][a-z0-9+.-]*:\/\/[^?#]*)[?#].*$/is, (_, base) => `${base}?***`);
 
 export const status = async (home) => {
   const settings = await readJson(settingsFile(home));

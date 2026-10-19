@@ -613,3 +613,26 @@ test('a configured restore waits for a running backup or init: it refuses while 
   assert.ok(existsSync(path.join(target, 'agents', 'blair.md')));
   assert.ok(!existsSync(path.join(home, 'backup', 'run.lock')), 'the lock is released after the restore');
 });
+
+test('a GitHub host written or resolved with a trailing DNS dot is still checked', async () => {
+  // Codex P1 4311608369: `github.com.` is the same host as `github.com`.
+  for (const remote of ['git@github.com.:owner/repo.git', 'https://GitHub.com./owner/repo.git', 'ssh://git@ssh.github.com.:443/owner/repo.git']) {
+    assert.equal(githubRepoOf(remote), 'owner/repo', remote);
+    await assert.rejects(assertNotPublic(remote, async () => ({ status: 200 })), /public repository/, remote);
+  }
+  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-dot) echo "hostname github.com.";; *) echo "hostname $2";; esac';
+  await withFakeSsh(aliases, async () => {
+    await assert.rejects(assertNotPublic('gh-dot:owner/repo.git', async () => ({ status: 200 })), /owner\/repo is a public repository/);
+  });
+});
+
+test('a re-init whose settings cannot be saved puts origin back', async () => {
+  // Codex P2 4311608378: writing settings.json is part of the re-init.
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  // A directory where writeJson puts its temporary file makes the write fail.
+  mkdirSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`));
+  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
+  assert.equal(origin, remote);
+});

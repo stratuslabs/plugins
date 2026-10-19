@@ -287,3 +287,11 @@ test('a known secret written as a spaced, wrapped hex dump is redacted', () => {
   // Ordinary text with hex-looking words is left alone.
   assert.equal(redactBuffer(Buffer.from('de ad be ef'), needles).count, 0);
 });
+
+test('a credential in a remote URL query is not shown', async () => {
+  // Codex P2 4311608383.
+  const { shownRemote } = await import('../src/backup.js');
+  assert.equal(shownRemote('https://example.com/repo.git?access_token=super-secret'), 'https://example.com/repo.git?***');
+  assert.equal(shownRemote('https://u:p@example.com/repo.git?t=s#frag'), 'https://***@example.com/repo.git?***');
+  assert.equal(shownRemote('git@github.com:a/b.git'), 'git@github.com:a/b.git');
+});

@@ -788,3 +788,28 @@ test('an explicit config path holding a stored secret is returned redacted', asy
   assert.ok(result.manifest.config.path.includes(REDACTED), result.manifest.config.path);
   assert.ok(!JSON.stringify(result).includes(NAMED), JSON.stringify(result.manifest));
 });
+
+test('a gateway token with leading whitespace is also replaced in the encoding of the whole file', async () => {
+  // Codex P1 4313117307: only the trimmed token was a needle.
+  const { home, remote } = await setUp();
+  const contents = `  ${GATEWAY}\n`;
+  writeFileSync(path.join(home, 'gateway-token'), contents);
+  const encoded = Buffer.from(contents).toString('base64');
+  appendFileSync(path.join(home, 'agents', 'blair', 'memory.jsonl'), `${JSON.stringify({ text: `token file: ${encoded}` })}\n`);
+  await now(home, { env: {}, fetchImpl: notFound });
+  const files = treeOf(remote, 'refs/heads/mini');
+  const all = Object.values(files).join('\n');
+  assert.ok(!all.includes(encoded), 'base64 of the whole token file was pushed');
+  assert.ok(!all.includes(GATEWAY));
+});
+
+test('a run refuses when origin no longer matches the remote the settings name', async () => {
+  // Codex P2 4313117339: a re-init whose origin rollback also failed must not
+  // leave later runs pushing to the remote it did not switch to.
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'set-url', 'origin', other]);
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /origin/);
+  assert.equal(refOf(other, 'refs/heads/mini'), undefined);
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});

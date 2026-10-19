@@ -102,6 +102,9 @@ export const collectKnownSecrets = async (home) => {
       throw new Error(`The control API token in gateway-token is shorter than ${MIN_SECRET_LENGTH} characters, too short to redact safely, so the backup stops. Rotate it to a longer token.`);
     }
     secrets.add(token.trim());
+    // A file's encoding (base64 of the whole file, say) holds the exact
+    // bytes, which leading whitespace shifts, so they are a needle too.
+    secrets.add(token);
   }
   return secrets;
 };

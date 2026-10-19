@@ -151,6 +151,17 @@ const assertNoneArePublic = async (remote, repo, fetchImpl) => {
   for (const url of await urlsGitUses(remote, repo)) await assertNotPublic(url, fetchImpl);
 };
 
+/**
+ * A re-init that failed and could not put origin back leaves it naming a
+ * remote the settings do not, so a run checks before it syncs or pushes.
+ */
+const assertOriginMatches = async (repo, remote) => {
+  const result = await git(repo, ['config', '--get', 'remote.origin.url'], { allowFailure: true });
+  if (result.code !== 0 || result.stdout.trim() !== remote) {
+    throw new Error('The backup repository\'s origin is not the remote the settings name, so nothing was pushed. Run init again with the remote you want.');
+  }
+};
+
 const pushUrlsOf = async (repo) => {
   const result = await git(repo, ['config', '--get-all', 'remote.origin.pushurl'], { allowFailure: true });
   return result.code === 0 ? result.stdout.split('\n').filter(Boolean) : [];
@@ -372,6 +383,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   try {
     // Read again under the lock: an init that finished meanwhile may have moved the remote.
     const settings = await readSettings(home);
+    await assertOriginMatches(repoDir(home), settings.remote);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
     // The secrets are read before and after the snapshot. If they differ, a
     // credential rotated while the files were read, maybe more than once, and

@@ -66,6 +66,9 @@ ${environment}
 };
 
 const systemdQuote = (arg) => `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+// ExecStart= expands $VAR and ${VAR}, so a literal $ is written $$ there.
+// WorkingDirectory= and Environment= do no variable expansion.
+const execQuote = (arg) => systemdQuote(arg.replace(/\$/g, '$$$$'));
 
 export const systemdUnits = ({ command, time, workingDirectory, env }) => ({
   service: `[Unit]
@@ -75,7 +78,7 @@ Description=Stratus nightly backup
 Type=oneshot
 WorkingDirectory=${systemdQuote(workingDirectory)}
 ${Object.entries(env).map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`).join('\n')}
-ExecStart=${command.map(systemdQuote).join(' ')}
+ExecStart=${command.map(execQuote).join(' ')}
 `,
   timer: `[Unit]
 Description=Stratus nightly backup

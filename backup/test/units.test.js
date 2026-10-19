@@ -313,3 +313,17 @@ test('a credential in a remote URL query is not shown', async () => {
   assert.equal(shownRemote('https://u:p@example.com/repo.git?t=s#frag'), 'https://***@example.com/repo.git?***');
   assert.equal(shownRemote('git@github.com:a/b.git'), 'git@github.com:a/b.git');
 });
+
+test('a dollar sign in a systemd command argument reaches the command literally', () => {
+  // Codex P2 4313117329: systemd expands $VAR and ${VAR} in ExecStart; $$ is a literal $.
+  const units = systemdUnits({
+    command: ['/opt/node', '/x/${HOME}/stratus-backup.js', 'now'],
+    time: parseTime('3:05'),
+    workingDirectory: '/home/$me',
+    env: { HOME: '/home/$me' },
+  });
+  assert.match(units.service, /^ExecStart="\/opt\/node" "\/x\/\$\$\{HOME\}\/stratus-backup.js" "now"$/m);
+  // WorkingDirectory= and Environment= do no variable expansion, so a $ stays single there.
+  assert.match(units.service, /^WorkingDirectory="\/home\/\$me"$/m);
+  assert.match(units.service, /^Environment="HOME=\/home\/\$me"$/m);
+});

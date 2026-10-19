@@ -38,10 +38,10 @@ const writeSchedules = (file, jsonl) => {
 };
 
 /**
- * Each file of a snapshot under home/, as { path, executable, write(file, mode) },
- * and its manifest. An encrypted snapshot is decrypted and checked whole
- * before the first file is returned, so a wrong identity or a tampered blob
- * writes nothing.
+ * Each file of a snapshot under home/, as { path, executable, read(), write(file, mode) },
+ * and its manifest. The encrypted part of a snapshot is decrypted and checked
+ * whole before the first file is returned, so a wrong identity or a tampered
+ * blob writes nothing.
  */
 const snapshotFiles = async (repo, commit, identity) => {
   const tree = await listTree(repo, commit);
@@ -50,22 +50,28 @@ const snapshotFiles = async (repo, commit, identity) => {
       throw new Error(`The snapshot holds ${item.path} as ${item.type} ${item.mode}; a backup only ever holds plain files. Not restoring.`);
     }
   }
-  if (isEncryptedTree(tree.map((item) => item.path))) {
-    const oidOf = new Map(tree.map((item) => [item.path, item.oid]));
-    const { manifest, files } = await decryptSnapshot({ paths: [...oidOf.keys()], read: (file) => readBlob(repo, oidOf.get(file)), identity });
-    return {
-      manifest,
-      files: files.map((file) => ({ path: file.path, executable: file.executable, read: async () => file.bytes, write: (to, mode) => writeFile(to, file.bytes, { flag: 'wx', mode }) })),
-    };
-  }
   let manifest = {};
   const files = [];
+  // Plaintext kinds are committed at their home/ paths; encrypted ones only
+  // inside the index, beside them.
+  const encrypted = isEncryptedTree(tree.map((item) => item.path));
   for (const item of tree) {
-    if (item.path === 'manifest.json') {
+    if (item.path === 'manifest.json' && !encrypted) {
       manifest = JSON.parse((await readBlob(repo, item.oid)).toString('utf8'));
       continue;
     }
+    if (encrypted && !item.path.startsWith('home/')) continue;
     files.push({ path: item.path, executable: item.mode === '100755', read: () => readBlob(repo, item.oid), write: (to, mode) => writeBlobTo(repo, item.oid, to, mode) });
+  }
+  if (encrypted) {
+    const oidOf = new Map(tree.map((item) => [item.path, item.oid]));
+    const opened = await decryptSnapshot({ paths: [...oidOf.keys()], read: (file) => readBlob(repo, oidOf.get(file)), identity });
+    manifest = opened.manifest;
+    const plainPaths = new Set(files.map((file) => file.path));
+    for (const file of opened.files) {
+      if (plainPaths.has(file.path)) throw new Error(`The snapshot holds ${JSON.stringify(file.path)} both in plaintext and encrypted. Not restoring.`);
+      files.push({ path: file.path, executable: file.executable, read: async () => file.bytes, write: (to, mode) => writeFile(to, file.bytes, { flag: 'wx', mode }) });
+    }
   }
   return { manifest, files };
 };

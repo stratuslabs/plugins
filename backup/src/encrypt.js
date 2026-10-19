@@ -23,6 +23,45 @@ export const FORMAT_FILE = 'format.json';
 export const INDEX_FILE = 'index.age';
 const BLOB = /^blobs\/([0-9a-f]{32})\.age$/;
 
+/**
+ * What a snapshot holds, by kind. Each kind is encrypted or not on its own;
+ * souls and memory are plaintext by default so their history stays readable
+ * in git, and everything else is encrypted.
+ */
+export const CATEGORIES = ['souls', 'memory', 'grants', 'skills', 'config', 'schedules', 'state'];
+export const DEFAULT_ENCRYPTED = ['grants', 'skills', 'config', 'schedules', 'state'];
+
+/** The kind of a snapshot path (home/...). */
+export const categoryOf = (file) => {
+  if (file === 'home/config.json') return 'config';
+  if (file === 'home/state.json') return 'state';
+  if (file === 'home/schedules.jsonl') return 'schedules';
+  if (file.startsWith('home/skills/')) return 'skills';
+  if (/^home\/agents\/[^/]+\.md$/.test(file)) return 'souls';
+  if (/^home\/agents\/[^/]+\/memory\.jsonl$/.test(file)) return 'memory';
+  if (/^home\/agents\/[^/]+\/whitelist\.json$/.test(file)) return 'grants';
+  // Anything the snapshot adds later is encrypted until it is given a kind.
+  return 'other';
+};
+
+/**
+ * The kinds to encrypt, from `--encrypt`: a list of kinds, "all", "none",
+ * or undefined for the default. "other" is encrypted whenever anything is.
+ */
+export const parseEncrypt = (value) => {
+  if (value === undefined) return [...DEFAULT_ENCRYPTED];
+  const words = (Array.isArray(value) ? value : String(value).split(',')).flatMap((item) => String(item).split(',')).map((item) => item.trim()).filter(Boolean);
+  if (words.length === 1 && words[0] === 'all') return [...CATEGORIES];
+  if (words.length === 1 && words[0] === 'none') return [];
+  for (const word of words) {
+    if (!CATEGORIES.includes(word)) throw new Error(`${JSON.stringify(word)} is not something a backup holds. Name kinds from: ${CATEGORIES.join(', ')}, or all, or none.`);
+  }
+  return CATEGORIES.filter((category) => words.includes(category));
+};
+
+/** Whether a snapshot path is encrypted under these settings' kinds. */
+export const isEncryptedPath = (file, encrypt) => encrypt.length > 0 && (categoryOf(file) === 'other' || encrypt.includes(categoryOf(file)));
+
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 /**
@@ -150,7 +189,8 @@ export const isEncryptedTree = (paths) => paths.includes(FORMAT_FILE);
 export const decryptSnapshot = async ({ paths, read, identity }) => {
   if (!identity) throw new Error('This backup is encrypted. Pass --identity <file> (or set STRATUS_BACKUP_IDENTITY) with the identity from `stratus-backup keygen`.');
   for (const file of paths) {
-    if (file !== FORMAT_FILE && file !== INDEX_FILE && !BLOB.test(file)) {
+    // Plaintext kinds sit beside the ciphertext under home/; restore checks those.
+    if (file !== FORMAT_FILE && file !== INDEX_FILE && !BLOB.test(file) && !file.startsWith('home/')) {
       throw new Error(`The snapshot holds an unexpected path, ${JSON.stringify(file)}. Not restoring.`);
     }
   }

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { init, now, repoDir } from '../src/backup.js';
 import { keygen } from '../src/encrypt.js';
 import { main } from '../src/cli.js';
 import { restore } from '../src/restore.js';
-import { bareRemote, makeHome, notFound, refOf, tmp } from './helpers.js';
+import { NAMED, bareRemote, makeHome, notFound, refOf, tmp } from './helpers.js';
 
 const git = (repo, ...args) => execFileSync('git', ['--git-dir', repo, ...args]);
 
@@ -32,11 +32,13 @@ const newKey = async () => {
   return { file, recipient, identity: readFileSync(file, 'utf8') };
 };
 
-const setUpEncrypted = async () => {
+/** A home backing up with every kind encrypted, unless `encrypt` says otherwise (undefined: the default kinds). */
+const setUpEncrypted = async (options = { encrypt: 'all' }) => {
+  const { encrypt } = options;
   const fixture = makeHome();
   const remote = bareRemote();
   const key = await newKey();
-  await init(fixture.home, remote, { branch: 'mini', recipients: [key.recipient], fetchImpl: notFound });
+  await init(fixture.home, remote, { branch: 'mini', recipients: [key.recipient], encrypt, fetchImpl: notFound });
   return { ...fixture, remote, key };
 };
 
@@ -68,7 +70,10 @@ test('keygen writes a private identity, never over an existing file, and prints 
 
 test('init without a recipient or --plaintext is refused, and nothing is saved', async () => {
   const { home } = makeHome();
-  await assert.rejects(init(home, bareRemote(), { branch: 'mini', fetchImpl: notFound }), /--recipient.*--plaintext|keygen/s);
+  await assert.rejects(init(home, bareRemote(), { branch: 'mini', fetchImpl: notFound }), /encrypt grants, skills, config, schedules, state by default.*keygen.*--plaintext/s);
+  await assert.rejects(init(home, bareRemote(), { branch: 'mini', encrypt: 'souls,diaries', recipients: [(await newKey()).recipient], fetchImpl: notFound }), /"diaries" is not something a backup holds/);
+  await assert.rejects(init(home, bareRemote(), { branch: 'mini', encrypt: 'none', recipients: [(await newKey()).recipient], fetchImpl: notFound }), /Nothing is set to be encrypted/);
+  await assert.rejects(init(home, bareRemote(), { branch: 'mini', plaintext: true, encrypt: 'all', fetchImpl: notFound }), /Pick one/);
   assert.equal(existsSync(path.join(home, 'backup', 'settings.json')), false);
   await assert.rejects(init(home, bareRemote(), { branch: 'mini', recipients: ['not-a-recipient'], fetchImpl: notFound }), /not-a-recipient/);
   assert.equal(existsSync(path.join(home, 'backup', 'settings.json')), false);
@@ -185,20 +190,73 @@ test('a key-shaped string warns on an encrypted run and still blocks a plaintext
   assert.ok(refOf(remote, 'refs/heads/mini'));
 });
 
-test('a branch never switches between plaintext and encrypted', async () => {
+test('by default souls and memory are plaintext and diffable, and everything else is encrypted', async () => {
+  const { home, remote, key } = await setUpEncrypted({ encrypt: undefined });
+  await now(home, { env: {}, fetchImpl: notFound });
+  const tree = rawTree(remote, 'refs/heads/mini');
+  const plainPaths = Object.keys(tree).filter((file) => file.startsWith('home/')).sort();
+  assert.deepEqual(plainPaths, ['home/agents/blair.md', 'home/agents/blair/memory.jsonl', 'home/agents/nameless.md']);
+  assert.match(tree['home/agents/blair.md'].toString(), /You are Blair\./);
+  assert.ok(!('manifest.json' in tree), 'the manifest names files, so it is inside the encrypted index');
+  for (const [file, bytes] of Object.entries(tree)) {
+    if (file.startsWith('home/') || file === 'format.json') continue;
+    for (const plain of ['Morning digest', '# Notes', 'git status', 'some-deploy-key', '0001-owner-only-state-files']) {
+      assert.ok(!bytes.includes(Buffer.from(plain)), `${file} holds ${plain}`);
+    }
+  }
+  const target = path.join(tmp(), 'mixed');
+  await restore(target, { remote, branch: 'mini', identity: key.identity });
+  for (const file of ['agents/blair.md', 'agents/blair/memory.jsonl', 'agents/blair/whitelist.json', 'skills/notes/SKILL.md', 'config.json', 'state.json', 'fleet.db']) {
+    assert.ok(existsSync(path.join(target, file)), file);
+  }
+  await assert.rejects(restore(path.join(tmp(), 'mixed-nokey'), { remote, branch: 'mini' }), /--identity/);
+});
+
+test('a finding blocks the run in a plaintext kind and only warns in an encrypted one', async () => {
+  const shaped = ['gh', 'p_', 'G'.repeat(36)].join('');
+  const { home, remote } = await setUpEncrypted({ encrypt: undefined });
+  mkdirSync(path.join(home, 'skills', 'leaky'), { recursive: true });
+  writeFileSync(path.join(home, 'skills', 'leaky', 'SKILL.md'), `token ${shaped}\n`);
+  const warned = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(warned.pushed, true);
+  assert.equal(warned.warnings.length, 1);
+  appendFileSync(path.join(home, 'agents', 'blair', 'memory.jsonl'), `${JSON.stringify({ id: 'm7', agentId: 'blair', content: `token ${shaped}` })}\n`);
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /shaped like a secret/);
+  assert.equal(refOf(remote, 'refs/heads/mini'), warned.commit);
+});
+
+test('a warning about an encrypted file name shows neither a stored secret nor the key-shaped text in it', async () => {
+  // Codex P2 4318015833: scanPath replaced key-shaped text only, so a stored
+  // credential in the same name reached the warning the CLI prints.
+  const { home } = await setUpEncrypted();
+  const token = ['gh', 'p_', 'F'.repeat(36)].join('');
+  mkdirSync(path.join(home, 'skills', 'both'), { recursive: true });
+  writeFileSync(path.join(home, 'skills', 'both', `${NAMED}-${token}.md`), 'harmless\n');
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(result.pushed, true);
+  assert.ok(result.warnings.some((w) => /file name/.test(w.file)));
+  const shown = JSON.stringify(result.warnings);
+  assert.ok(!shown.includes(NAMED), shown);
+  assert.ok(!shown.includes(token), shown);
+});
+
+test('encrypting a kind the branch history already holds in plaintext is allowed, with a warning from the whole history', async () => {
+  // Codex P1 4318015818: the format was checked at the tip only.
   const plain = makeHome();
-  const remote = bareRemote();
-  await init(plain.home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
+  const branchRemote = bareRemote();
+  await init(plain.home, branchRemote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   await now(plain.home, { env: {}, fetchImpl: notFound });
   const key = await newKey();
-  const other = makeHome();
-  await assert.rejects(init(other.home, remote, { branch: 'mini', recipients: [key.recipient], fetchImpl: notFound }), /plaintext.*new branch/s);
-  await assert.rejects(init(plain.home, remote, { branch: 'mini', recipients: [key.recipient], fetchImpl: notFound }), /plaintext.*new branch/s);
-
-  const { home: encryptedHome, remote: encryptedRemote } = await setUpEncrypted();
-  await now(encryptedHome, { env: {}, fetchImpl: notFound });
-  const third = makeHome();
-  await assert.rejects(init(third.home, encryptedRemote, { plaintext: true, branch: 'mini', fetchImpl: notFound }), /encrypted.*new branch/s);
+  // Encrypt everything from now on: the tip becomes encrypted, older commits stay plaintext.
+  const first = await init(plain.home, branchRemote, { branch: 'mini', recipients: [key.recipient], encrypt: 'all', fetchImpl: notFound });
+  assert.deepEqual(first.plaintextInHistory, ['config', 'grants', 'memory', 'schedules', 'skills', 'souls', 'state']);
+  await now(plain.home, { env: {}, fetchImpl: notFound });
+  // The tip is fully encrypted now, but the history still is not.
+  const again = await init(plain.home, branchRemote, { branch: 'mini', recipients: [key.recipient], encrypt: 'memory', fetchImpl: notFound });
+  assert.deepEqual(again.plaintextInHistory, ['memory']);
+  // A new branch has no such history.
+  const fresh = await init(plain.home, branchRemote, { branch: 'clean', recipients: [key.recipient], encrypt: 'all', fetchImpl: notFound });
+  assert.deepEqual(fresh.plaintextInHistory, []);
 });
 
 test('a lost encryption cache re-encrypts once, and the backup still restores', async () => {
@@ -242,7 +300,7 @@ test('the CLI: keygen, init --recipient, now, then restore with --identity or ST
   await run('init', remote, '--branch', 'mini', '--recipient', recipient);
   await run('now');
   await run('status');
-  assert.match(lines.join('\n'), /encrypted to 1 recipient/);
+  assert.match(lines.join('\n'), /encrypting grants, skills, config, schedules, state to 1 recipient/);
   await assert.rejects(run('restore', path.join(tmp(), 'a'), '--offline'), /--identity/);
   const target = path.join(tmp(), 'b');
   await run('restore', target, '--offline', '--identity', path.join(userHome, 'key.txt'));
@@ -251,4 +309,19 @@ test('the CLI: keygen, init --recipient, now, then restore with --identity or ST
   await main(['restore', viaEnv, '--remote', remote, '--branch', 'mini'], { env: { ...env, STRATUS_BACKUP_IDENTITY: path.join(userHome, 'key.txt') }, cwd: userHome, out: () => {} });
   assert.ok(existsSync(path.join(viaEnv, 'agents', 'blair.md')));
   assert.ok(!existsSync(path.join(home, 'backup', 'key.txt')));
+});
+
+test('a snapshot holding one file both in plaintext and encrypted is not restored', async () => {
+  const { home, remote, key } = await setUpEncrypted();
+  await now(home, { env: {}, fetchImpl: notFound });
+  const clone = path.join(tmp(), 'clone');
+  execFileSync('git', ['clone', '--quiet', '--branch', 'mini', remote, clone]);
+  mkdirSync(path.join(clone, 'home'), { recursive: true });
+  writeFileSync(path.join(clone, 'home', 'state.json'), '{"planted":true}\n');
+  execFileSync('git', ['-C', clone, 'add', '.']);
+  execFileSync('git', ['-C', clone, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', 'plant']);
+  execFileSync('git', ['-C', clone, 'push', '--quiet', 'origin', 'mini']);
+  const target = path.join(tmp(), 'planted');
+  await assert.rejects(restore(target, { remote, branch: 'mini', identity: key.identity }), /both in plaintext and encrypted/);
+  assert.equal(existsSync(target) && readdirSync(target).length > 0, false);
 });

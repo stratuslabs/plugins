@@ -3,16 +3,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { allow, assertRepositoryMatches, init, now, readSettings, repoDir, shownRemote, status, takeLock } from './backup.js';
-import { keygen } from './encrypt.js';
+import { CATEGORIES, keygen } from './encrypt.js';
 import { restore } from './restore.js';
 import { commandFor, disable, enable, parseTime } from './timer.js';
 
 const USAGE = `stratus-backup: a nightly copy of ~/.stratus in a private git repository
 
   stratus-backup keygen --out <file>               make an age identity; keep the file off this machine
-  stratus-backup init <remote> --recipient <age1...> [--branch <name>]
-                                                   set up encrypted backups; one branch per machine (default: hostname)
-  stratus-backup init <remote> --plaintext         set up readable backups that only redaction protects
+  stratus-backup init <remote> --recipient <age1...> [--encrypt <kinds>] [--branch <name>]
+                                                   set up; one branch per machine (default: hostname)
+                                                   kinds: souls, memory, grants, skills, config, schedules, state,
+                                                   or all, or none (default: all but souls and memory)
+  stratus-backup init <remote> --plaintext         readable backups that only redaction protects (same as --encrypt none)
   stratus-backup now [--config <file>]             snapshot, redact, commit, push
   stratus-backup status                            the remote, the branch, the last run
   stratus-backup restore <dir> [--identity <file>] [--commit <sha>] [--remote <url> --branch <name>] [--offline]
@@ -36,6 +38,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
       identity: { type: 'string' },
       out: { type: 'string' },
       plaintext: { type: 'boolean', default: false },
+      encrypt: { type: 'string' },
       recipient: { type: 'string', multiple: true },
       remote: { type: 'string' },
       at: { type: 'string', default: '03:30' },
@@ -62,8 +65,12 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     }
     case 'init': {
       if (!argument) throw new Error('Name the private repository: stratus-backup init <remote> --recipient <age1...>');
-      const result = await init(home, argument, { branch: values.branch, recipients: values.recipient, plaintext: values.plaintext });
+      const result = await init(home, argument, { branch: values.branch, recipients: values.recipient, encrypt: values.encrypt, plaintext: values.plaintext });
       out(`Backing up ${home} to ${shownRemote(argument)}, branch ${result.branch}${result.adopted ? ' (continuing its existing history)' : ''}.`);
+      out(result.encrypt.length > 0 ? `Encrypted: ${result.encrypt.join(', ')}. Plaintext: ${CATEGORIES.filter((kind) => !result.encrypt.includes(kind)).join(', ') || 'nothing'}.` : 'Nothing is encrypted.');
+      if (result.plaintextInHistory.length > 0) {
+        out(`Warning: older snapshots on this branch hold ${result.plaintextInHistory.join(', ')} in plaintext, and they stay readable in its history. Use a new branch or repository if that matters.`);
+      }
       out('Run `stratus-backup now` to take the first snapshot, and `stratus-backup enable` to run it nightly.');
       return;
     }
@@ -89,7 +96,7 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
         out('Not set up. Run `stratus-backup init <remote>`.');
         return;
       }
-      out(`Remote ${shownRemote(result.settings.remote)}, branch ${result.settings.branch}, ${result.settings.recipients?.length ? `encrypted to ${result.settings.recipients.length} recipient(s)` : 'plaintext'}.`);
+      out(`Remote ${shownRemote(result.settings.remote)}, branch ${result.settings.branch}, ${result.settings.encrypt?.length && result.settings.recipients?.length ? `encrypting ${result.settings.encrypt.join(', ')} to ${result.settings.recipients.length} recipient(s)` : 'plaintext'}.`);
       if (!result.last) out('No run yet.');
       else if (result.last.ok) out(`Last run ${result.last.lastRun}: ok, ${result.last.commit?.slice(0, 12)}${result.last.pushed ? ', pushed' : ''}.`);
       else out(`Last run ${result.last.lastRun}: FAILED. ${result.last.error}`);

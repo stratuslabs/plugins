@@ -952,3 +952,24 @@ test('an init that cannot arm its stop changes nothing', async () => {
   assert.equal(origin, remote, 'origin untouched');
   await now(home, { env: {}, fetchImpl: notFound });
 });
+
+test('a user name holding @ is read the way ssh and URLs read it, up to the last @', async () => {
+  // Codex P1 4315298147: `u@x@github.com:owner/repo.git` reaches github.com
+  // (ssh splits user from host at the last @), but every remote rule allowed one @.
+  const publicRepo = async () => ({ status: 200 });
+  for (const remote of [
+    'u@x@github.com:owner/home.git',
+    'ssh://u@x@github.com/owner/home.git',
+    'https://u@x@github.com/owner/home.git',
+    'git+ssh://a@b@c@GitHub.com./owner/home',
+  ]) {
+    assert.equal(githubRepoOf(remote), 'owner/home', remote);
+    await assert.rejects(assertNotPublic(remote, publicRepo), /owner\/home is a public repository/, remote);
+  }
+  await assert.rejects(assertNotPublic('u@x@github.com:owner', publicRepo), /Could not tell which GitHub repository/);
+  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-work) echo "hostname github.com";; *) echo "hostname $2";; esac';
+  await withFakeSsh(aliases, async () => {
+    await assert.rejects(assertNotPublic('u@x@gh-work:owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('ssh://u@x@gh-work/owner/home.git', publicRepo), /owner\/home is a public repository/);
+  });
+});

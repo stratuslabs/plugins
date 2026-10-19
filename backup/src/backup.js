@@ -52,28 +52,35 @@ export const defaultBranch = () => {
 // the trailing DNS dot (`github.com.` is the same host).
 const GH = String.raw`(?:www\.|ssh\.)?github\.com\.?`;
 
+// And every remote rule reads the user part one way: up to the last @, as
+// ssh and URL parsers do (`u@x@github.com` is user `u@x` at github.com). A
+// URL's user part runs to the last @ before the path; an scp-like one has no
+// colon, since git ends the host at the first colon.
+const URL_USER = String.raw`(?:[^/]*@)?`;
+const SCP_USER = String.raw`(?:[^/:]*@)?`;
+
 /** owner/name for a github.com remote, in any of the URL forms git accepts. */
 export const githubRepoOf = (remote) => {
   // git drops a URL's query and fragment before it connects, so the lookup
   // drops them too: `owner/repo.git#label` pushes to owner/repo.
   remote = String(remote).replace(/[?#].*$/s, '');
-  const match = new RegExp(String.raw`^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?${GH}(?::\d+)?\/|(?:[^@/:]+@)?${GH}:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$`, 'i').exec(remote);
+  const match = new RegExp(String.raw`^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/${URL_USER}${GH}(?::\d+)?\/|${SCP_USER}${GH}:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$`, 'i').exec(remote);
   return match ? `${match[1]}/${match[2]}` : undefined;
 };
 
 /** True when the remote's host is github.com, whether or not its path parses. */
-const pointsAtGithub = (remote) => new RegExp(String.raw`^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?${GH}(?:[:/]|$)`, 'i').test(remote);
+const pointsAtGithub = (remote) => new RegExp(String.raw`^(?:[a-z+]+:\/\/${URL_USER}|${SCP_USER})${GH}(?:[:/]|$)`, 'i').test(remote);
 
 const GITHUB_HOST = new RegExp(`^${GH}$`, 'i');
 
 /** Host and path of an SSH remote (ssh://, git+ssh://, or scp-like host:path), else undefined. */
 const sshTargetOf = (remote) => {
   remote = String(remote).replace(/[?#].*$/s, '');
-  const url = /^(?:ssh|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(\[[^\]]+\]|[^/:]+)(?::\d+)?\/+(.*)$/i.exec(remote);
+  const url = new RegExp(String.raw`^(?:ssh|git\+ssh|ssh\+git):\/\/${URL_USER}(\[[^\]]+\]|[^@/:]+)(?::\d+)?\/+(.*)$`, 'is').exec(remote);
   if (url) return { host: url[1].replace(/^\[|\]$/g, ''), path: url[2] };
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return undefined;
   // git reads `host:path` as SSH only when no slash comes before the colon.
-  const scp = /^(?:[^@/:]+@)?(\[[^\]]+\]|[^@/:]+):(.*)$/s.exec(remote);
+  const scp = new RegExp(String.raw`^${SCP_USER}(\[[^\]]+\]|[^@/:]+):(.*)$`, 's').exec(remote);
   return scp ? { host: scp[1].replace(/^\[|\]$/g, ''), path: scp[2] } : undefined;
 };
 

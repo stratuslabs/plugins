@@ -101,11 +101,29 @@ const frontmatterHasId = (text) => {
   return match !== null && /^(id|name):\s*\S/m.test(match[1]);
 };
 
-/** Walks a skills tree: regular files only, no nested .git, no links, no hard-linked files. */
-const walkSkills = async (dir, relative, entries, skipped) => {
-  // readdir follows a link, so each directory, the root included, is checked
-  // with lstat first: a linked skills root would pull in a tree outside the home.
+/** Whether every directory on the walk still is the one that was checked. */
+const sameDirectories = async (chain) => {
+  for (const { dir, dev, ino } of chain) {
+    const info = await lstat(dir).catch(() => undefined);
+    if (!info || !info.isDirectory() || info.dev !== dev || info.ino !== ino) return false;
+  }
+  return true;
+};
+
+/**
+ * Walks a skills tree: regular files only, no nested .git, no links, no
+ * hard-linked files. readdir and open follow a link, so each directory, the
+ * root included, is checked with lstat first, and the whole chain of
+ * directories down to it is checked again after it is listed and after each
+ * file is read: a directory swapped for a link meanwhile is skipped, along
+ * with anything read through it. Node has no openat, so a swap made and
+ * undone between two checks is not seen; that takes a writer racing the walk
+ * on purpose, which could as well copy the file into the skills tree.
+ * `hooks.beforeList(dir)` is a test seam.
+ */
+export const walkSkills = async (dir, relative, entries, skipped, hooks = {}, parents = []) => {
   let names;
+  let chain;
   try {
     const info = await lstat(dir);
     if (info.isSymbolicLink()) {
@@ -116,10 +134,16 @@ const walkSkills = async (dir, relative, entries, skipped) => {
       skipped.push({ path: relative, reason: 'not a directory' });
       return;
     }
+    chain = [...parents, { dir, dev: info.dev, ino: info.ino }];
+    await hooks.beforeList?.(dir);
     names = await readdir(dir);
   } catch (error) {
     if (error.code === 'ENOENT') return;
     throw error;
+  }
+  if (!(await sameDirectories(chain))) {
+    skipped.push({ path: relative, reason: 'changed while it was read' });
+    return;
   }
   names.sort();
   for (const name of names) {
@@ -133,7 +157,7 @@ const walkSkills = async (dir, relative, entries, skipped) => {
     }
     const info = await lstat(full);
     if (info.isDirectory()) {
-      await walkSkills(full, rel, entries, skipped);
+      await walkSkills(full, rel, entries, skipped, hooks, chain);
     } else if (info.isSymbolicLink()) {
       skipped.push({ path: rel, reason: 'symbolic link' });
     } else if (!info.isFile()) {
@@ -143,6 +167,7 @@ const walkSkills = async (dir, relative, entries, skipped) => {
     } else {
       try {
         const { bytes, mode } = await readStable(full);
+        if (!(await sameDirectories(chain))) throw new UnstableFileError(`${full} moved while it was read.`);
         entries.push({ path: rel, bytes, executable: (mode & 0o111) !== 0 });
       } catch (error) {
         if (!(error instanceof UnstableFileError) && error.code !== 'ELOOP') throw error;

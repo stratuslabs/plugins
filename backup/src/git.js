@@ -20,12 +20,15 @@ const AUTHOR = {
  * Text with every URL's userinfo and query hidden. A URL's userinfo (a user
  * and a token or password) and its query (`?access_token=...`) can both carry
  * a credential, and git echoes the whole remote URL in its fatal errors, so
- * neither is shown; a fragment goes with the query. scp-style `git@host:path`
- * has no password and is left as written.
+ * neither is shown; a fragment goes with the query. Only whitespace ends a
+ * URL here: a quote or an `@` may be part of a credential, so the userinfo
+ * runs to the last `@` before the path, and a quote git wraps the URL in is
+ * hidden along with the query. scp-style `git@host:path` has no password and
+ * is left as written.
  */
 export const hideUrlCredentials = (text) => String(text)
-  .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@'"]*@/gi, '$1***@')
-  .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#'"]*)[?#][^\s'"]*/gi, (_, base) => `${base}?***`);
+  .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1***@')
+  .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, (_, base) => `${base}?***`);
 
 /** Runs git against the backup repository with hooks pointed at nothing. */
 export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) =>
@@ -75,11 +78,17 @@ export const saveBranchRefs = async (repo, branch) => {
   return saved;
 };
 
-/** Puts refs back as saveBranchRefs found them, deleting any that did not exist. */
+/**
+ * Puts refs back as saveBranchRefs found them, deleting any that did not
+ * exist. Every ref is tried; if any could not be put back, this throws.
+ */
 export const restoreRefs = async (repo, saved) => {
+  const failed = [];
   for (const [ref, oid] of saved) {
-    await git(repo, oid === undefined ? ['update-ref', '-d', ref] : ['update-ref', ref, oid], { allowFailure: true });
+    const result = await git(repo, oid === undefined ? ['update-ref', '-d', ref] : ['update-ref', ref, oid], { allowFailure: true });
+    if (result.code !== 0) failed.push(ref);
   }
+  if (failed.length > 0) throw new Error(`could not put back ${failed.join(', ')}`);
 };
 
 export const initRepository = async (repo, remote) => {

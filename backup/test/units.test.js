@@ -354,3 +354,38 @@ test('a dollar sign in a systemd command argument reaches the command literally'
   assert.match(units.service, /^WorkingDirectory="\/home\/\$me"$/m);
   assert.match(units.service, /^Environment="HOME=\/home\/\$me"$/m);
 });
+
+test('a credential containing quote characters is hidden whole', async () => {
+  // Codex P2 4313652464: quotes ended the match, leaving part of the credential.
+  const { shownRemote } = await import('../src/backup.js');
+  const { hideUrlCredentials } = await import('../src/git.js');
+  assert.equal(shownRemote("https://u:sec'ret@example.com/x"), 'https://***@example.com/x');
+  assert.equal(shownRemote('https://u:se"cr@et@example.com/x'), 'https://***@example.com/x');
+  assert.equal(shownRemote("https://example.com/x?token=sec'ret"), 'https://example.com/x?***');
+  const shown = hideUrlCredentials("fatal: repository 'https://u:a'b@example.com/x?t=c'd' not found");
+  assert.ok(!/a'b|c'd|'b@|'d/.test(shown.replace("'https", '')), shown);
+  assert.ok(shown.includes('example.com/x?***'), shown);
+});
+
+test('a skills directory swapped for a link while it is walked is not followed', async () => {
+  // Codex P2 4313652470: readdir follows a directory replaced by a link after its lstat.
+  const { mkdirSync: mk, renameSync, symlinkSync: link } = await import('node:fs');
+  const { walkSkills } = await import('../src/snapshot.js');
+  const root = tmp();
+  const outside = path.join(root, 'outside');
+  mk(outside);
+  writeFileSync(path.join(outside, 'private.txt'), 'outside the home');
+  const skills = path.join(root, 'skills');
+  mk(path.join(skills, 'notes'), { recursive: true });
+  writeFileSync(path.join(skills, 'notes', 'private.txt'), 'inside');
+  const entries = [];
+  const skipped = [];
+  const swap = (dir) => {
+    if (dir !== path.join(skills, 'notes')) return;
+    renameSync(dir, `${dir}.old`);
+    link(outside, dir);
+  };
+  await walkSkills(skills, 'home/skills', entries, skipped, { beforeList: swap });
+  assert.ok(!entries.some((entry) => entry.bytes.toString() === 'outside the home'), JSON.stringify(entries.map((e) => e.path)));
+  assert.ok(skipped.some((s) => s.path === 'home/skills/notes'), JSON.stringify(skipped));
+});

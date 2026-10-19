@@ -15,6 +15,10 @@ import { buildSnapshot } from './snapshot.js';
 export const backupDir = (home) => path.join(home, 'backup');
 const settingsFile = (home) => path.join(backupDir(home), 'settings.json');
 const statusFile = (home) => path.join(backupDir(home), 'status.json');
+// Left by a re-init whose rollback did not finish: the repository may hold
+// refs or an origin from the remote it did not switch to, so runs stop until
+// an init succeeds.
+const reinitFile = (home) => path.join(backupDir(home), 'needs-init');
 export const repoDir = (home) => path.join(backupDir(home), 'repo');
 
 const writeJson = async (file, value) => {
@@ -152,13 +156,19 @@ const assertNoneArePublic = async (remote, repo, fetchImpl) => {
 };
 
 /**
- * A re-init that failed and could not put origin back leaves it naming a
- * remote the settings do not, so a run checks before it syncs or pushes.
+ * A re-init that failed and could not roll back leaves the repository
+ * holding refs or an origin from a remote the settings do not name, so a run
+ * checks before it syncs or pushes: the marker such a rollback leaves, and
+ * origin itself, as a backstop for a marker that could not be written.
  */
-const assertOriginMatches = async (repo, remote) => {
-  const result = await git(repo, ['config', '--get', 'remote.origin.url'], { allowFailure: true });
+const assertRepositoryMatches = async (home, remote) => {
+  const stop = 'Run init again with the remote you want.';
+  if (await readFile(reinitFile(home)).then(() => true, (error) => error.code !== 'ENOENT')) {
+    throw new Error(`An earlier init failed and could not undo its changes to the backup repository, so nothing was pushed. ${stop}`);
+  }
+  const result = await git(repoDir(home), ['config', '--get', 'remote.origin.url'], { allowFailure: true });
   if (result.code !== 0 || result.stdout.trim() !== remote) {
-    throw new Error('The backup repository\'s origin is not the remote the settings name, so nothing was pushed. Run init again with the remote you want.');
+    throw new Error(`The backup repository's origin is not the remote the settings name, so nothing was pushed. ${stop}`);
   }
 };
 
@@ -190,16 +200,21 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
       ({ remote: existing } = await syncWithRemote(repo, branch));
       await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
     } catch (error) {
-      await restoreRefs(repo, previousRefs).catch(() => {});
-      // Settings are not changed, so origin must not be either: put back the
-      // remote the settings still name, so later runs push where they check.
+      // Settings are not changed, so the repository must not be either: the
+      // branch refs go back, and origin is put back to the remote the
+      // settings still name, so later runs push where they check. Any step
+      // that fails leaves the marker that stops runs until an init succeeds.
+      let undone = await restoreRefs(repo, previousRefs).then(() => true, () => false);
       if (previous?.remote) {
-        await initRepository(repo, previous.remote)
+        undone = await initRepository(repo, previous.remote)
           .then(async () => { for (const url of previousPushUrls) await git(repo, ['config', '--add', 'remote.origin.pushurl', url]); })
-          .catch(() => {});
+          .then(() => undone, () => false);
       }
+      if (!undone) await writeFile(reinitFile(home), `${new Date().toISOString()}\n`, { mode: 0o600 }).catch(() => {});
       throw error;
     }
+    // Only a finished init clears the stop an earlier failed one left.
+    await rm(reinitFile(home), { force: true });
     return { branch, adopted: existing !== undefined };
   } finally {
     await release();
@@ -383,7 +398,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
   try {
     // Read again under the lock: an init that finished meanwhile may have moved the remote.
     const settings = await readSettings(home);
-    await assertOriginMatches(repoDir(home), settings.remote);
+    await assertRepositoryMatches(home, settings.remote);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
     // The secrets are read before and after the snapshot. If they differ, a
     // credential rotated while the files were read, maybe more than once, and

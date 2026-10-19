@@ -813,3 +813,27 @@ test('a run refuses when origin no longer matches the remote the settings name',
   assert.equal(refOf(other, 'refs/heads/mini'), undefined);
   assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
 });
+
+test('a re-init whose ref rollback fails stops later runs instead of pushing foreign history', async () => {
+  // Codex P1 4313652450: a failed update-ref in the rollback was ignored, and
+  // with origin restored nothing else could tell the local ref was foreign.
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  const elsewhere = makeHome();
+  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await now(elsewhere.home, { env: {}, fetchImpl: notFound });
+  const blocker = path.join(home, 'backup', `settings.json.${process.pid}.tmp`);
+  mkdirSync(blocker);
+  // Deleting a ref takes packed-refs.lock; creating a loose one does not.
+  const lock = path.join(repoDir(home), 'packed-refs.lock');
+  writeFileSync(lock, '');
+  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  rmSync(lock);
+  rmSync(blocker, { recursive: true });
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /init again/);
+  const listed = execFileSync('git', ['--git-dir', remote, 'for-each-ref', '--format=%(refname)']).toString().trim();
+  assert.equal(listed, '', 'nothing reached the old remote');
+  // A successful init clears the stop.
+  await init(home, remote, { branch: 'fresh', fetchImpl: notFound });
+  assert.equal((await now(home, { env: {}, fetchImpl: notFound })).pushed, true);
+});

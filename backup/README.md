@@ -32,7 +32,13 @@ The trusted config is the one `stratus serve` would use: `--config`, then
 In skills, only regular files are copied. Nested `.git` metadata (a
 directory, or the file a worktree or submodule has),
 symbolic links (the skills directory itself included), hard-linked files and files that keep changing while read
-are skipped, and each run names what it skipped.
+are skipped, and each run names what it skipped. A skills directory replaced
+by a link while it is read is skipped too, with anything read through it (a
+swap made and undone between two checks is not seen).
+
+Running `init` again with another remote changes nothing if it fails. If it
+also can't undo its own changes to the backup repository, runs stop with a
+message until an `init` succeeds, rather than push another remote's history.
 
 **Sessions and workspaces are not backed up yet.** They hold arbitrary tool
 output, and a scan cannot promise to find a secret a tool wrote in some

@@ -159,8 +159,16 @@ const characterPattern = (char) => {
  */
 export const escapePatternOf = (secret) => new RegExp([...secret].map(characterPattern).join(''), 'g');
 
-/** The secret as hex, each digit in either case, since encoders differ and some mix them. */
-export const hexPatternOf = (secret) => new RegExp([...Buffer.from(secret).toString('hex')].map(hexDigit).join(''), 'g');
+/**
+ * The secret as hex, each digit in either case, since encoders differ and
+ * some mix them. Spaces, tabs and one line break are allowed between bytes:
+ * `od -An -tx1` spaces bytes and wraps every 16, `xxd -p` wraps every 30.
+ */
+export const hexPatternOf = (secret) => {
+  const between = '[ \\t]*(?:\\r?\\n)?[ \\t]*';
+  const bytes = Buffer.from(secret).toString('hex').match(/../g).map((pair) => [...pair].map(hexDigit).join(''));
+  return new RegExp(bytes.join(between), 'g');
+};
 
 /**
  * The secret's base64 (standard and URL-safe) with a line break allowed

@@ -265,3 +265,25 @@ test('status and init show the remote without its userinfo', async () => {
   assert.equal(shownRemote('https://example.com/a.git'), 'https://example.com/a.git');
   assert.equal(shownRemote('ssh://git:pw@host/a.git'), 'ssh://***@host/a.git');
 });
+
+test('a known secret written as a spaced, wrapped hex dump is redacted', () => {
+  // Codex P1 4310827233: `od -An -tx1` puts a space between bytes and wraps
+  // at 16 bytes a line; `xxd -p` wraps at 30 bytes with no spaces.
+  const secret = `dump-secret-${'0123456789'.repeat(4)}`;
+  const needles = needlesFor(new Set([secret]));
+  const hex = Buffer.from(secret).toString('hex');
+  const pairs = hex.match(/../g);
+  const od = pairs.map((pair, i) => `${i % 16 === 0 ? (i === 0 ? ' ' : '\n ') : ' '}${pair}`).join('');
+  const xxd = hex.match(/.{1,60}/g).join('\n');
+  const spacedUpper = pairs.join(' ').toUpperCase();
+  for (const form of [od, xxd, spacedUpper, pairs.join('\r\n')]) {
+    const { buffer, count } = redactBuffer(Buffer.from(`before ${form} after`), needles);
+    assert.ok(count >= 1, JSON.stringify(form));
+    const out = buffer.toString();
+    for (const line of form.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length >= 8)) {
+      assert.ok(!out.includes(line), `${JSON.stringify(line)} survived: ${out}`);
+    }
+  }
+  // Ordinary text with hex-looking words is left alone.
+  assert.equal(redactBuffer(Buffer.from('de ad be ef'), needles).count, 0);
+});

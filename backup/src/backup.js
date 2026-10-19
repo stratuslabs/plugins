@@ -45,6 +45,9 @@ export const defaultBranch = () => {
 
 /** owner/name for a github.com remote, in any of the URL forms git accepts. */
 export const githubRepoOf = (remote) => {
+  // git drops a URL's query and fragment before it connects, so the lookup
+  // drops them too: `owner/repo.git#label` pushes to owner/repo.
+  remote = String(remote).replace(/[?#].*$/s, '');
   const match = /^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(?:www\.)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?github\.com:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
   return match ? `${match[1]}/${match[2]}` : undefined;
 };
@@ -103,6 +106,11 @@ const assertNoneArePublic = async (remote, repo, fetchImpl) => {
   for (const url of await urlsGitUses(remote, repo)) await assertNotPublic(url, fetchImpl);
 };
 
+const pushUrlsOf = async (repo) => {
+  const result = await git(repo, ['config', '--get-all', 'remote.origin.pushurl'], { allowFailure: true });
+  return result.code === 0 ? result.stdout.split('\n').filter(Boolean) : [];
+};
+
 export const init = async (home, remote, { branch = defaultBranch(), fetchImpl } = {}) => {
   if (!isUsableBranch(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
   await assertNoneArePublic(remote, undefined, fetchImpl);
@@ -113,6 +121,9 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
   try {
     const previous = await readJson(settingsFile(home));
     const repo = repoDir(home);
+    // initRepository clears origin's push URLs, so a failed re-init has to
+    // put back the ones it had, not only the fetch URL.
+    const previousPushUrls = await pushUrlsOf(repo);
     await initRepository(repo, remote);
     let existing;
     try {
@@ -121,7 +132,11 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
     } catch (error) {
       // Settings are not changed, so origin must not be either: put back the
       // remote the settings still name, so later runs push where they check.
-      if (previous?.remote) await initRepository(repo, previous.remote).catch(() => {});
+      if (previous?.remote) {
+        await initRepository(repo, previous.remote)
+          .then(async () => { for (const url of previousPushUrls) await git(repo, ['config', '--add', 'remote.origin.pushurl', url]); })
+          .catch(() => {});
+      }
       throw error;
     }
     await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
@@ -270,6 +285,16 @@ const shownPath = (entryPath, needles) => {
   return shown;
 };
 
+/** An error message as it may be stored or shown, redacted the way a path is. */
+const shownError = async (home, message) => {
+  const secrets = await collectKnownSecrets(home).catch(() => new Set());
+  try {
+    return shownPath(String(message), needlesFor(new Set(secrets)));
+  } catch {
+    return 'The backup failed, and its error could not be shown without a stored secret in it.';
+  }
+};
+
 /** Key-shaped text in a path. The finding names the path with the match replaced. */
 const scanPath = (entryPath) => {
   const findings = scanBuffer(entryPath, Buffer.from(entryPath));
@@ -334,6 +359,9 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     await writeJson(statusFile(home), { lastRun: startedAt, ok: true, commit: head, pushed, unchanged: result.unchanged, skipped: manifest.skipped.length });
     return result;
   } catch (error) {
+    // A filesystem error can name a file after a stored secret, and this
+    // message goes to status.json, the CLI and the nightly log.
+    error.message = await shownError(home, error.message);
     await writeJson(statusFile(home), { lastRun: startedAt, ok: false, error: error.message }).catch(() => {});
     throw error;
   } finally {

@@ -491,3 +491,37 @@ test('a key-shaped file name whose contents also trip the scan is never printed 
   }
   assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
 });
+
+test('a remote URL with a fragment or query is checked as the repository git pushes to', async () => {
+  // Codex P1 4310827225: git drops the fragment, so the lookup must too.
+  assert.equal(githubRepoOf('https://github.com/owner/repo.git#label'), 'owner/repo');
+  assert.equal(githubRepoOf('https://github.com/owner/repo?ref=x'), 'owner/repo');
+  assert.equal(githubRepoOf('https://github.com/owner/repo.git/#x'), 'owner/repo');
+  const publicRepo = async (url) => (url === 'https://api.github.com/repos/owner/repo' ? { status: 200 } : { status: 404 });
+  await assert.rejects(assertNotPublic('https://github.com/owner/repo.git#label', publicRepo), /public repository/);
+});
+
+test('a failed snapshot never stores or prints a known secret from an error message', async () => {
+  // Codex P2 4310827238: a dangling soul symlink named after a stored secret.
+  const { home } = await setUp();
+  const { symlinkSync } = await import('node:fs');
+  symlinkSync(path.join(home, 'missing-target'), path.join(home, 'agents', `${NAMED}.md`));
+  const error = await now(home, { env: {}, fetchImpl: notFound }).then(() => undefined, (e) => e);
+  assert.ok(error, 'the run should fail on the dangling soul');
+  assert.ok(!error.message.includes(NAMED), error.message);
+  const saved = readFileSync(path.join(home, 'backup', 'status.json'), 'utf8');
+  assert.equal(JSON.parse(saved).ok, false);
+  assert.ok(!saved.includes(NAMED), saved);
+});
+
+test('a re-init that fails puts back the push URLs origin had', async () => {
+  // Codex P2 4310827247.
+  const { home, remote } = await setUp();
+  const gitDir = repoDir(home);
+  const second = bareRemote();
+  execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', remote]);
+  execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', second]);
+  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { branch: 'mini', fetchImpl: notFound }));
+  const pushUrls = execFileSync('git', ['--git-dir', gitDir, 'remote', 'get-url', '--push', '--all', 'origin']).toString().trim().split('\n');
+  assert.deepEqual(pushUrls, [remote, second]);
+});

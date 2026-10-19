@@ -9,7 +9,7 @@ import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, restoreRefs, revParse, saveBranchRefs, syncWithRemote } from './git.js';
-import { KEY_PATTERNS, REDACTED, collectKnownSecrets, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
+import { KEY_PATTERNS, REDACTED, collectKnownSecrets, credentialSourcesState, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
 export const backupDir = (home) => path.join(home, 'backup');
@@ -161,7 +161,7 @@ const assertNoneArePublic = async (remote, repo, fetchImpl) => {
  * checks before it syncs or pushes: the marker such a rollback leaves, and
  * origin itself, as a backstop for a marker that could not be written.
  */
-const assertRepositoryMatches = async (home, remote) => {
+export const assertRepositoryMatches = async (home, remote) => {
   const stop = 'Run init again with the remote you want.';
   if (await readFile(reinitFile(home)).then(() => true, (error) => error.code !== 'ENOENT')) {
     throw new Error(`An earlier init failed and could not undo its changes to the backup repository, so nothing was pushed. ${stop}`);
@@ -187,6 +187,12 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
   try {
     const previous = await readJson(settingsFile(home));
     const repo = repoDir(home);
+    // A failed rollback left refs or an origin this machine cannot vouch
+    // for, and the remote may not have the branch to replace them, so the
+    // init that clears the stop starts from a fresh repository. The suspect
+    // one is moved aside, never deleted: it may hold local history.
+    const suspect = await readFile(reinitFile(home)).then(() => true, (error) => error.code !== 'ENOENT');
+    if (suspect) await rename(repo, `${repo}.suspect-${new Date().toISOString().replace(/[:.]/g, '-')}`).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     // initRepository clears origin's push URLs, so a failed re-init has to
     // put back the ones it had, not only the fetch URL.
     const previousPushUrls = await pushUrlsOf(repo);
@@ -400,15 +406,17 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     const settings = await readSettings(home);
     await assertRepositoryMatches(home, settings.remote);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
-    // The secrets are read before and after the snapshot. If they differ, a
-    // credential rotated while the files were read, maybe more than once, and
-    // a value seen only in between is in neither set, so the snapshot is read
-    // again until both reads agree. Every value seen is still replaced: a
-    // file may hold the one rotated away.
+    // The credential files are checked before and after the snapshot. If
+    // either changed, even away and back to the same values, a credential may
+    // have been stored only while the files were read, and that value is in
+    // neither read, so the snapshot is read again until one is taken while
+    // no credential source changed at all. Every value seen is still
+    // replaced: a file may hold the one rotated away.
     let entries;
     let manifest;
     let seen = new Set();
     for (let attempt = 1; ; attempt += 1) {
+      const startState = await credentialSourcesState(home);
       const start = await collectKnownSecrets(home);
       seen = new Set([...seen, ...start]);
       before = seen;
@@ -416,7 +424,7 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
       await afterSnapshot?.();
       const end = await collectKnownSecrets(home);
       seen = new Set([...seen, ...end]);
-      if (sameSet(start, end)) break;
+      if (sameSet(start, end) && (await credentialSourcesState(home)) === startState) break;
       if (attempt === SNAPSHOT_ATTEMPTS) {
         throw new Error(
           `Stored credentials changed while each of ${SNAPSHOT_ATTEMPTS} snapshots was read, so one may hold a value `

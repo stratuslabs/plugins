@@ -37,8 +37,11 @@ by a link while it is read is skipped too, with anything read through it (a
 swap made and undone between two checks is not seen).
 
 Running `init` again with another remote changes nothing if it fails. If it
-also can't undo its own changes to the backup repository, runs stop with a
-message until an `init` succeeds, rather than push another remote's history.
+also can't undo its own changes to the backup repository, runs and restores
+from this machine's repository stop with a message until an `init` succeeds,
+rather than push or restore another remote's history. That `init` starts
+from a fresh repository and moves the old one aside to
+`backup/repo.suspect-<time>`, never deleting it.
 
 **Sessions and workspaces are not backed up yet.** They hold arbitrary tool
 output, and a scan cannot promise to find a secret a tool wrote in some
@@ -57,10 +60,13 @@ encoded form. They need encryption first, which is planned.
    `chatgpt` sign-in marker is not a secret and is skipped). In the config, every string under a key named like a credential (`token`,
    `apiKey`, `secret`, `password`, ...) or in an `env` block is replaced
    too, at any depth, arrays included. Credentials are read before and
-   after the files; if they differ, one rotated mid-run, so the snapshot is
-   read again (three tries, then the run stops). Every value either read saw
-   is replaced. A credential rotated and then rotated back to the same value
-   within one read is not detected.
+   after the files, along with each credential file's inode, size and
+   change time. If anything moved, even a credential rotated away and back
+   to the same value, the snapshot is read again (three tries, then the run
+   stops), so the one committed was read while no credential changed. Every
+   value either read saw is replaced. A value stored only briefly and copied
+   somewhere permanent before it was removed was never seen, so it cannot be
+   replaced; the scan below is the backstop for key-shaped ones.
 2. **A scan.** Anything still shaped like a well-known key (Anthropic,
    OpenAI, Slack, GitHub, AWS, Google, Stripe, Fly.io, private keys) stops
    the run before anything is committed. The error gives the file, line and

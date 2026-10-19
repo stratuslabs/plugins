@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -441,7 +441,10 @@ test('a credential rotated while the snapshot is read is still replaced in its o
   credentials.named.shared['deploy.key'] = old;
   writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
   appendFileSync(path.join(home, 'agents', 'blair', 'memory.jsonl'), `${JSON.stringify({ id: 'm9', agentId: 'blair', content: `deploy with ${old}` })}\n`);
+  let rotated = false;
   const afterSnapshot = () => {
+    if (rotated) return;
+    rotated = true;
     credentials.named.shared['deploy.key'] = 'the-new-secret-after-rotation';
     writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
   };
@@ -837,3 +840,69 @@ test('a re-init whose ref rollback fails stops later runs instead of pushing for
   await init(home, remote, { branch: 'fresh', fetchImpl: notFound });
   assert.equal((await now(home, { env: {}, fetchImpl: notFound })).pushed, true);
 });
+
+test('a credential rotated away and back while the snapshot is read still forces a reread', async () => {
+  // Codex P1 4313976876: A -> B -> A left the before and after values equal,
+  // so a snapshot read while B was stored was committed with B unknown.
+  const { home } = await setUp();
+  const file = path.join(home, 'credentials.json');
+  const original = readFileSync(file, 'utf8');
+  const credentials = JSON.parse(original);
+  credentials.named.shared['deploy.key'] = 'briefly-stored-secret-value-77';
+  let reads = 0;
+  const afterSnapshot = () => {
+    reads += 1;
+    if (reads > 1) return;
+    writeFileSync(file, JSON.stringify(credentials));
+    writeFileSync(file, original);
+  };
+  await now(home, { env: {}, fetchImpl: notFound, afterSnapshot });
+  assert.equal(reads, 2, 'the snapshot read while the credentials moved is not the one committed');
+  const always = () => { writeFileSync(file, JSON.stringify(credentials)); writeFileSync(file, original); };
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound, afterSnapshot: always }), /changed while each of 3 snapshots/);
+});
+
+const leaveSuspectRepository = async () => {
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  const elsewhere = makeHome();
+  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  const foreign = (await now(elsewhere.home, { env: {}, fetchImpl: notFound })).commit;
+  const blocker = path.join(home, 'backup', `settings.json.${process.pid}.tmp`);
+  mkdirSync(blocker);
+  const lock = path.join(repoDir(home), 'packed-refs.lock');
+  writeFileSync(lock, '');
+  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  rmSync(lock);
+  rmSync(blocker, { recursive: true });
+  assert.ok(existsSync(path.join(home, 'backup', 'needs-init')));
+  return { home, remote, foreign };
+};
+
+test('the init that clears a failed rollback starts from a fresh repository, keeping the suspect one aside', async () => {
+  // Codex P1 4313976888: retrying init with the same branch kept the foreign
+  // local ref when the desired remote lacked the branch, then cleared the stop.
+  const { home, remote, foreign } = await leaveSuspectRepository();
+  await init(home, remote, { branch: 'mini', fetchImpl: notFound });
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  assert.equal(result.pushed, true);
+  const contains = spawnSyncCode('git', ['--git-dir', remote, 'merge-base', '--is-ancestor', foreign, 'refs/heads/mini']);
+  assert.notEqual(contains, 0, 'the foreign history never reaches the remote');
+  const kept = readdirSync(path.join(home, 'backup')).filter((name) => name.startsWith('repo.suspect-'));
+  assert.equal(kept.length, 1, 'the suspect repository is moved aside, not deleted');
+});
+
+test('a configured restore refuses while a failed rollback has left the repository suspect', async () => {
+  // Codex P1 4313976897: restore from this machine's repository skipped the
+  // check that stops runs, so --offline could restore the foreign ref.
+  const { main } = await import('../src/cli.js');
+  const { home } = await leaveSuspectRepository();
+  const userHome = path.dirname(home);
+  const target = path.join(tmp(), 'restored');
+  await assert.rejects(main(['restore', target, '--offline'], { env: { HOME: userHome, PATH: process.env.PATH }, out: () => {} }), /init again/);
+  assert.ok(!existsSync(target));
+});
+
+function spawnSyncCode(command, args) {
+  return spawnSync(command, args, { stdio: 'ignore' }).status;
+}

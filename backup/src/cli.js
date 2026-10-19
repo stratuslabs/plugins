@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { allow, init, now, readSettings, repoDir, shownRemote, status, takeLock } from './backup.js';
+import { allow, assertRepositoryMatches, init, now, readSettings, repoDir, shownRemote, status, takeLock } from './backup.js';
 import { restore } from './restore.js';
 import { commandFor, disable, enable, parseTime } from './timer.js';
 
@@ -86,6 +86,9 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
         const release = await takeLock(home);
         try {
           const settings = await readSettings(home);
+          // The same stop a run obeys: a repository a failed init could not
+          // undo may hold another remote's history.
+          await assertRepositoryMatches(home, settings.remote);
           result = await restore(path.resolve(cwd, argument), { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true });
         } finally {
           await release();

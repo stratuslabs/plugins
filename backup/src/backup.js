@@ -48,12 +48,45 @@ export const githubRepoOf = (remote) => {
   // git drops a URL's query and fragment before it connects, so the lookup
   // drops them too: `owner/repo.git#label` pushes to owner/repo.
   remote = String(remote).replace(/[?#].*$/s, '');
-  const match = /^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(?:www\.)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?github\.com:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
+  const match = /^(?:(?:https?|ssh|git|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(?:www\.|ssh\.)?github\.com(?::\d+)?\/|(?:[^@/:]+@)?(?:ssh\.)?github\.com:)\/?([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(remote);
   return match ? `${match[1]}/${match[2]}` : undefined;
 };
 
 /** True when the remote's host is github.com, whether or not its path parses. */
-const pointsAtGithub = (remote) => /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?(?:www\.)?github\.com(?:[:/]|$)/i.test(remote);
+const pointsAtGithub = (remote) => /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?(?:www\.|ssh\.)?github\.com(?:[:/]|$)/i.test(remote);
+
+const GITHUB_HOST = /^(?:www\.|ssh\.)?github\.com$/i;
+
+/** Host and path of an SSH remote (ssh://, git+ssh://, or scp-like host:path), else undefined. */
+const sshTargetOf = (remote) => {
+  remote = String(remote).replace(/[?#].*$/s, '');
+  const url = /^(?:ssh|git\+ssh|ssh\+git):\/\/(?:[^@/]+@)?(\[[^\]]+\]|[^/:]+)(?::\d+)?\/+(.*)$/i.exec(remote);
+  if (url) return { host: url[1].replace(/^\[|\]$/g, ''), path: url[2] };
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return undefined;
+  // git reads `host:path` as SSH only when no slash comes before the colon.
+  const scp = /^(?:[^@/:]+@)?(\[[^\]]+\]|[^@/:]+):(.*)$/s.exec(remote);
+  return scp ? { host: scp[1].replace(/^\[|\]$/g, ''), path: scp[2] } : undefined;
+};
+
+/**
+ * The hostname ssh connects to for `host`, from the user's ssh config. An
+ * answer this cannot get is a refusal: the remote may be GitHub under
+ * another name. A custom ssh in GIT_SSH_COMMAND or core.sshCommand that
+ * reads another config is not followed.
+ */
+const sshHostnameOf = (host) => {
+  const refuse = (why) => new Error(`Could not tell where SSH host ${host} connects (${why}), so could not confirm the remote is not a public GitHub repository. Nothing was pushed.`);
+  if (host.startsWith('-')) throw refuse('a host cannot start with "-"');
+  let output;
+  try {
+    output = execFileSync('ssh', ['-G', host], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+  } catch (error) {
+    throw refuse(error.code === 'ENOENT' ? 'ssh is not installed' : 'ssh -G failed');
+  }
+  const line = output.split('\n').find((entry) => /^hostname\s/i.test(entry));
+  if (!line) throw refuse('ssh -G named no hostname');
+  return line.replace(/^hostname\s+/i, '').trim();
+};
 
 /**
  * Refuses a GitHub repository anyone can read. The check is unauthenticated
@@ -64,6 +97,13 @@ export const assertNotPublic = async (remote, fetchImpl = globalThis.fetch) => {
   const repo = githubRepoOf(remote);
   if (repo === undefined) {
     if (pointsAtGithub(remote)) throw new Error('Could not tell which GitHub repository the remote names, so could not confirm it is private. Nothing was pushed.');
+    // An SSH host can be an alias (`Host gh-work` with `HostName github.com`),
+    // so the host git will reach is the one ssh resolves, not the one written.
+    const target = sshTargetOf(remote);
+    if (target !== undefined) {
+      const reached = sshHostnameOf(target.host);
+      if (GITHUB_HOST.test(reached)) return assertNotPublic(`git@github.com:${target.path}`, fetchImpl);
+    }
     return;
   }
   let response;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -555,4 +555,61 @@ test('restore --offline uses this machine\'s copy even when origin holds a newer
   const result = await restore(target, { repo: repoDir(home), branch: 'mini', offline: true });
   assert.equal(result.commit, snapshot.commit);
   assert.equal(refOf(repoDir(home), 'refs/remotes/origin/mini') ?? snapshot.commit, snapshot.commit, 'origin was not fetched');
+});
+
+/** Puts a fake `ssh` first on PATH that resolves `gh-work` to `hostname`. */
+const withFakeSsh = async (script, run) => {
+  const bin = tmp();
+  writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    await run();
+  } finally {
+    process.env.PATH = saved;
+  }
+};
+
+test('an SSH host alias that reaches GitHub is checked as the GitHub repository it reaches', async () => {
+  // Codex P1 4311359164: `Host gh-work / HostName github.com` skipped the check.
+  const aliases = '[ "$1" = "-G" ] || exit 2\ncase "$2" in gh-work) echo "hostname github.com";; gh-443) echo "hostname ssh.github.com";; *) echo "hostname $2";; esac';
+  await withFakeSsh(aliases, async () => {
+    const seen = [];
+    const publicRepo = async (url) => { seen.push(url); return { status: 200 }; };
+    await assert.rejects(assertNotPublic('git@gh-work:owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('ssh://git@gh-work:2222/owner/home.git', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('gh-443:owner/home', publicRepo), /owner\/home is a public repository/);
+    await assert.rejects(assertNotPublic('git@gh-work:owner', publicRepo), /Could not tell which GitHub repository/);
+    await assertNotPublic('git@gh-work:owner/home.git', notFound);
+    await assertNotPublic('git@gitlab.example:owner/home.git', async () => { throw new Error('must not be called'); });
+    assert.deepEqual(seen, Array(3).fill('https://api.github.com/repos/owner/home'));
+    // A full init through the alias is refused before anything is pushed.
+    const fresh = makeHome();
+    await assert.rejects(init(fresh.home, 'git@gh-work:owner/home.git', { branch: 'mini', fetchImpl: publicRepo }), /public repository/);
+  });
+  await assert.rejects(assertNotPublic('git@ssh.github.com:owner/home.git', async () => ({ status: 200 })), /public repository/);
+});
+
+test('an SSH remote whose host ssh cannot resolve is refused, not assumed elsewhere', async () => {
+  await withFakeSsh('exit 255', async () => {
+    await assert.rejects(assertNotPublic('git@gh-work:owner/home.git', async () => { throw new Error('must not be called'); }), /Could not tell where SSH host gh-work.*Nothing was pushed/s);
+  });
+  await assert.rejects(assertNotPublic('git@-oProxyCommand=x:owner/home.git', notFound), /Nothing was pushed/);
+});
+
+test('a configured restore waits for a running backup or init: it refuses while the lock is held, and writes nothing', async () => {
+  // Codex P2 4311359176: restore read the settings and origin without the
+  // lock, so a concurrent init could switch the repository under it.
+  const { main } = await import('../src/cli.js');
+  const { home } = await setUp();
+  await now(home, { env: {}, fetchImpl: notFound });
+  const userHome = path.dirname(home);
+  writeFileSync(path.join(home, 'backup', 'run.lock'), String(process.pid));
+  const target = path.join(tmp(), 'restored');
+  await assert.rejects(main(['restore', target, '--offline'], { env: { HOME: userHome, PATH: process.env.PATH }, out: () => {} }), /Another backup is running/);
+  assert.ok(!existsSync(target));
+  rmSync(path.join(home, 'backup', 'run.lock'));
+  await main(['restore', target, '--offline'], { env: { HOME: userHome, PATH: process.env.PATH }, out: () => {} });
+  assert.ok(existsSync(path.join(target, 'agents', 'blair.md')));
+  assert.ok(!existsSync(path.join(home, 'backup', 'run.lock')), 'the lock is released after the restore');
 });

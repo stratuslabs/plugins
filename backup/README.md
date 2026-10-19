@@ -62,7 +62,11 @@ prompt. That is why the repository must be private. On GitHub, every run
 checks, without credentials, that the repository is not publicly readable
 and refuses to push if it is. The check covers the URL git actually uses,
 so a remote written as an alias (`url.<base>.insteadOf` or `pushInsteadOf`)
-is checked as the GitHub repository it reaches.
+is checked as the GitHub repository it reaches. An SSH host is checked as
+the hostname `ssh -G` resolves it to, so a `Host` alias for github.com is
+caught too; if ssh can't resolve the host, nothing is pushed. A custom ssh
+set in `GIT_SSH_COMMAND` or `core.sshCommand` that reads a different config
+is not followed.
 
 ## How history is kept
 
@@ -86,7 +90,9 @@ Restore writes only into an empty or new directory, never over a home, and
 only plain files under the snapshot's `home/`. Add `--commit <sha>` for an
 older snapshot. If the remote can't be reached, restore stops rather than
 bring back a copy that may be older than the remote's; `--offline` restores
-the latest snapshot this machine already has, without contacting the remote. Then, with the daemon stopped, move the directory to
+the latest snapshot this machine already has, without contacting the remote.
+A restore from this machine's repository waits for no backup or `init` to be
+running, and refuses if one is. Then, with the daemon stopped, move the directory to
 `~/.stratus`, run `stratus setup` to sign in again, and re-add Slack tokens
 and named credentials. Restore lists the config values that were redacted.
 The memory index rebuilds itself. Recall counts are not kept.

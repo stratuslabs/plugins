@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { allow, init, now, readSettings, repoDir, shownRemote, status } from './backup.js';
+import { allow, init, now, readSettings, repoDir, shownRemote, status, takeLock } from './backup.js';
 import { restore } from './restore.js';
 import { commandFor, disable, enable, parseTime } from './timer.js';
 
@@ -76,12 +76,21 @@ export const main = async (argv, { env = process.env, out = console.log, cwd = p
     }
     case 'restore': {
       if (!argument) throw new Error('Name the directory to restore into: stratus-backup restore <dir>');
-      let options = { remote: values.remote, branch: values.branch, commit: values.commit, offline: values.offline === true };
-      if (!values.remote) {
-        const settings = await readSettings(home);
-        options = { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true };
+      let result;
+      if (values.remote) {
+        result = await restore(path.resolve(cwd, argument), { remote: values.remote, branch: values.branch, commit: values.commit, offline: values.offline === true });
+      } else {
+        // This machine's repository is the one init and runs change, so a
+        // restore from it holds their lock from reading the settings on.
+        await readSettings(home);
+        const release = await takeLock(home);
+        try {
+          const settings = await readSettings(home);
+          result = await restore(path.resolve(cwd, argument), { repo: repoDir(home), branch: values.branch ?? settings.branch, commit: values.commit, offline: values.offline === true });
+        } finally {
+          await release();
+        }
       }
-      const result = await restore(path.resolve(cwd, argument), options);
       out(`Restored ${result.commit.slice(0, 12)} into ${path.resolve(cwd, argument)}.`);
       out('Credentials are never backed up: sign in again with `stratus setup` and re-add named credentials and Slack tokens.');
       if (result.manifest.redactedConfigPaths?.length > 0) {

@@ -327,6 +327,11 @@ const assertPathsHoldNoKnownSecret = (entries, needles) => {
   }
 };
 
+/** Snapshots read before a run whose credentials keep changing gives up. */
+const SNAPSHOT_ATTEMPTS = 3;
+
+const sameSet = (a, b) => a.size === b.size && [...a].every((value) => b.has(value));
+
 /** A path as it may be shown: stored secrets and key-shaped text replaced. */
 const shownPath = (entryPath, needles) => {
   let shown = redactBuffer(Buffer.from(entryPath), needles).buffer.toString();
@@ -368,13 +373,31 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     // Read again under the lock: an init that finished meanwhile may have moved the remote.
     const settings = await readSettings(home);
     await assertNoneArePublic(settings.remote, repoDir(home), fetchImpl);
-    // The secrets are read before and after the snapshot, and both sets are
-    // replaced: a credential rotated while the files were read may sit in
-    // them in its old value or its new one.
-    before = await collectKnownSecrets(home);
-    const { entries, manifest } = await buildSnapshot(home, { configPath, env, cwd });
-    await afterSnapshot?.();
-    const needles = needlesFor(new Set([...before, ...await collectKnownSecrets(home)]));
+    // The secrets are read before and after the snapshot. If they differ, a
+    // credential rotated while the files were read, maybe more than once, and
+    // a value seen only in between is in neither set, so the snapshot is read
+    // again until both reads agree. Every value seen is still replaced: a
+    // file may hold the one rotated away.
+    let entries;
+    let manifest;
+    let seen = new Set();
+    for (let attempt = 1; ; attempt += 1) {
+      const start = await collectKnownSecrets(home);
+      seen = new Set([...seen, ...start]);
+      before = seen;
+      ({ entries, manifest } = await buildSnapshot(home, { configPath, env, cwd }));
+      await afterSnapshot?.();
+      const end = await collectKnownSecrets(home);
+      seen = new Set([...seen, ...end]);
+      if (sameSet(start, end)) break;
+      if (attempt === SNAPSHOT_ATTEMPTS) {
+        throw new Error(
+          `Stored credentials changed while each of ${SNAPSHOT_ATTEMPTS} snapshots was read, so one may hold a value `
+            + 'neither read saw. Nothing was pushed; run again once they settle.',
+        );
+      }
+    }
+    const needles = needlesFor(seen);
     let replaced = 0;
     const redacted = entries.map((entry) => {
       const { buffer, count } = redactBuffer(entry.bytes, needles);

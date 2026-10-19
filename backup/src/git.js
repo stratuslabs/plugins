@@ -97,14 +97,25 @@ export const initRepository = async (repo, remote) => {
 };
 
 /**
+ * Whether origin has this exact branch. ls-remote matches a pattern against
+ * the tail of each ref, so `mini` would also match `x/mini`; the full ref is
+ * asked for and the answer checked by name. Returns { code, exists }.
+ */
+export const remoteHasBranch = async (repo, branch, { allowFailure = false } = {}) => {
+  const ref = localRef(branch);
+  const listed = await git(repo, ['ls-remote', 'origin', ref], { allowFailure });
+  const exists = listed.stdout.split('\n').some((line) => line.split('\t')[1] === ref);
+  return { code: listed.code, exists };
+};
+
+/**
  * Brings the remote branch in and makes sure this machine is still its only
  * writer. A branch that moved somewhere this machine never committed means
  * another writer: the run stops rather than push over it or merge with it.
  */
 export const syncWithRemote = async (repo, branch) => {
-  const listed = await git(repo, ['ls-remote', '--heads', 'origin', branch]);
-  const remoteExists = listed.stdout.trim().length > 0;
-  if (!remoteExists) return { remote: undefined };
+  const { exists } = await remoteHasBranch(repo, branch);
+  if (!exists) return { remote: undefined };
   await git(repo, ['fetch', '--quiet', 'origin', `+${localRef(branch)}:${remoteRef(branch)}`]);
   const remote = await revParse(repo, remoteRef(branch));
   const local = await revParse(repo, localRef(branch));

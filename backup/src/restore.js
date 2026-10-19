@@ -7,7 +7,7 @@ import { chmod, mkdir, mkdtemp, readdir, rename, rm, rmdir, writeFile } from 'no
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { git, initRepository, listTree, readBlob, revParse, syncWithRemote } from './git.js';
+import { git, initRepository, listTree, readBlob, remoteHasBranch, revParse, syncWithRemote } from './git.js';
 
 const SAFE_SEGMENT = /^(?!\.{1,2}$)[^/\0]+$/;
 const PRIVATE_FILES = new Set(['config.json', 'memory.jsonl', 'whitelist.json']);
@@ -60,7 +60,7 @@ export const restore = async (target, { repo, remote, branch, commit, offline = 
   try {
     // --offline restores what this machine has and never contacts origin.
     if (branch !== undefined && !offline) {
-      const listed = await git(repo, ['ls-remote', '--heads', 'origin', branch], { allowFailure: true });
+      const listed = await remoteHasBranch(repo, branch, { allowFailure: true });
       if (listed.code !== 0) {
         // Restoring what this machine cached when the remote may hold newer
         // snapshots would bring back stale state and call it a recovery.
@@ -69,7 +69,7 @@ export const restore = async (target, { repo, remote, branch, commit, offline = 
             + 'rerun when the remote is reachable, or pass --offline to restore the latest snapshot this machine has.',
         );
       }
-      if (listed.code === 0 && listed.stdout.trim()) await syncWithRemote(repo, branch);
+      if (listed.exists) await syncWithRemote(repo, branch);
     }
     const ref = commit ?? (branch !== undefined ? `refs/heads/${branch}` : undefined);
     if (ref === undefined) throw new Error('Name a --branch or a --commit to restore.');

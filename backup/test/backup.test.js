@@ -695,3 +695,71 @@ test('a failed run hides a credential that was rotated away while it ran', async
   const saved = readFileSync(path.join(home, 'backup', 'status.json'), 'utf8');
   assert.ok(!saved.includes(old), saved);
 });
+
+test('a branch that only matches the tail of another remote branch is treated as new', async () => {
+  // Codex P2 4312337282: ls-remote matches x/mini for mini, so the exact ref is checked.
+  const fixture = makeHome();
+  const remote = bareRemote();
+  const tree = execFileSync('git', ['--git-dir', remote, 'mktree'], { input: '' }).toString().trim();
+  const other = execFileSync('git', ['--git-dir', remote, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', tree, '-m', 'other'])
+    .toString().trim();
+  execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/x/mini', other]);
+  await init(fixture.home, remote, { branch: 'mini', fetchImpl: notFound });
+  const result = await now(fixture.home, { env: {}, fetchImpl: notFound });
+  assert.equal(result.pushed, true);
+  assert.equal(refOf(remote, 'refs/heads/mini'), result.commit);
+  assert.equal(refOf(remote, 'refs/heads/x/mini'), other);
+  const target = path.join(tmp(), 'restored');
+  const restored = await restore(target, { repo: repoDir(fixture.home), branch: 'mini' });
+  assert.equal(restored.commit, result.commit);
+});
+
+test('credentials still changing after the snapshot was read get a fresh snapshot', async () => {
+  // Codex P1 4312337294: A before, B while a file was read, C after. B is
+  // never in either endpoint set, so a run whose credentials moved reads again.
+  const { home, remote } = await setUp();
+  const credentials = JSON.parse(readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+  const mirror = path.join(home, 'skills', 'notes', 'token.txt');
+  credentials.named.shared['deploy.key'] = 'credential-value-a-0123456789';
+  writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  writeFileSync(mirror, 'credential-value-b-0123456789\n');
+  let calls = 0;
+  const afterSnapshot = () => {
+    calls += 1;
+    if (calls > 1) return;
+    credentials.named.shared['deploy.key'] = 'credential-value-c-0123456789';
+    writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+    writeFileSync(mirror, 'credential-value-c-0123456789\n');
+  };
+  await now(home, { env: {}, fetchImpl: notFound, afterSnapshot });
+  assert.equal(calls, 2);
+  const everything = Object.values(treeOf(remote, 'refs/heads/mini')).join('\n');
+  assert.ok(!everything.includes('credential-value-b'), 'the intermediate credential was pushed');
+  assert.ok(!everything.includes('credential-value-c'));
+});
+
+test('a run whose credentials never hold still stops without pushing', async () => {
+  const { home, remote } = await setUp();
+  const credentials = JSON.parse(readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+  let calls = 0;
+  const afterSnapshot = () => {
+    calls += 1;
+    credentials.named.shared['deploy.key'] = `credential-value-${calls}-0123456789`;
+    writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(credentials));
+  };
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound, afterSnapshot }), /credentials changed/);
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('a skill that is a git worktree or submodule leaves its .git file out', async () => {
+  // Codex P2 4312337300: a .git file holds a gitdir pointer with a local path.
+  const { home, remote } = await setUp();
+  mkdirSync(path.join(home, 'skills', 'linked'));
+  writeFileSync(path.join(home, 'skills', 'linked', 'SKILL.md'), '# Linked\n');
+  writeFileSync(path.join(home, 'skills', 'linked', '.git'), 'gitdir: /Users/someone/src/linked/.git/worktrees/linked\n');
+  const result = await now(home, { env: {}, fetchImpl: notFound });
+  const files = treeOf(remote, 'refs/heads/mini');
+  assert.ok(files['home/skills/linked/SKILL.md']);
+  assert.equal(files['home/skills/linked/.git'], undefined);
+  assert.ok(result.skipped.some((s) => s.path === 'home/skills/linked/.git' && s.reason === 'nested git metadata'));
+});

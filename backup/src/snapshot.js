@@ -114,12 +114,14 @@ const walkSkills = async (dir, relative, entries, skipped) => {
   for (const name of names) {
     const full = path.join(dir, name);
     const rel = `${relative}/${name}`;
+    // A worktree or submodule has a .git file, not a directory, and its
+    // gitdir pointer names a local path, so the name decides before the type.
+    if (name === '.git') {
+      skipped.push({ path: rel, reason: 'nested git metadata' });
+      continue;
+    }
     const info = await lstat(full);
     if (info.isDirectory()) {
-      if (name === '.git') {
-        skipped.push({ path: rel, reason: 'nested git metadata' });
-        continue;
-      }
       await walkSkills(full, rel, entries, skipped);
     } else if (info.isSymbolicLink()) {
       skipped.push({ path: rel, reason: 'symbolic link' });

@@ -29,7 +29,8 @@ The trusted config is the one `stratus serve` would use: `--config`, then
 `now` and `enable` if your service uses one. A config named by `--config` or
 `STRATUS_CONFIG` that doesn't exist fails the run rather than being left out.
 
-In skills, only regular files are copied. Nested `.git` directories,
+In skills, only regular files are copied. Nested `.git` metadata (a
+directory, or the file a worktree or submodule has),
 symbolic links, hard-linked files and files that keep changing while read
 are skipped, and each run names what it skipped.
 
@@ -49,7 +50,11 @@ encoded form. They need encryption first, which is planned.
    so it stops the run too, naming where it is stored (Codex's fixed
    `chatgpt` sign-in marker is not a secret and is skipped). In the config, every string under a key named like a credential (`token`,
    `apiKey`, `secret`, `password`, ...) or in an `env` block is replaced
-   too, at any depth, arrays included.
+   too, at any depth, arrays included. Credentials are read before and
+   after the files; if they differ, one rotated mid-run, so the snapshot is
+   read again (three tries, then the run stops). Every value either read saw
+   is replaced. A credential rotated and then rotated back to the same value
+   within one read is not detected.
 2. **A scan.** Anything still shaped like a well-known key (Anthropic,
    OpenAI, Slack, GitHub, AWS, Google, Stripe, Fly.io, private keys) stops
    the run before anything is committed. The error gives the file, line and

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -906,3 +906,49 @@ test('a configured restore refuses while a failed rollback has left the reposito
 function spawnSyncCode(command, args) {
   return spawnSync(command, args, { stdio: 'ignore' }).status;
 }
+
+test('a failed rollback stays stopped even when the marker could not be written then', async () => {
+  // Codex P1 4314720225: the marker was written only after the rollback
+  // failed, so a backup directory that turned read-only by then let a later
+  // run commit and push the foreign ref. It is armed before the repository changes.
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  const elsewhere = makeHome();
+  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  const foreign = (await now(elsewhere.home, { env: {}, fetchImpl: notFound })).commit;
+  const dir = path.join(home, 'backup');
+  const lock = path.join(repoDir(home), 'packed-refs.lock');
+  let armed;
+  const afterRepositoryChanged = () => {
+    armed = existsSync(path.join(dir, 'needs-init'));
+    writeFileSync(lock, '');
+    chmodSync(dir, 0o500);
+  };
+  try {
+    await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound, afterRepositoryChanged }));
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  rmSync(lock);
+  rmSync(path.join(dir, 'run.lock'), { force: true });
+  assert.equal(armed, true, 'the stop exists before the repository changes');
+  await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /init again/);
+  const contains = spawnSyncCode('git', ['--git-dir', remote, 'merge-base', '--is-ancestor', foreign, 'refs/heads/mini']);
+  assert.notEqual(contains, 0);
+});
+
+test('an init that cannot arm its stop changes nothing', async () => {
+  const { home, remote } = await setUp();
+  const other = bareRemote();
+  // A directory where the marker goes makes writing it fail; readers would
+  // see it as present, so it is removed before the run.
+  const marker = path.join(home, 'backup', 'needs-init');
+  let failed;
+  const blocked = init(home, other, { branch: 'mini', fetchImpl: notFound, beforeArm: () => mkdirSync(marker) });
+  await blocked.catch((error) => { failed = error; });
+  rmSync(marker, { recursive: true, force: true });
+  assert.ok(failed, 'init fails when the stop cannot be armed');
+  const origin = spawnSync('git', ['-C', repoDir(home), 'config', '--get', 'remote.origin.url'], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(origin, remote, 'origin untouched');
+  await now(home, { env: {}, fetchImpl: notFound });
+});

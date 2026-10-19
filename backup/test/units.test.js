@@ -469,3 +469,37 @@ test('a skill file replaced by a hard link after its lstat is skipped', async ()
   assert.ok(!entries.some((entry) => entry.bytes.toString() === 'outside the home'), JSON.stringify(entries.map((e) => e.path)));
   assert.ok(skipped.some((s) => s.path === 'home/skills/SKILL.md' && s.reason === 'hard link'), JSON.stringify(skipped));
 });
+
+test('an agent directory swapped for one missing its state files stops the snapshot', async () => {
+  // Codex P2 4314720237: a missing file returned before the chain was rechecked,
+  // so the replacement's absent memory.jsonl would be committed as deleted.
+  const { mkdirSync: mk, renameSync } = await import('node:fs');
+  const { buildSnapshot } = await import('../src/snapshot.js');
+  const { makeHome } = await import('./helpers.js');
+  const { home } = makeHome();
+  const blair = path.join(home, 'agents', 'blair');
+  const hooks = {
+    beforeRead: (file) => {
+      if (file !== path.join(blair, 'memory.jsonl')) return;
+      renameSync(blair, `${blair}.old`);
+      mk(blair);
+    },
+  };
+  await assert.rejects(buildSnapshot(home, { hooks }), /changed while it was read/);
+});
+
+test('a skill entry removed between the listing and its lstat is skipped, not fatal', async () => {
+  // Codex P2 4314720246.
+  const { mkdirSync: mk, rmSync } = await import('node:fs');
+  const { walkSkills } = await import('../src/snapshot.js');
+  const skills = path.join(tmp(), 'skills');
+  mk(skills);
+  writeFileSync(path.join(skills, 'gone.md'), 'x');
+  writeFileSync(path.join(skills, 'kept.md'), 'y');
+  const entries = [];
+  const skipped = [];
+  const beforeLstat = (full) => { if (full.endsWith('gone.md')) rmSync(full); };
+  await walkSkills(skills, 'home/skills', entries, skipped, { beforeLstat });
+  assert.deepEqual(entries.map((entry) => entry.path), ['home/skills/kept.md']);
+  assert.ok(skipped.some((s) => s.path === 'home/skills/gone.md' && s.reason === 'changed while it was read'), JSON.stringify(skipped));
+});

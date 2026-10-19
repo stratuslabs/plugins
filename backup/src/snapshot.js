@@ -119,7 +119,7 @@ const sameDirectories = async (chain) => {
  * with anything read through it. Node has no openat, so a swap made and
  * undone between two checks is not seen; that takes a writer racing the walk
  * on purpose, which could as well copy the file into the skills tree.
- * `hooks.beforeList(dir)` is a test seam.
+ * `hooks.beforeList(dir)` and `hooks.beforeLstat(path)` are test seams.
  */
 export const walkSkills = async (dir, relative, entries, skipped, hooks = {}, parents = []) => {
   let names;
@@ -155,7 +155,17 @@ export const walkSkills = async (dir, relative, entries, skipped, hooks = {}, pa
       skipped.push({ path: rel, reason: 'nested git metadata' });
       continue;
     }
-    const info = await lstat(full);
+    await hooks.beforeLstat?.(full);
+    let info;
+    try {
+      info = await lstat(full);
+    } catch (error) {
+      // Removed or renamed since the listing: a skill being installed or
+      // cleaned up, skipped like any other entry that changed mid-walk.
+      if (error.code !== 'ENOENT') throw error;
+      skipped.push({ path: rel, reason: 'changed while it was read' });
+      continue;
+    }
     if (info.isDirectory()) {
       await walkSkills(full, rel, entries, skipped, hooks, chain);
     } else if (info.isSymbolicLink()) {
@@ -196,8 +206,15 @@ const assertSameDirectories = async (chain, file) => {
  * the read, since open follows a directory swapped for a link.
  */
 const addRequired = async (entries, file, rel, { chain = [], hooks = {}, ...options } = {}) => {
-  if (!(await exists(file))) return undefined;
   await hooks.beforeRead?.(file);
+  // Missing is only believed once the directories on the way are the ones
+  // checked: a replaced agent directory lacking the file would otherwise
+  // be committed as that file deleted. A file that is there but cannot be
+  // opened (a dangling soul link) still fails the run.
+  if (!(await exists(file))) {
+    await assertSameDirectories(chain, file);
+    return undefined;
+  }
   const { bytes, mode, nlink } = await readStable(file, options);
   await assertSameDirectories(chain, file);
   if (nlink > 1) throw new Error(`${file} has another hard link. Break the link (copy the file over itself) and try again.`);

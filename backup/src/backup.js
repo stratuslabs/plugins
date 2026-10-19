@@ -177,7 +177,7 @@ const pushUrlsOf = async (repo) => {
   return result.code === 0 ? result.stdout.split('\n').filter(Boolean) : [];
 };
 
-export const init = async (home, remote, { branch = defaultBranch(), fetchImpl } = {}) => {
+export const init = async (home, remote, { branch = defaultBranch(), fetchImpl, beforeArm, afterRepositoryChanged } = {}) => {
   if (!isUsableBranch(branch)) throw new Error(`${JSON.stringify(branch)} is not a usable branch name.`);
   await assertNoneArePublic(remote, undefined, fetchImpl);
   await mkdir(backupDir(home), { recursive: true, mode: 0o700 });
@@ -199,9 +199,16 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
     // syncWithRemote may adopt the new remote's branch; a rollback must drop
     // it, or a later run could push that history to the old remote.
     const previousRefs = await saveBranchRefs(repo, branch);
+    // The stop is armed before the repository changes and cleared only once
+    // it is known good, so a rollback that fails while the backup directory
+    // can no longer be written still leaves runs stopped. An init that
+    // cannot arm it fails here, having changed nothing.
+    await beforeArm?.();
+    await writeFile(reinitFile(home), `${new Date().toISOString()}\n`, { mode: 0o600 });
     await initRepository(repo, remote);
     let existing;
     try {
+      await afterRepositoryChanged?.();
       await assertNoneArePublic(remote, repo, fetchImpl);
       ({ remote: existing } = await syncWithRemote(repo, branch));
       await writeJson(settingsFile(home), { remote, branch, allow: previous?.allow ?? [] });
@@ -209,14 +216,15 @@ export const init = async (home, remote, { branch = defaultBranch(), fetchImpl }
       // Settings are not changed, so the repository must not be either: the
       // branch refs go back, and origin is put back to the remote the
       // settings still name, so later runs push where they check. Any step
-      // that fails leaves the marker that stops runs until an init succeeds.
+      // that fails leaves the armed marker, which stops runs until an init
+      // succeeds; a full rollback clears it, unless it was there before.
       let undone = await restoreRefs(repo, previousRefs).then(() => true, () => false);
       if (previous?.remote) {
         undone = await initRepository(repo, previous.remote)
           .then(async () => { for (const url of previousPushUrls) await git(repo, ['config', '--add', 'remote.origin.pushurl', url]); })
           .then(() => undone, () => false);
       }
-      if (!undone) await writeFile(reinitFile(home), `${new Date().toISOString()}\n`, { mode: 0o600 }).catch(() => {});
+      if (undone && !suspect) await rm(reinitFile(home), { force: true }).catch(() => {});
       throw error;
     }
     // Only a finished init clears the stop an earlier failed one left.

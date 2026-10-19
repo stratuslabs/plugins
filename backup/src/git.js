@@ -4,8 +4,10 @@
 // filter, or hook anywhere can change what is stored. History is only ever
 // appended to: nothing here force-pushes or rewrites a ref backwards.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -30,6 +32,9 @@ export const hideUrlCredentials = (text) => String(text)
   .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1***@')
   .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, (_, base) => `${base}?***`);
 
+/** Most bytes a buffered git call keeps of its output. Tests lower it. */
+export const limits = { output: 1024 * 1024 * 512 };
+
 /** Runs git against the backup repository with hooks pointed at nothing. */
 export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) =>
   new Promise((resolve, reject) => {
@@ -39,7 +44,7 @@ export const git = (repo, args, { input, env = {}, allowFailure = false } = {}) 
       {
         env: { ...process.env, ...AUTHOR, GIT_DIR: repo, GIT_TERMINAL_PROMPT: '0', ...env },
         encoding: 'buffer',
-        maxBuffer: 1024 * 1024 * 512,
+        maxBuffer: limits.output,
       },
       (error, stdout, stderr) => {
         const result = { code: error ? (error.code ?? 1) : 0, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), raw: stdout };
@@ -198,3 +203,25 @@ export const listTree = async (repo, commit) => {
 };
 
 export const readBlob = async (repo, oid) => (await git(repo, ['cat-file', 'blob', oid])).raw;
+
+/**
+ * Writes a blob to a new file (`wx`: never over one already there), streamed
+ * from git so a file of any size the backup took can be restored. A buffered
+ * read stops at `limits.output`.
+ */
+export const writeBlobTo = (repo, oid, file, mode) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(
+      'git',
+      ['-c', `core.hooksPath=${os.devNull}`, 'cat-file', 'blob', oid],
+      { env: { ...process.env, ...AUTHOR, GIT_DIR: repo, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exited = new Promise((done) => child.on('close', done));
+    child.on('error', reject);
+    pipeline(child.stdout, createWriteStream(file, { flags: 'wx', mode }))
+      .then(() => exited)
+      .then((code) => (code === 0 ? resolve() : reject(new Error(hideUrlCredentials(`git cat-file failed: ${stderr.trim() || `exit ${code}`}`)))))
+      .catch(reject);
+  });

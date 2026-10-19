@@ -6,7 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { FindingsError, allow, assertNotPublic, githubRepoOf, init, now, repoDir, status } from '../src/backup.js';
 import { restore } from '../src/restore.js';
-import { REDACTED } from '../src/secrets.js';
+import { limits as gitLimits } from '../src/git.js';
+import { REDACTED, scanLimits } from '../src/secrets.js';
 import { GATEWAY, NAMED, SLACK_BOT, bareRemote, makeHome, notFound, refOf, tmp, treeOf } from './helpers.js';
 
 const setUp = async () => {
@@ -988,4 +989,43 @@ test('a credential source that is a symlink stops the run, since its target can 
     await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), new RegExp(`${name.replace('.', '\\.')} is a symbolic link.*Nothing was pushed`, 's'), name);
     assert.equal(refOf(remote, 'refs/heads/mini'), before, `${name}: nothing pushed`);
   }
+});
+
+test('restore writes a file bigger than git output buffering allows, by streaming its blob', async () => {
+  // Codex P1 4315298177: a file over the 512 MiB output buffer was backed
+  // up, then restore's `git cat-file` rejected it. Measured here with the
+  // buffer lowered; the full size was run once by hand.
+  const { home, remote } = await setUp();
+  const big = path.join(home, 'agents', 'blair', 'memory.jsonl');
+  const line = `${JSON.stringify({ fact: 'The launch is on Friday, and the venue is booked for the afternoon.' })}\n`;
+  writeFileSync(big, line.repeat(4000));
+  await now(home, { env: {}, fetchImpl: notFound });
+  const saved = gitLimits.output;
+  gitLimits.output = 64 * 1024;
+  try {
+    const target = path.join(tmp(), 'restored');
+    await restore(target, { remote, branch: 'mini' });
+    assert.ok(statSync(big).size > gitLimits.output * 2);
+    assert.equal(readFileSync(path.join(target, 'agents', 'blair', 'memory.jsonl'), 'utf8'), readFileSync(big, 'utf8'));
+    assert.equal(statSync(path.join(target, 'agents', 'blair', 'memory.jsonl')).mode & 0o777, 0o600);
+  } finally {
+    gitLimits.output = saved;
+  }
+});
+
+test('a file too big to scan for secrets stops the run and names the file', async () => {
+  // Measured with the full-size run: a 560 MiB memory.jsonl failed `now`
+  // inside the redaction with Node's string-length RangeError.
+  const { home, remote } = await setUp();
+  const big = path.join(home, 'agents', 'blair', 'memory.jsonl');
+  writeFileSync(big, 'x'.repeat(200_000));
+  const before = refOf(remote, 'refs/heads/mini');
+  const saved = scanLimits.fileBytes;
+  scanLimits.fileBytes = 100_000;
+  try {
+    await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /agents\/blair\/memory\.jsonl is \d+ bytes, more than .*scan for secrets.*Nothing was pushed/s);
+  } finally {
+    scanLimits.fileBytes = saved;
+  }
+  assert.equal(refOf(remote, 'refs/heads/mini'), before);
 });

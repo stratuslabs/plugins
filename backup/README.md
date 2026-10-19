@@ -121,7 +121,10 @@ A restore from this machine's repository waits for no backup or `init` to be
 running, and refuses if one is. Then, with the daemon stopped, move the directory to
 `~/.stratus`, run `stratus setup` to sign in again, and re-add Slack tokens
 and named credentials. Restore lists the config values that were redacted.
-The memory index rebuilds itself. Recall counts are not kept.
+The memory index rebuilds itself. Recall counts are not kept. Each file is
+streamed from git to disk, so any file a backup took restores. A file too
+big for the secret scan (about 512 MiB, Node's longest string) stops `now`
+with its name, before anything is committed.
 
 A soul with no `id:` or `name:` gets an id generated from its file path, so
 restored at a different path its memories would not line up. `now` warns

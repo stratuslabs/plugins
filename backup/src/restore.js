@@ -3,11 +3,11 @@
 // target and renamed into place at the end, so a failed restore leaves no
 // half-written home behind.
 
-import { chmod, mkdir, mkdtemp, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, rmdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { git, initRepository, listTree, readBlob, remoteHasBranch, revParse, syncWithRemote } from './git.js';
+import { git, initRepository, listTree, readBlob, remoteHasBranch, revParse, syncWithRemote, writeBlobTo } from './git.js';
 
 const SAFE_SEGMENT = /^(?!\.{1,2}$)[^/\0]+$/;
 const PRIVATE_FILES = new Set(['config.json', 'memory.jsonl', 'whitelist.json']);
@@ -91,15 +91,14 @@ export const restore = async (target, { repo, remote, branch, commit, offline = 
         throw new Error(`The snapshot holds an unexpected path, ${JSON.stringify(item.path)}. Not restoring.`);
       }
       const relative = segments.slice(1);
-      const bytes = await readBlob(repo, item.oid);
       if (relative.length === 1 && relative[0] === 'schedules.jsonl') {
-        schedules = bytes.toString('utf8');
+        schedules = (await readBlob(repo, item.oid)).toString('utf8');
         continue;
       }
       const file = path.join(staging, ...relative);
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       const mode = item.mode === '100755' ? 0o755 : PRIVATE_FILES.has(relative.at(-1)) ? 0o600 : 0o644;
-      await writeFile(file, bytes, { mode, flag: 'wx' });
+      await writeBlobTo(repo, item.oid, file, mode);
       await chmod(file, mode);
     }
     if (schedules !== undefined) {

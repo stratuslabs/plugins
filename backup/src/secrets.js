@@ -12,8 +12,15 @@
 // Neither layer can find a secret an agent rewrote into a form nothing
 // recognizes. That limit is stated in the README rather than papered over.
 
+import { constants } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
+
+/**
+ * The biggest file the secret scan can read: it reads bytes as one latin1
+ * string, and Node caps a string's length. Tests lower it.
+ */
+export const scanLimits = { fileBytes: constants.MAX_STRING_LENGTH };
 import path from 'node:path';
 
 export const REDACTED = '[redacted by stratus-backup]';

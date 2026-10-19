@@ -9,7 +9,7 @@ import { link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { commitSnapshot, hideUrlCredentials, isUsableBranch, git, initRepository, localRef, push, restoreRefs, revParse, saveBranchRefs, syncWithRemote } from './git.js';
-import { KEY_PATTERNS, REDACTED, collectKnownSecrets, credentialSourcesState, needlesFor, redactBuffer, scanBuffer } from './secrets.js';
+import { KEY_PATTERNS, REDACTED, collectKnownSecrets, credentialSourcesState, needlesFor, redactBuffer, scanBuffer, scanLimits } from './secrets.js';
 import { buildSnapshot } from './snapshot.js';
 
 export const backupDir = (home) => path.join(home, 'backup');
@@ -444,6 +444,14 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
         throw new Error(
           `Stored credentials changed while each of ${SNAPSHOT_ATTEMPTS} snapshots was read, so one may hold a value `
             + 'neither read saw. Nothing was pushed; run again once they settle.',
+        );
+      }
+    }
+    for (const entry of entries) {
+      if (entry.bytes.length > scanLimits.fileBytes) {
+        throw new Error(
+          `${entry.path} is ${entry.bytes.length} bytes, more than the ${scanLimits.fileBytes} the backup can scan for secrets. `
+            + 'Nothing was pushed; trim or remove the file and run again.',
         );
       }
     }

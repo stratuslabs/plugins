@@ -352,7 +352,12 @@ export const now = async (home, { configPath, env, cwd, fetchImpl, clock = () =>
     const commit = await commitSnapshot(repo, settings.branch, redacted, `Snapshot ${startedAt}`);
     const head = await revParse(repo, localRef(settings.branch));
     const pushed = head !== remote;
-    if (pushed) await push(repo, settings.branch);
+    if (pushed) {
+      // Building and redacting the snapshot takes a while, and the
+      // repository's visibility can change meanwhile, so check again last.
+      await assertNoneArePublic(settings.remote, repo, fetchImpl);
+      await push(repo, settings.branch);
+    }
     // Skipped paths are printed and logged, so they get the same redaction the manifest did.
     const skipped = manifest.skipped.map((item) => ({ ...item, path: shownPath(item.path, needles) }));
     const result = { commit: head, pushed, unchanged: commit === undefined, replaced, skipped, manifest };

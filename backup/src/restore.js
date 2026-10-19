@@ -58,9 +58,10 @@ export const restore = async (target, { repo, remote, branch, commit, offline = 
   await mkdir(parent, { recursive: true });
   const staging = await mkdtemp(path.join(parent, `.${path.basename(destination)}.restoring-`));
   try {
-    if (branch !== undefined) {
+    // --offline restores what this machine has and never contacts origin.
+    if (branch !== undefined && !offline) {
       const listed = await git(repo, ['ls-remote', '--heads', 'origin', branch], { allowFailure: true });
-      if (listed.code !== 0 && !offline) {
+      if (listed.code !== 0) {
         // Restoring what this machine cached when the remote may hold newer
         // snapshots would bring back stale state and call it a recovery.
         throw new Error(

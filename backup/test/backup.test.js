@@ -525,3 +525,34 @@ test('a re-init that fails puts back the push URLs origin had', async () => {
   const pushUrls = execFileSync('git', ['--git-dir', gitDir, 'remote', 'get-url', '--push', '--all', 'origin']).toString().trim().split('\n');
   assert.deepEqual(pushUrls, [remote, second]);
 });
+
+test('a repository made public while the snapshot is built is caught before the push', async () => {
+  // Codex P1 4311171728: the only privacy check ran before the snapshot.
+  const { home, remote } = await setUp();
+  execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.pushurl', 'git@github.com:owner/home.git']);
+  let isPublic = false;
+  const flips = async () => ({ status: isPublic ? 200 : 404 });
+  const saved = { ...process.env };
+  try {
+    // A push that slipped past the check fails fast instead of reaching GitHub.
+    process.env.GIT_SSH_COMMAND = 'false';
+    await assert.rejects(now(home, { env: {}, fetchImpl: flips, afterSnapshot: () => { isPublic = true; } }), /public repository/);
+  } finally {
+    process.env = saved;
+  }
+  assert.equal(refOf(remote, 'refs/heads/mini'), undefined);
+});
+
+test('restore --offline uses this machine\'s copy even when origin holds a newer one', async () => {
+  // Codex P2 4311171737: --offline still ran ls-remote and fetched origin.
+  const { home, remote } = await setUp();
+  const snapshot = await now(home, { env: {}, fetchImpl: notFound });
+  const clone = path.join(tmp(), 'clone');
+  execFileSync('git', ['clone', '--quiet', '--branch', 'mini', remote, clone]);
+  execFileSync('git', ['-C', clone, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '--allow-empty', '-m', 'newer']);
+  execFileSync('git', ['-C', clone, 'push', '--quiet', 'origin', 'mini']);
+  const target = path.join(tmp(), 'restored');
+  const result = await restore(target, { repo: repoDir(home), branch: 'mini', offline: true });
+  assert.equal(result.commit, snapshot.commit);
+  assert.equal(refOf(repoDir(home), 'refs/remotes/origin/mini') ?? snapshot.commit, snapshot.commit, 'origin was not fetched');
+});

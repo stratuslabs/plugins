@@ -1,0 +1,46 @@
+{
+  "name": "@stratusagent/plugin-peer",
+  "version": "0.1.0",
+  "description": "peer.delegate: an agent hands a task to an agent on another Stratus daemon and gets its answer back, over signed HTTP.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [{ "name": "peer" }],
+      "tools": [{ "name": "peer.delegate", "risk": "gated" }]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "self": { "type": "string" },
+        "listen": {
+          "type": "object",
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "peers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"],
+            "additionalProperties": false
+          }
+        },
+        "maxDepth": { "type": "number" },
+        "timeoutMs": { "type": "number" }
+      },
+      "required": ["self"],
+      "additionalProperties": false
+    }
+  }
+}

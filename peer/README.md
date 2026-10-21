@@ -69,7 +69,7 @@ and restart both daemons.
 | `peers` | none | Daemons this one may send to: `{ "<name>": { "url": "…" } }` |
 | `listen` | off | `{ host, port }` to accept requests on. Default host `127.0.0.1`, port `4180` |
 | `maxDepth` | `3` | Hops allowed in a chain of delegations, across every daemon in the chain |
-| `timeoutMs` | 10 minutes | How long `peer.delegate` waits for an answer |
+| `timeoutMs` | 10 minutes | How long `peer.delegate` waits for an answer, in whole milliseconds (1 to 2147483647) |
 
 ## Who may reach whom
 
@@ -93,8 +93,13 @@ An answer from a peer is another agent's words. On the receiving daemon the
 turn runs with sender trust `agent`, never as that daemon's principal. On
 the sending side, `peer.delegate`'s output is labelled `agent`.
 
-Use HTTPS, or plain HTTP on a private network only. The signature covers
-the body, but HTTP doesn't hide it.
+Use HTTPS, or plain HTTP on a private network only. The signatures cover
+the bodies, but HTTP doesn't hide them. The answer is signed too, with the
+same secret, and names the request it answers, so an answer that someone
+on the path wrote or replayed comes back as `failed`, never as the agent's
+words. Refusals sent before a request is admitted can't be signed, so
+someone on the path can still make a call fail. They can't make it say
+anything.
 
 ## The hop budget spans daemons
 

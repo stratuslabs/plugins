@@ -28,6 +28,8 @@ import { createServer } from 'node:http';
 export const PROTOCOL_VERSION = 1;
 export const DEFAULT_MAX_DEPTH = 3;
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+/** The longest delay a Node timer holds (2^31 - 1 ms, about 24.8 days). */
+export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 export const MAX_BODY_BYTES = 256 * 1024;
 /** How old a request may be when it arrives, and how far ahead of the receiver's clock. */
 export const FRESHNESS_WINDOW_MS = 10 * 60_000;
@@ -38,12 +40,19 @@ export const PEER_SESSION_PREFIX = 'peer:';
 const ID_PART = /^[A-Za-z0-9._-]{1,64}$/;
 
 export const sign = (secret, body) => `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
+/**
+ * An answer's signature: the same pairwise secret, over a prefix no request
+ * carries, so a request's signature can never be passed off as an answer's.
+ * The answer names the request it is for (`re`), so an old signed answer
+ * cannot be replayed for a new request.
+ */
+export const signResponse = (secret, body) => sign(secret, `peer-response\n${body}`);
 
-const signatureMatches = (secret, body, header) => {
+const signatureMatches = (secret, body, header, signer = sign) => {
   if (typeof header !== 'string') {
     return false;
   }
-  const expected = Buffer.from(sign(secret, body));
+  const expected = Buffer.from(signer(secret, body));
   const given = Buffer.from(header);
   return expected.length === given.length && timingSafeEqual(expected, given);
 };
@@ -113,12 +122,16 @@ const readBody = (request) => new Promise((resolve, reject) => {
   request.on('error', reject);
 });
 
-const respond = (response, status, body) => {
+const respond = (response, status, body, secret) => {
   if (response.headersSent || response.destroyed) {
     return;
   }
-  response.writeHead(status, { 'content-type': 'application/json' });
-  response.end(JSON.stringify(body));
+  const raw = JSON.stringify(body);
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    ...(secret !== undefined ? { [SIGNATURE_HEADER]: signResponse(secret, raw) } : {}),
+  });
+  response.end(raw);
 };
 
 /**
@@ -189,6 +202,11 @@ const createListener = ({ secrets, maxDepth, log }) => {
       return;
     }
     const { body, depth, limit } = decision;
+    // Every answer to an admitted request is signed for that request with the
+    // secret it was signed with. Refusals before admission cannot be: there
+    // is no secret yet, and the caller never takes one as an answer.
+    const secret = secrets[body.to][body.from.daemon];
+    const answer = (status, payload) => respond(response, status, { ...payload, re: body.id }, secret);
     const controller = new AbortController();
     // The caller gave up (cancelled, timed out, or went away): stop the turn
     // rather than finish work nobody will read.
@@ -218,21 +236,21 @@ const createListener = ({ secrets, maxDepth, log }) => {
         },
       });
       if (repeat) {
-        respond(response, 409, { status: 'refused', reason: repeat === 'live' ? 'already running' : 'already answered' });
+        answer(409, { status: 'refused', reason: repeat === 'live' ? 'already running' : 'already answered' });
         return;
       }
       if (controller.signal.aborted) {
-        respond(response, 200, { status: 'cancelled' });
+        answer(200, { status: 'cancelled' });
         return;
       }
       if (session?.status === 'failed') {
-        respond(response, 200, { status: 'failed', error: 'the remote turn failed' });
+        answer(200, { status: 'failed', error: 'the remote turn failed' });
         return;
       }
-      respond(response, 200, { status: 'result', text: finalText(session), agent: body.to });
+      answer(200, { status: 'result', text: finalText(session), agent: body.to });
     } catch (error) {
       log(`peer: a request from ${body.from.daemon} failed: ${error instanceof Error ? error.message : String(error)}`);
-      respond(response, 200, { status: 'failed', error: 'the remote turn failed' });
+      answer(200, { status: 'failed', error: 'the remote turn failed' });
     } finally {
       live.delete(body.id);
     }
@@ -344,13 +362,20 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
     } catch (error) {
       return aborted() ?? { status: 'unreachable', requestId: id, error: error instanceof Error ? error.message : String(error) };
     }
+    let text;
     let answer;
     try {
-      answer = await response.json();
+      text = await response.text();
+      answer = JSON.parse(text);
     } catch {
       return aborted() ?? { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };
     }
     if (answer?.status === 'result' && typeof answer.text === 'string') {
+      // Only an answer signed with this pair's secret, for this request, is
+      // the peer's: on plain HTTP anything on the path could write one.
+      if (answer.re !== id || !signatureMatches(secret, text, response.headers.get(SIGNATURE_HEADER), signResponse)) {
+        return { status: 'failed', requestId: id, error: 'the answer was not signed by the peer for this request, so it was dropped' };
+      }
       return { status: 'result', from: `${daemon}/${agent}`, answer: answer.text, requestId: id };
     }
     if (answer?.status === 'refused') {
@@ -371,7 +396,12 @@ export const createPlugin = (config = {}) => ({
     }
     const log = context.log ?? (() => {});
     const maxDepth = Number.isInteger(config.maxDepth) && config.maxDepth > 0 ? config.maxDepth : DEFAULT_MAX_DEPTH;
-    const timeoutMs = typeof config.timeoutMs === 'number' && config.timeoutMs > 0 ? config.timeoutMs : DEFAULT_TIMEOUT_MS;
+    // AbortSignal.timeout takes a whole number of milliseconds a timer can
+    // hold; anything else would pass here and then throw on every call.
+    if (config.timeoutMs !== undefined && !(Number.isInteger(config.timeoutMs) && config.timeoutMs >= 1 && config.timeoutMs <= MAX_TIMEOUT_MS)) {
+      throw new Error(`@stratusagent/plugin-peer: timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}.`);
+    }
+    const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const peers = config.peers ?? {};
     for (const [name, peer] of Object.entries(peers)) {
       if (!ID_PART.test(name)) {

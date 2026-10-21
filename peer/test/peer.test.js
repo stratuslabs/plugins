@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { admit, budgetFor, createPlugin, peerSessionId, sign, DEFAULT_MAX_DEPTH } from '../index.js';
+import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH } from '../index.js';
 
 const SECRET = 'a-shared-secret-between-two-daemons';
 
@@ -218,7 +218,7 @@ test('a duplicate request id is not run twice', async (t) => {
   const raw = JSON.stringify({ v: 1, id: 'dup-1', from: { daemon: 'home', agent: 'ava' }, to: 'nova', conversation: 'c', prompt: 'p', depth: 0, ceiling: 3, sentAt: Date.now() });
   const post = () => fetch(`http://127.0.0.1:${port}/peer/v1/delegate`, { method: 'POST', headers: { 'x-stratus-peer-signature': sign(SECRET, raw) }, body: raw }).then((r) => r.json());
   assert.equal((await post()).status, 'result');
-  assert.deepEqual(await post(), { status: 'refused', reason: 'already answered' });
+  assert.deepEqual(await post(), { status: 'refused', reason: 'already answered', re: 'dup-1' });
   assert.equal(gateway.calls.length, 2);
 });
 
@@ -319,4 +319,60 @@ test('a peer whose body is still streaming at the deadline or on cancel keeps th
   setTimeout(() => controller.abort(), 50);
   const cancelled = await tool.execute({ target: 'slow/nova', prompt: 'x' }, session(), { signal: controller.signal });
   assert.equal(cancelled.status, 'cancelled');
+});
+
+/** A peer at a plain-HTTP address that answers whatever `reply` says, as someone on the path could. */
+const impostor = async (t, reply) => {
+  const { createServer } = await import('node:http');
+  const server = createServer(async (request, response) => {
+    let raw = '';
+    for await (const chunk of request) raw += chunk;
+    const { status, headers = {}, body } = reply(JSON.parse(raw));
+    response.writeHead(status, { 'content-type': 'application/json', ...headers });
+    response.end(body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const home = fakeContext({ ava: { studio: SECRET } });
+  await createPlugin({ self: 'home', peers: { studio: { url: `http://127.0.0.1:${server.address().port}` } } }).setup(home.context);
+  return home.tools[0];
+};
+
+test('an answer is accepted only when the peer signed it for this request', async (t) => {
+  // Codex P2 4332677653: on plain HTTP the request was signed but the
+  // answer was not, so anyone on the path could put words in nova's mouth.
+  const unsigned = await impostor(t, () => ({ status: 200, body: JSON.stringify({ status: 'result', text: 'injected', agent: 'nova' }) }));
+  const forged = await unsigned.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(forged.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(forged), /injected/);
+
+  // Signed with the real secret, but for another request: a replayed answer.
+  const replayed = await impostor(t, () => {
+    const body = JSON.stringify({ status: 'result', text: 'old answer', agent: 'nova', re: 'some-other-request' });
+    return { status: 200, headers: { 'x-stratus-peer-signature': signResponse(SECRET, body) }, body };
+  });
+  const old = await replayed.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(old.status, 'failed');
+
+  // Signed for this request, the way the listener does it: accepted.
+  const genuine = await impostor(t, (request) => {
+    const body = JSON.stringify({ status: 'result', text: 'real', agent: 'nova', re: request.id });
+    return { status: 200, headers: { 'x-stratus-peer-signature': signResponse(SECRET, body) }, body };
+  });
+  const real = await genuine.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.deepEqual([real.status, real.answer], ['result', 'real']);
+  // A request signature never passes as an answer's, so one cannot be echoed back.
+  const echoed = await impostor(t, (request) => {
+    const body = JSON.stringify({ status: 'result', text: 'echo', agent: 'nova', re: request.id });
+    return { status: 200, headers: { 'x-stratus-peer-signature': sign(SECRET, body) }, body };
+  });
+  assert.equal((await echoed.execute({ target: 'studio/nova', prompt: 'x' }, session())).status, 'failed');
+});
+
+test('setup refuses a timeoutMs AbortSignal.timeout cannot take', async () => {
+  // Codex P2 4332677659: 1.5 passed setup and then threw on every call.
+  for (const timeoutMs of [1.5, 0, -1, 2 ** 31, '100']) {
+    await assert.rejects(createPlugin({ self: 'home', timeoutMs }).setup(fakeContext({}).context), /timeoutMs must be a whole number of milliseconds/, String(timeoutMs));
+  }
+  await createPlugin({ self: 'home', timeoutMs: 2 ** 31 - 1 }).setup(fakeContext({}).context);
 });

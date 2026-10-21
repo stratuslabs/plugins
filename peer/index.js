@@ -79,8 +79,17 @@ export const budgetFor = (session, maxDepth) => {
   return { depth: Number(match[1]) + local, ceiling: Math.min(Number(match[2]), maxDepth) };
 };
 
+/**
+ * The answer of the turn just run: the last non-empty assistant message
+ * after the newest user message. A reused session keeps its history, so
+ * the scan stops at that user message rather than returning an earlier
+ * turn's answer when this one said nothing.
+ */
 const finalText = (session) => {
   for (const message of [...(session?.messages ?? [])].reverse()) {
+    if (message.role === 'user') {
+      return '';
+    }
     if (message.role === 'assistant' && typeof message.content === 'string' && message.content.trim() !== '') {
       return message.content;
     }
@@ -311,6 +320,19 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
     });
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
+    // The signal covers the body as well as the headers, so an abort while
+    // the answer is still streaming keeps the cancelled / timed out outcome.
+    const aborted = () => {
+      if (context.signal?.aborted) {
+        // The receiver aborts its turn when this connection closes, but it
+        // cannot confirm that to a caller that has already gone.
+        return { status: 'cancelled', requestId: id, note: 'the remote turn was asked to stop by closing the connection; it may still have finished' };
+      }
+      if (timeout.aborted) {
+        return { status: 'timed out', requestId: id, afterMs: timeoutMs };
+      }
+      return undefined;
+    };
     let response;
     try {
       response = await fetchImpl(new URL('/peer/v1/delegate', peer.url), {
@@ -320,21 +342,13 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
         signal,
       });
     } catch (error) {
-      if (context.signal?.aborted) {
-        // The receiver aborts its turn when this connection closes, but it
-        // cannot confirm that to a caller that has already gone.
-        return { status: 'cancelled', requestId: id, note: 'the remote turn was asked to stop by closing the connection; it may still have finished' };
-      }
-      if (timeout.aborted) {
-        return { status: 'timed out', requestId: id, afterMs: timeoutMs };
-      }
-      return { status: 'unreachable', requestId: id, error: error instanceof Error ? error.message : String(error) };
+      return aborted() ?? { status: 'unreachable', requestId: id, error: error instanceof Error ? error.message : String(error) };
     }
     let answer;
     try {
       answer = await response.json();
     } catch {
-      return { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };
+      return aborted() ?? { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };
     }
     if (answer?.status === 'result' && typeof answer.text === 'string') {
       return { status: 'result', from: `${daemon}/${agent}`, answer: answer.text, requestId: id };

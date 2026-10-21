@@ -276,3 +276,47 @@ test('stopping the channel aborts turns still running and closes the listener', 
   assert.notEqual(output.status, 'result');
   await assert.rejects(fetch(`http://127.0.0.1:${port}/peer/v1/delegate`, { method: 'POST', body: '{}' }));
 });
+
+test('a reused session whose newest turn says nothing returns no answer, not the previous turn\'s', async (t) => {
+  const history = [{ role: 'user', content: 'one' }, { role: 'assistant', content: 'answer to one' }];
+  const { tool } = await twoDaemons(t, {
+    answer: (input) => {
+      history.push({ role: 'user', content: input.userMessage });
+      if (input.userMessage === 'one') {
+        return { status: 'completed', messages: history.slice(0, 2) };
+      }
+      history.push({ role: 'assistant', content: '' });
+      return { status: 'completed', messages: [...history] };
+    },
+  });
+  const first = await tool.execute({ target: 'studio/nova', prompt: 'one' }, session('conv-a'));
+  assert.equal(first.answer, 'answer to one');
+  const second = await tool.execute({ target: 'studio/nova', prompt: 'two' }, session('conv-a'));
+  assert.equal(second.status, 'result');
+  assert.equal(second.answer, '');
+});
+
+test('a peer whose body is still streaming at the deadline or on cancel keeps the timed out / cancelled outcome', async (t) => {
+  const { createServer } = await import('node:http');
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"status":"res');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const home = fakeContext({ ava: { slow: SECRET } });
+  await createPlugin({ self: 'home', timeoutMs: 150, peers: { slow: { url: `http://127.0.0.1:${server.address().port}` } } }).setup(home.context);
+  const tool = home.tools[0];
+
+  const timedOut = await tool.execute({ target: 'slow/nova', prompt: 'x' }, session());
+  assert.deepEqual([timedOut.status, timedOut.afterMs], ['timed out', 150]);
+
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+  const cancelled = await tool.execute({ target: 'slow/nova', prompt: 'x' }, session(), { signal: controller.signal });
+  assert.equal(cancelled.status, 'cancelled');
+});

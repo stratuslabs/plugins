@@ -6,14 +6,60 @@ it runs whether or not the daemon is up.
 
 ```bash
 npm install -g @stratusagent/plugin-backup   # installs the stratus-backup command
-stratus-backup init git@github.com:you/stratus-home-backup.git   # one branch per machine, named after the host
+stratus-backup keygen --out ~/backup-identity.txt                 # prints its public key, age1...
+# Move backup-identity.txt off this machine (a password manager). Lose it and the encrypted files are gone.
+stratus-backup init git@github.com:you/stratus-home-backup.git --recipient age1...   # one branch per machine, named after the host
 stratus-backup now                                                # first snapshot
 stratus-backup enable                                             # every night at 03:30 (--at to change)
 ```
 
-Requires Node 22.13 or later and `git` on the PATH, with push access to the
-repository already set up (an SSH key or a credential helper). macOS and
-Linux.
+## What is encrypted
+
+Each kind of file a snapshot holds is encrypted with
+[age](https://age-encryption.org) or not, on its own:
+
+| Kind | What it is | Default |
+| --- | --- | --- |
+| `souls` | `agents/*.md` | plaintext |
+| `memory` | each agent's `memory.jsonl` | plaintext |
+| `grants` | each agent's `whitelist.json` | encrypted |
+| `skills` | `skills/` | encrypted |
+| `config` | the trusted config (already redacted) | encrypted |
+| `schedules` | the schedules from `fleet.db` | encrypted |
+| `state` | `state.json` | encrypted |
+
+Souls and memory are plaintext by default so git keeps a readable, diffable
+history of who each agent is and what it remembers. That means they carry
+only redaction's protection (below), which can't catch every form a secret
+can take. Choose per backup with `init --encrypt`: a comma list of kinds,
+`all`, or `none` (`--plaintext` is the same as `none`):
+
+```bash
+stratus-backup init <remote> --recipient age1... --encrypt all            # nothing readable on the remote
+stratus-backup init <remote> --recipient age1... --encrypt memory,skills,config
+stratus-backup init <remote> --plaintext                                  # no key; redaction only
+```
+
+Encrypted files are encrypted on this machine before they are committed,
+to the recipients (public keys) given to `init`. The remote holds a
+`format.json` marker, an encrypted index, and one encrypted blob per file
+under a random name, so encrypted files' names aren't readable there
+either. Plaintext kinds sit beside them at their usual paths. This machine
+never holds the identity (private key): only the operator does, for
+restore. A lost identity means the encrypted part of every backup is lost.
+
+Unchanged files keep their ciphertext, so a quiet night still makes no
+commit. A local `backup/encryption-cache.json` (never committed) remembers
+which blob holds which file. Running `init` again with a new `--recipient`
+re-encrypts everything on the next run. Pass `--recipient` more than once to
+encrypt to several keys, for example yours and an offline spare.
+
+Changing `--encrypt` later is allowed, but git keeps every older commit. If
+the branch's history already holds a kind in plaintext that you now
+encrypt, `init` says so: those commits stay readable until the branch is
+deleted. Start a new branch or repository if that matters. The format is the
+standard age file format (X25519 recipients), via the reference TypeScript
+implementation (`age-encryption`).
 
 ## What is in a snapshot
 
@@ -49,10 +95,15 @@ from a fresh repository and moves the old one aside to
 `backup/repo.suspect-<time>`, never deleting it.
 
 **Sessions and workspaces are not backed up yet.** They hold arbitrary tool
-output, and a scan cannot promise to find a secret a tool wrote in some
-encoded form. They need encryption first, which is planned.
+output, and they are the largest state in a home. Encryption (above) makes
+them safe to push; the size and database-consistency work is still to do.
 
 ## How secrets are kept out
+
+Both layers run on every file. For an encrypted kind they are defense in
+depth: a scan finding there is printed as a warning and the backup still
+runs, because ciphertext is the guarantee. For a plaintext kind they are
+the only protection, and a finding stops the run.
 
 1. **Replacement.** Every value in `credentials.json`, and the control API
    token, is replaced with `[redacted by stratus-backup]` wherever it
@@ -117,8 +168,15 @@ also in `~/.stratus/logs/backup.log`; on Linux it is in the user journal.
 ## Restoring
 
 ```bash
-stratus-backup restore ~/restored-home --remote git@github.com:you/stratus-home-backup.git --branch old-mini
+stratus-backup restore ~/restored-home --remote git@github.com:you/stratus-home-backup.git --branch old-mini \
+  --identity ~/backup-identity.txt
 ```
+
+A backup with any encrypted kind needs its identity: `--identity <file>`, or a file
+named by `STRATUS_BACKUP_IDENTITY`. It is read for the restore and never
+stored. Every file is decrypted and checked against the checksum in the
+encrypted index before the first one is written, so a wrong identity or a
+tampered blob leaves the target empty.
 
 Restore writes only into an empty or new directory, never over a home, and
 only plain files under the snapshot's `home/`. Add `--commit <sha>` for an
@@ -140,7 +198,8 @@ about each such soul; add an `id:` to it.
 
 ## Not yet
 
-- Sessions and workspaces (needs encryption).
+- Sessions and workspaces. Encryption makes them safe to push; they still
+  need their own size and database-consistency work.
 - A memory store other than the built-in file store. `now` refuses rather
   than back up no memories.
 - The memory index's recall counts.

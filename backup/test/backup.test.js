@@ -13,7 +13,7 @@ import { GATEWAY, NAMED, SLACK_BOT, bareRemote, makeHome, notFound, refOf, tmp, 
 const setUp = async () => {
   const fixture = makeHome();
   const remote = bareRemote();
-  await init(fixture.home, remote, { branch: 'mini', fetchImpl: notFound });
+  await init(fixture.home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   return { ...fixture, remote };
 };
 
@@ -93,7 +93,7 @@ test('text shaped like an unknown key stops the run before anything is committed
 
 test('a home whose upgrade move has not run is refused', async () => {
   const { home } = makeHome({ applied: ['0001-owner-only-state-files'] });
-  await init(home, bareRemote(), { branch: 'mini', fetchImpl: notFound });
+  await init(home, bareRemote(), { plaintext: true, branch: 'mini', fetchImpl: notFound });
   await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /has not finished its upgrade.*stratus update/s);
 });
 
@@ -118,7 +118,7 @@ test('a branch another writer moved is never pushed over', async () => {
   const { home, remote } = await setUp();
   await now(home, { env: {}, fetchImpl: notFound });
   const other = makeHome();
-  await init(other.home, remote, { branch: 'mini', fetchImpl: notFound });
+  await init(other.home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   writeFileSync(path.join(other.home, 'agents', 'blair.md'), '---\nid: blair\n---\nChanged elsewhere.\n');
   const theirs = await now(other.home, { env: {}, fetchImpl: notFound });
 
@@ -131,7 +131,7 @@ test('init on a new machine continues an existing branch', async () => {
   const { home, remote } = await setUp();
   const first = await now(home, { env: {}, fetchImpl: notFound });
   const replacement = makeHome();
-  const result = await init(replacement.home, remote, { branch: 'mini', fetchImpl: notFound });
+  const result = await init(replacement.home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   assert.equal(result.adopted, true);
   const next = await now(replacement.home, { env: {}, fetchImpl: notFound });
   assert.equal(next.unchanged, false);
@@ -300,7 +300,7 @@ test('a remote git rewrites to GitHub is checked as the GitHub repository it rea
     process.env.GIT_CONFIG_KEY_0 = 'url.git@github.com:.insteadOf';
     process.env.GIT_CONFIG_VALUE_0 = 'gh:';
     const fresh = makeHome();
-    await assert.rejects(init(fresh.home, 'gh:owner/home.git', { branch: 'mini', fetchImpl: publicRepo }), /public repository/);
+    await assert.rejects(init(fresh.home, 'gh:owner/home.git', { plaintext: true, branch: 'mini', fetchImpl: publicRepo }), /public repository/);
     assert.ok(seen.some((url) => url.endsWith('/repos/owner/home')), JSON.stringify(seen));
   } finally {
     process.env = saved;
@@ -321,7 +321,7 @@ test('a remote git rewrites to GitHub is checked as the GitHub repository it rea
 
 test('a re-init that fails leaves origin where the settings say', async () => {
   const { home, remote } = await setUp();
-  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
   assert.equal(origin, remote);
   const result = await now(home, { env: {}, fetchImpl: notFound });
@@ -369,7 +369,7 @@ test('init waits its turn: it refuses while a backup run holds the lock, and cha
   const { home, remote } = await setUp();
   writeFileSync(path.join(home, 'backup', 'run.lock'), String(process.pid));
   const other = bareRemote();
-  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }), /Another backup is running/);
+  await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound }), /Another backup is running/);
   const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
   assert.equal(origin, remote);
   assert.equal(JSON.parse(readFileSync(path.join(home, 'backup', 'settings.json'), 'utf8')).remote, remote);
@@ -460,7 +460,7 @@ test('a re-init to a new remote drops push URLs origin had, so runs push where t
   const { home, remote } = await setUp();
   execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.pushurl', remote]);
   const next = bareRemote();
-  await init(home, next, { branch: 'mini', fetchImpl: notFound });
+  await init(home, next, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const pushUrls = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', '--push', '--all', 'origin']).toString().trim().split('\n');
   assert.deepEqual(pushUrls, [next]);
   const result = await now(home, { env: {}, fetchImpl: notFound });
@@ -472,11 +472,11 @@ test('a branch name git would refuse is refused at init, and nothing is saved', 
   const { home } = makeHome();
   for (const branch of ['foo..bar', 'foo.lock', 'foo.']) {
     assert.throws(() => execFileSync('git', ['check-ref-format', '--branch', branch], { stdio: 'ignore' }), undefined, branch);
-    await assert.rejects(init(home, bareRemote(), { branch, fetchImpl: notFound }), /not a usable branch name/, branch);
+    await assert.rejects(init(home, bareRemote(), { plaintext: true, branch, fetchImpl: notFound }), /not a usable branch name/, branch);
   }
   assert.equal(existsSync(path.join(home, 'backup', 'settings.json')), false);
   execFileSync('git', ['check-ref-format', '--branch', 'old-mini.2']);
-  await init(home, bareRemote(), { branch: 'old-mini.2', fetchImpl: notFound });
+  await init(home, bareRemote(), { plaintext: true, branch: 'old-mini.2', fetchImpl: notFound });
 });
 
 test('a key-shaped file name whose contents also trip the scan is never printed raw', async () => {
@@ -526,7 +526,7 @@ test('a re-init that fails puts back the push URLs origin had', async () => {
   const second = bareRemote();
   execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', remote]);
   execFileSync('git', ['--git-dir', gitDir, 'config', '--add', 'remote.origin.pushurl', second]);
-  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, path.join(tmp(), 'missing.git'), { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   const pushUrls = execFileSync('git', ['--git-dir', gitDir, 'remote', 'get-url', '--push', '--all', 'origin']).toString().trim().split('\n');
   assert.deepEqual(pushUrls, [remote, second]);
 });
@@ -595,7 +595,7 @@ test('an SSH host alias that reaches GitHub is checked as the GitHub repository 
     assert.deepEqual(seen, Array(3).fill('https://api.github.com/repos/owner/home'));
     // A full init through the alias is refused before anything is pushed.
     const fresh = makeHome();
-    await assert.rejects(init(fresh.home, 'git@gh-work:owner/home.git', { branch: 'mini', fetchImpl: publicRepo }), /public repository/);
+    await assert.rejects(init(fresh.home, 'git@gh-work:owner/home.git', { plaintext: true, branch: 'mini', fetchImpl: publicRepo }), /public repository/);
   });
   await assert.rejects(assertNotPublic('git@ssh.github.com:owner/home.git', async () => ({ status: 200 })), /public repository/);
 });
@@ -674,7 +674,7 @@ test('a re-init whose settings cannot be saved puts origin back', async () => {
   const other = bareRemote();
   // A directory where writeJson puts its temporary file makes the write fail.
   mkdirSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`));
-  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   const origin = execFileSync('git', ['--git-dir', repoDir(home), 'remote', 'get-url', 'origin']).toString().trim();
   assert.equal(origin, remote);
 });
@@ -695,7 +695,7 @@ test('a git failure never stores or prints a credential carried in the remote UR
   assert.ok(!saved.includes(token), saved);
   // init reaches the remote too, and its error goes straight to the CLI.
   const fresh = makeHome();
-  const initFailed = await init(fresh.home, leaky, { branch: 'mini', fetchImpl: notFound }).then(() => undefined, (e) => e);
+  const initFailed = await init(fresh.home, leaky, { plaintext: true, branch: 'mini', fetchImpl: notFound }).then(() => undefined, (e) => e);
   assert.ok(initFailed, 'init should fail on the unreachable remote');
   assert.ok(!initFailed.message.includes(token), initFailed.message);
 });
@@ -707,10 +707,10 @@ test('a re-init that fails leaves no branch adopted from the remote it did not s
   const { home, remote } = await setUp();
   const other = bareRemote();
   const elsewhere = makeHome();
-  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await init(elsewhere.home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   await now(elsewhere.home, { env: {}, fetchImpl: notFound });
   mkdirSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`));
-  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   const refs = execFileSync('git', ['--git-dir', repoDir(home), 'for-each-ref', '--format=%(refname)']).toString().trim();
   assert.equal(refs, '');
   rmSync(path.join(home, 'backup', `settings.json.${process.pid}.tmp`), { recursive: true });
@@ -746,7 +746,7 @@ test('a branch that only matches the tail of another remote branch is treated as
   const other = execFileSync('git', ['--git-dir', remote, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit-tree', tree, '-m', 'other'])
     .toString().trim();
   execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/x/mini', other]);
-  await init(fixture.home, remote, { branch: 'mini', fetchImpl: notFound });
+  await init(fixture.home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const result = await now(fixture.home, { env: {}, fetchImpl: notFound });
   assert.equal(result.pushed, true);
   assert.equal(refOf(remote, 'refs/heads/mini'), result.commit);
@@ -862,21 +862,21 @@ test('a re-init whose ref rollback fails stops later runs instead of pushing for
   const { home, remote } = await setUp();
   const other = bareRemote();
   const elsewhere = makeHome();
-  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await init(elsewhere.home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   await now(elsewhere.home, { env: {}, fetchImpl: notFound });
   const blocker = path.join(home, 'backup', `settings.json.${process.pid}.tmp`);
   mkdirSync(blocker);
   // Deleting a ref takes packed-refs.lock; creating a loose one does not.
   const lock = path.join(repoDir(home), 'packed-refs.lock');
   writeFileSync(lock, '');
-  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   rmSync(lock);
   rmSync(blocker, { recursive: true });
   await assert.rejects(now(home, { env: {}, fetchImpl: notFound }), /init again/);
   const listed = execFileSync('git', ['--git-dir', remote, 'for-each-ref', '--format=%(refname)']).toString().trim();
   assert.equal(listed, '', 'nothing reached the old remote');
   // A successful init clears the stop.
-  await init(home, remote, { branch: 'fresh', fetchImpl: notFound });
+  await init(home, remote, { plaintext: true, branch: 'fresh', fetchImpl: notFound });
   assert.equal((await now(home, { env: {}, fetchImpl: notFound })).pushed, true);
 });
 
@@ -905,13 +905,13 @@ const leaveSuspectRepository = async () => {
   const { home, remote } = await setUp();
   const other = bareRemote();
   const elsewhere = makeHome();
-  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await init(elsewhere.home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const foreign = (await now(elsewhere.home, { env: {}, fetchImpl: notFound })).commit;
   const blocker = path.join(home, 'backup', `settings.json.${process.pid}.tmp`);
   mkdirSync(blocker);
   const lock = path.join(repoDir(home), 'packed-refs.lock');
   writeFileSync(lock, '');
-  await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound }));
+  await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound }));
   rmSync(lock);
   rmSync(blocker, { recursive: true });
   assert.ok(existsSync(path.join(home, 'backup', 'needs-init')));
@@ -922,7 +922,7 @@ test('the init that clears a failed rollback starts from a fresh repository, kee
   // Codex P1 4313976888: retrying init with the same branch kept the foreign
   // local ref when the desired remote lacked the branch, then cleared the stop.
   const { home, remote, foreign } = await leaveSuspectRepository();
-  await init(home, remote, { branch: 'mini', fetchImpl: notFound });
+  await init(home, remote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const result = await now(home, { env: {}, fetchImpl: notFound });
   assert.equal(result.pushed, true);
   const contains = spawnSyncCode('git', ['--git-dir', remote, 'merge-base', '--is-ancestor', foreign, 'refs/heads/mini']);
@@ -953,7 +953,7 @@ test('a failed rollback stays stopped even when the marker could not be written 
   const { home, remote } = await setUp();
   const other = bareRemote();
   const elsewhere = makeHome();
-  await init(elsewhere.home, other, { branch: 'mini', fetchImpl: notFound });
+  await init(elsewhere.home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const foreign = (await now(elsewhere.home, { env: {}, fetchImpl: notFound })).commit;
   const dir = path.join(home, 'backup');
   const lock = path.join(repoDir(home), 'packed-refs.lock');
@@ -964,7 +964,7 @@ test('a failed rollback stays stopped even when the marker could not be written 
     chmodSync(dir, 0o500);
   };
   try {
-    await assert.rejects(init(home, other, { branch: 'mini', fetchImpl: notFound, afterRepositoryChanged }));
+    await assert.rejects(init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound, afterRepositoryChanged }));
   } finally {
     chmodSync(dir, 0o700);
   }
@@ -983,7 +983,7 @@ test('an init that cannot arm its stop changes nothing', async () => {
   // see it as present, so it is removed before the run.
   const marker = path.join(home, 'backup', 'needs-init');
   let failed;
-  const blocked = init(home, other, { branch: 'mini', fetchImpl: notFound, beforeArm: () => mkdirSync(marker) });
+  const blocked = init(home, other, { plaintext: true, branch: 'mini', fetchImpl: notFound, beforeArm: () => mkdirSync(marker) });
   await blocked.catch((error) => { failed = error; });
   rmSync(marker, { recursive: true, force: true });
   assert.ok(failed, 'init fails when the stop cannot be armed');
@@ -1138,7 +1138,7 @@ test('a re-init leaves origin with exactly the new URL, however many it had', as
   const { home } = await setUp();
   execFileSync('git', ['--git-dir', repoDir(home), 'config', '--add', 'remote.origin.url', bareRemote()]);
   const next = bareRemote();
-  await init(home, next, { branch: 'mini', fetchImpl: notFound });
+  await init(home, next, { plaintext: true, branch: 'mini', fetchImpl: notFound });
   const urls = execFileSync('git', ['--git-dir', repoDir(home), 'config', '--get-all', 'remote.origin.url']).toString().trim().split('\n');
   assert.deepEqual(urls, [next]);
   const result = await now(home, { env: {}, fetchImpl: notFound });

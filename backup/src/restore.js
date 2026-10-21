@@ -3,11 +3,12 @@
 // target and renamed into place at the end, so a failed restore leaves no
 // half-written home behind.
 
-import { chmod, mkdir, mkdtemp, readdir, rename, rm, rmdir } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { git, initRepository, listTree, readBlob, remoteHasBranch, revParse, syncWithRemote, writeBlobTo } from './git.js';
+import { decryptSnapshot, isEncryptedTree } from './encrypt.js';
+import { initRepository, listTree, readBlob, remoteHasBranch, revParse, syncWithRemote, writeBlobTo } from './git.js';
 
 const SAFE_SEGMENT = /^(?!\.{1,2}$)[^/\0]+$/;
 const PRIVATE_FILES = new Set(['config.json', 'memory.jsonl', 'whitelist.json']);
@@ -37,11 +38,50 @@ const writeSchedules = (file, jsonl) => {
 };
 
 /**
+ * Each file of a snapshot under home/, as { path, executable, read(), write(file, mode) },
+ * and its manifest. The encrypted part of a snapshot is decrypted and checked
+ * whole before the first file is returned, so a wrong identity or a tampered
+ * blob writes nothing.
+ */
+const snapshotFiles = async (repo, commit, identity) => {
+  const tree = await listTree(repo, commit);
+  for (const item of tree) {
+    if (item.type !== 'blob' || (item.mode !== '100644' && item.mode !== '100755')) {
+      throw new Error(`The snapshot holds ${item.path} as ${item.type} ${item.mode}; a backup only ever holds plain files. Not restoring.`);
+    }
+  }
+  let manifest = {};
+  const files = [];
+  // Plaintext kinds are committed at their home/ paths; encrypted ones only
+  // inside the index, beside them.
+  const encrypted = isEncryptedTree(tree.map((item) => item.path));
+  for (const item of tree) {
+    if (item.path === 'manifest.json' && !encrypted) {
+      manifest = JSON.parse((await readBlob(repo, item.oid)).toString('utf8'));
+      continue;
+    }
+    if (encrypted && !item.path.startsWith('home/')) continue;
+    files.push({ path: item.path, executable: item.mode === '100755', read: () => readBlob(repo, item.oid), write: (to, mode) => writeBlobTo(repo, item.oid, to, mode) });
+  }
+  if (encrypted) {
+    const oidOf = new Map(tree.map((item) => [item.path, item.oid]));
+    const opened = await decryptSnapshot({ paths: [...oidOf.keys()], read: (file) => readBlob(repo, oidOf.get(file)), identity });
+    manifest = opened.manifest;
+    const plainPaths = new Set(files.map((file) => file.path));
+    for (const file of opened.files) {
+      if (plainPaths.has(file.path)) throw new Error(`The snapshot holds ${JSON.stringify(file.path)} both in plaintext and encrypted. Not restoring.`);
+      files.push({ path: file.path, executable: file.executable, read: async () => file.bytes, write: (to, mode) => writeFile(to, file.bytes, { flag: 'wx', mode }) });
+    }
+  }
+  return { manifest, files };
+};
+
+/**
  * Restores `commit` (default: the branch's latest) of the configured
  * repository, or of `remote`/`branch` when this machine has none, into
  * `target`. Returns the manifest so the caller can say what to re-enter.
  */
-export const restore = async (target, { repo, remote, branch, commit, offline = false } = {}) => {
+export const restore = async (target, { repo, remote, branch, commit, offline = false, identity } = {}) => {
   const destination = path.resolve(target);
   if (!(await isEmptyOrAbsent(destination))) {
     throw new Error(`${destination} is not empty. Restore only writes into an empty or new directory, never over a home.`);
@@ -76,29 +116,22 @@ export const restore = async (target, { repo, remote, branch, commit, offline = 
     const resolved = await revParse(repo, ref);
     if (resolved === undefined) throw new Error(`No snapshot found at ${ref}.`);
 
-    let manifest = {};
+    const { manifest, files } = await snapshotFiles(repo, resolved, identity);
     let schedules;
-    for (const item of await listTree(repo, resolved)) {
-      if (item.type !== 'blob' || (item.mode !== '100644' && item.mode !== '100755')) {
-        throw new Error(`The snapshot holds ${item.path} as ${item.type} ${item.mode}; a backup only ever holds plain files. Not restoring.`);
-      }
-      if (item.path === 'manifest.json') {
-        manifest = JSON.parse((await readBlob(repo, item.oid)).toString('utf8'));
-        continue;
-      }
+    for (const item of files) {
       const segments = item.path.split('/');
       if (segments[0] !== 'home' || segments.length < 2 || !segments.every((segment) => SAFE_SEGMENT.test(segment))) {
         throw new Error(`The snapshot holds an unexpected path, ${JSON.stringify(item.path)}. Not restoring.`);
       }
       const relative = segments.slice(1);
       if (relative.length === 1 && relative[0] === 'schedules.jsonl') {
-        schedules = (await readBlob(repo, item.oid)).toString('utf8');
+        schedules = (await item.read()).toString('utf8');
         continue;
       }
       const file = path.join(staging, ...relative);
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-      const mode = item.mode === '100755' ? 0o755 : PRIVATE_FILES.has(relative.at(-1)) ? 0o600 : 0o644;
-      await writeBlobTo(repo, item.oid, file, mode);
+      const mode = item.executable ? 0o755 : PRIVATE_FILES.has(relative.at(-1)) ? 0o600 : 0o644;
+      await item.write(file, mode);
       await chmod(file, mode);
     }
     if (schedules !== undefined) {

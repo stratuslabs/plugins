@@ -69,6 +69,7 @@ encouraged to use `stratus-plugin-<name>` or `@scope/stratus-plugin-<name>`.
 | --- | --- | --- |
 | [`@stratusagent/plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
 | [`@stratusagent/plugin-spawn`](./spawn) | `agent.spawn`: several tasks at once in short-lived sub-agents with only the tools you hand them | `safe`; each sub-agent's calls are judged again |
+| [`@stratusagent/plugin-peer`](./peer) | channel `peer`, `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | `gated`. Signed HTTP between daemons, pairwise secrets per agent, a hop budget shared across daemons. Answers arrive labelled `agent`. |
 
 ## In this repository
 

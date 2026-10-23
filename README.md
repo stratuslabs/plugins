@@ -1,129 +1,81 @@
 # Stratus plugins
 
-Plugins extend a [Stratus agent](https://github.com/stratuslabs/agent): one
-package contributing tools, skills, providers, channels, memory stores,
-executors, or hooks. This is the index of what exists.
+Optional packages for a [Stratus agent](https://github.com/stratuslabs/agent).
+Each one adds tools, a channel, an executor, or a command without making the
+agent's core any bigger.
+
+## Plugins
+
+| Package | What it adds | Notes |
+| --- | --- | --- |
+| [`plugin-spawn`](./spawn) | `agent.spawn`: run several tasks at once in short-lived sub-agents, each with only the tools you hand it | Each sub-agent's calls are judged again |
+| [`plugin-peer`](./peer) | `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | Signed HTTP, a secret per pair of agents, one hop limit across daemons |
+| [`plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`: an agent shows a native screen as A2UI v1.0, validated against your catalogs | Comes with the `a2ui-screens` skill |
+| [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
+| [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
+
+All are published as `@stratusagent/plugin-<name>` from the directory of the
+same name. Each directory's README covers setup and configuration.
 
 ## Installing one grants nothing
 
-Two gates, always, and both are yours:
-
-```bash
-npm install -g @stratusagent/tool-shell
-```
+There are two gates, and both are yours. First, a config you trust enables the
+plugin:
 
 ```jsonc
-// ~/.stratus/config.json — a trusted config only
+// ~/.stratus/config.json
 {
   "plugins": {
-    "@stratusagent/tool-shell": { "enabled": true, "cwd": "~/work" }
+    "@stratusagent/plugin-spawn": { "enabled": true }
   }
 }
 ```
 
+Then an agent's soul lists the tools it may call:
+
 ```markdown
 ---
 id: blair
-tools: [shell.run]
+tools: [agent.spawn]
 ---
 ```
 
-A plugin runs inside the daemon's own process, so only a config **you**
-chose may enable one — `--config`, `STRATUS_CONFIG`, or the global
-`~/.stratus/config.json`. A project-local `stratus.config.json` ships with
-any repository you clone, and its `plugins` block is ignored.
+A plugin runs inside the daemon, so only a config you chose can enable one:
+`--config`, `STRATUS_CONFIG`, or `~/.stratus/config.json`. A project's own
+`stratus.config.json` ships with whatever repository you clone, so its
+`plugins` block is ignored. Run `stratus plugins` to see where that chain stops
+on your machine.
 
-Then the soul's `tools:` list decides which agent may call what. Installing
-a plugin and enabling it still grants no agent anything.
+## Third-party plugins
 
-`stratus plugins` shows where that chain is broken on your machine —
-installed, enabled, granted, and what the approval policy does with the
-call.
-
-## First-party
-
-Shipped from [`stratuslabs/agent`](https://github.com/stratuslabs/agent),
-published under `@stratusagent`.
-
-| Package | Contributes | Risk |
-| --- | --- | --- |
-| [`tool-fs`](https://github.com/stratuslabs/agent/tree/main/packages/tool-fs) | `fs.read`, `fs.list`, `fs.search` | `safe` inside the agent's roots |
-| | `fs.write` | `gated` |
-| [`tool-shell`](https://github.com/stratuslabs/agent/tree/main/packages/tool-shell) | `shell.run` | `gated`, then judged per command |
-| [`tool-web`](https://github.com/stratuslabs/agent/tree/main/packages/tool-web) | `web.fetch` | `gated` |
-| [`tool-browser`](https://github.com/stratuslabs/agent/tree/main/packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
-| | `browser.act` | `gated`, then judged per site |
-| [`plugin-mcp`](https://github.com/stratuslabs/agent/tree/main/packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, discovered at connect | `gated`, whatever the server says |
-| [`channel-slack`](https://github.com/stratuslabs/agent/tree/main/packages/channel-slack) | Slack as a channel: DMs, mentions, threads, approval buttons | — |
-| [`control-api`](https://github.com/stratuslabs/agent/tree/main/packages/control-api) · [`dashboard`](https://github.com/stratuslabs/agent/tree/main/packages/dashboard) | The HTTP + WebSocket control API, and the web dashboard on it | — |
-
-## In this repository
-
-Optional packages that live here rather than in the agent's core. Each is
-published as `@stratusagent/plugin-<name>` from its directory `<name>/`,
-whatever it contributes (tools, a channel, an executor, or a command), so the
-name says it is optional and outside core. Third-party plugins are
-encouraged to use `stratus-plugin-<name>` or `@scope/stratus-plugin-<name>`.
-
-| Package | Contributes | Notes |
-| --- | --- | --- |
-| [`@stratusagent/plugin-sandbox`](./sandbox) | executor `sandbox` | macOS. Every agent command runs under `sandbox-exec`, so it can write only the agent's workspace. Selected with `"executor": "sandbox"`. |
-| [`@stratusagent/plugin-spawn`](./spawn) | `agent.spawn`: several tasks at once in short-lived sub-agents with only the tools you hand them | `safe`; each sub-agent's calls are judged again |
-| [`@stratusagent/plugin-peer`](./peer) | channel `peer`, `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | `gated`. Signed HTTP between daemons, pairwise secrets per agent, a hop budget shared across daemons. Answers arrive labelled `agent`. |
-
-## In this repository
-
-Plugins that live here rather than in the agent's core.
-
-| Package | Contributes | Notes |
-| --- | --- | --- |
-| [`@stratusagent/plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`, skill `a2ui-screens` | An agent shows a native screen as A2UI v1.0 JSON, validated against the catalogs you configure. Both tools `safe`. |
-
-## Third-party
-
-Nothing listed yet. Open a pull request adding a row.
-
-### `web.search` is a contract, not a package we ship
-
-Every search backend needs a vendor key and a commercial relationship, so
-the agent ships `web.fetch` and the ecosystem ships `web.search`. What is
-first-party is the *shape* — one tool name, one meaning per option, one
-result envelope — so swapping vendors changes no soul and no skill. The
-contract lives in
-[`packages/search`](https://github.com/stratuslabs/agent/tree/main/packages/search).
-
-A backend asks for the credential `search.apiKey` whatever the vendor is.
-That is what makes a swap free.
+None listed yet. Built one? Open a pull request adding a row above.
 
 ## Building one
 
-The plugin contract — the manifest, what `setup()` may register, and the
-seams a plugin extends — is in
-[`docs/architecture/plugins.md`](https://github.com/stratuslabs/agent/blob/main/docs/architecture/plugins.md).
-The trust model behind the two gates above is in
+The contract (the manifest, what `setup()` can register, and the extension
+points) is in
+[`docs/architecture/plugins.md`](https://github.com/stratuslabs/agent/blob/main/docs/architecture/plugins.md),
+and the trust model is in
 [`docs/concepts/plugins.md`](https://github.com/stratuslabs/agent/blob/main/docs/concepts/plugins.md).
+Two things to know before you start:
 
-Two things worth knowing before you start:
+- **The manifest is read without importing your package.** Your tools and
+  their risk go in `package.json`, so a misconfigured plugin is refused when it
+  loads, not halfway through someone's turn.
+- **Only first-party packages can mark a tool `safe`.** Everything else
+  registers as `gated` or higher. An operator can change that with a
+  `toolRisks` entry; a plugin can't.
 
-- **A manifest is read without importing your package.** It declares your
-  tools and their risk in `package.json`, so a misconfigured plugin is
-  refused at load rather than at the first tool call in the middle of
-  someone's turn.
-- **Only first-party packages may declare a tool `safe`.** Everything else
-  registers at `gated` or higher, whatever its manifest says. An operator's
-  `toolRisks` entry is the only thing that changes that, and it is theirs to
-  write, not yours.
+Name a third-party plugin `stratus-plugin-<name>` or
+`@scope/stratus-plugin-<name>`. If you build a `web.search` backend, implement
+the shared contract in
+[`packages/search`](https://github.com/stratuslabs/agent/tree/main/packages/search)
+and read the key from the `search.apiKey` credential, so switching vendors
+never changes a soul or a skill.
 
-## Vocabulary
+## Built into the agent
 
-One word per thing, because the ecosystem reads these docs before it reads
-the code.
-
-- **Plugin** — one package, the unit of distribution and installation.
-- **Tool** — a callable action, named `namespace.verb` (`fs.read`).
-- **Toolset** — the namespace a group of tools shares (`fs`), and what
-  `tools: [fs.*]` globs over.
-- **Skill** — markdown that teaches an agent a procedure. Not code; a skill
-  that needs to *do* something is a plugin contributing a tool.
-- **Soul** — the markdown file defining an agent: persona plus the `tools`,
-  `skills`, and `credentials` it may use.
+Some capabilities ship with the agent itself rather than here: files, shell,
+web fetch, browser, MCP servers, Slack, and the control API with its
+dashboard. Their packages are in
+[`stratuslabs/agent/packages`](https://github.com/stratuslabs/agent/tree/main/packages).

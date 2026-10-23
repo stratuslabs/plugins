@@ -27,6 +27,9 @@ import { createServer } from 'node:http';
 
 export const PROTOCOL_VERSION = 1;
 export const DEFAULT_MAX_DEPTH = 3;
+// Small enough that every depth and limit prints as plain digits, which the
+// session id has to carry and read back.
+export const MAX_DEPTH = 100;
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 /** The longest delay a Node timer holds (2^31 - 1 ms, about 24.8 days). */
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -114,6 +117,10 @@ export const budgetFor = (session, maxDepth) => {
   const local = typeof metadata.delegationDepth === 'number' ? metadata.delegationDepth : 0;
   const match = PEER_SESSION.exec(root);
   if (!match) {
+    // A peer turn whose budget cannot be read must not start over at 0.
+    if (root.startsWith(PEER_SESSION_PREFIX)) {
+      return { depth: maxDepth, ceiling: maxDepth };
+    }
     return { depth: local, ceiling: maxDepth };
   }
   return { depth: Number(match[1]) + local, ceiling: Math.min(Number(match[2]), maxDepth) };
@@ -445,8 +452,8 @@ export const createPlugin = (config = {}) => ({
     }
     const log = context.log ?? (() => {});
     // A restrictive or mistyped limit must not quietly become the default.
-    if (config.maxDepth !== undefined && !(Number.isInteger(config.maxDepth) && config.maxDepth >= 1)) {
-      throw new Error('@stratusagent/plugin-peer: maxDepth must be a whole number of hops, 1 or more.');
+    if (config.maxDepth !== undefined && !(Number.isInteger(config.maxDepth) && config.maxDepth >= 1 && config.maxDepth <= MAX_DEPTH)) {
+      throw new Error(`@stratusagent/plugin-peer: maxDepth must be a whole number of hops, 1 to ${MAX_DEPTH}.`);
     }
     const maxDepth = config.maxDepth ?? DEFAULT_MAX_DEPTH;
     // AbortSignal.timeout takes a whole number of milliseconds a timer can

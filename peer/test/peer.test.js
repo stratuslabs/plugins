@@ -457,3 +457,17 @@ test('a prompt too large for the peer is refused before sending, not reported as
   assert.equal(result.status, 'refused');
   assert.match(result.reason, /prompt is too large/);
 });
+
+test('maxDepth is bounded so the budget always round-trips through the session id', async () => {
+  // Codex P2 4362335717: 1e21 serialized as 1e+21, the id no longer matched, and the budget reset to 0.
+  for (const maxDepth of [1e21, Number.MAX_SAFE_INTEGER, 101]) {
+    await assert.rejects(createPlugin({ self: 'home', maxDepth }).setup(fakeContext({}).context), /maxDepth must be a whole number of hops, 1 to 100/, String(maxDepth));
+  }
+  await createPlugin({ self: 'home', maxDepth: 100 }).setup(fakeContext({}).context);
+});
+
+test('a peer session id whose budget cannot be read spends nothing more instead of starting over', () => {
+  const unreadable = 'peer:studio:1.1e+21:0123456789abcdef:nova';
+  const { depth, ceiling } = budgetFor({ id: unreadable, agent: { id: 'nova' }, metadata: {} }, 3);
+  assert.ok(depth >= ceiling, `depth ${depth} ceiling ${ceiling}`);
+});

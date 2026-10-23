@@ -36,7 +36,7 @@
             "additionalProperties": false
           }
         },
-        "maxDepth": { "type": "integer", "minimum": 1 },
+        "maxDepth": { "type": "integer", "minimum": 1, "maximum": 100 },
         "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       },
       "required": ["self"],

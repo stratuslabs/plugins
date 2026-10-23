@@ -27,7 +27,7 @@ npm install -g @stratusagent/plugin-peer
     "@stratusagent/plugin-peer": {
       "enabled": true,
       "self": "home",
-      "peers": { "studio": { "url": "https://studio.internal:4180" } }
+      "peers": { "studio": { "url": "http://studio.internal:4180" } }
     }
   }
 }
@@ -93,7 +93,9 @@ An answer from a peer is another agent's words. On the receiving daemon the
 turn runs with sender trust `agent`, never as that daemon's principal. On
 the sending side, `peer.delegate`'s output is labelled `agent`.
 
-Use HTTPS, or plain HTTP on a private network only. The signatures cover
+The listener speaks plain HTTP, as in the example above, so use it only on a
+private network, or put a TLS-terminating proxy in front of it and give the
+sender the proxy's `https://` URL. The signatures cover
 the bodies, but HTTP doesn't hide them. The answer is signed too, with the
 same secret, and names the request it answers, so an answer that someone
 on the path wrote or replayed comes back as `failed`, never as the agent's

@@ -219,7 +219,9 @@ export const admit = ({ raw, signature, secrets, maxDepth, now = Date.now() }) =
 const createListener = ({ secrets, maxDepth, log }) => {
   let server;
   let gateway;
-  const live = new Map();
+  // One controller per admitted request, not per request id: a retry of a
+  // live id must not take the original turn out of reach of stop().
+  const live = new Set();
 
   const handle = async (request, response) => {
     if (request.method !== 'POST' || request.url !== '/peer/v1/delegate') {
@@ -254,7 +256,7 @@ const createListener = ({ secrets, maxDepth, log }) => {
       }
     });
     const sessionId = peerSessionId({ fromDaemon: body.from.daemon, depth, limit, conversation: body.conversation, agentId: body.to });
-    live.set(body.id, controller);
+    live.add(controller);
     let repeat;
     try {
       const session = await gateway.dispatch({
@@ -290,7 +292,7 @@ const createListener = ({ secrets, maxDepth, log }) => {
       log(`peer: a request from ${body.from.daemon} failed: ${error instanceof Error ? error.message : String(error)}`);
       answer(200, { status: 'failed', error: 'the remote turn failed' });
     } finally {
-      live.delete(body.id);
+      live.delete(controller);
     }
   };
 

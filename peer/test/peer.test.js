@@ -471,3 +471,29 @@ test('a peer session id whose budget cannot be read spends nothing more instead 
   const { depth, ceiling } = budgetFor({ id: unreadable, agent: { id: 'nova' }, metadata: {} }, 3);
   assert.ok(depth >= ceiling, `depth ${depth} ceiling ${ceiling}`);
 });
+
+test('a retry of a live request does not take the original turn out of reach of stop', async (t) => {
+  // Codex P2 4362396010: the retry replaced the original controller, then its finally deleted it.
+  let firstSignal;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { port, studio } = await twoDaemons(t, {
+    answer: (input) => {
+      if (firstSignal) {
+        input.onRepeat?.('live');
+        return answered('');
+      }
+      firstSignal = input.signal;
+      started();
+      return new Promise((resolve) => input.signal.addEventListener('abort', () => resolve({ status: 'cancelled', messages: [] })));
+    },
+  });
+  const raw = JSON.stringify({ v: 1, id: 'live-1', from: { daemon: 'home', agent: 'ava' }, to: 'nova', conversation: 'c', prompt: 'p', depth: 0, ceiling: 3, sentAt: Date.now() });
+  const post = () => fetch(`http://127.0.0.1:${port}/peer/v1/delegate`, { method: 'POST', headers: { 'x-stratus-peer-signature': sign(SECRET, raw) }, body: raw });
+  const original = post().catch(() => undefined);
+  await running;
+  assert.equal((await (await post()).json()).reason, 'already running');
+  await studio.channels[0].adapter.stop();
+  assert.equal(firstSignal.aborted, true);
+  await original;
+});

@@ -449,3 +449,11 @@ test('setup refuses a listen.port Node would reject instead of failing at start'
     await createPlugin({ self: 'home', listen: { port } }).setup(fakeContext({}).context);
   }
 });
+
+test('a prompt too large for the peer is refused before sending, not reported as unreachable', async (t) => {
+  // Codex P2 4362290179: the receiver drops an oversized body with the connection, so fetch failed.
+  const { tool } = await twoDaemons(t);
+  const result = await tool.execute({ target: 'studio/nova', prompt: 'x'.repeat(300 * 1024) }, session());
+  assert.equal(result.status, 'refused');
+  assert.match(result.reason, /prompt is too large/);
+});

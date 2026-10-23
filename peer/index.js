@@ -367,6 +367,12 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
       ceiling,
       sentAt: Date.now(),
     });
+    // The receiver drops an oversized body along with the connection (it
+    // will not read past the limit), which would look like an unreachable
+    // peer. Say what is actually wrong before sending.
+    if (Buffer.byteLength(raw) > MAX_BODY_BYTES) {
+      return { status: 'refused', reason: `the prompt is too large to delegate (over ${MAX_BODY_BYTES} bytes as a request)` };
+    }
     const timeout = AbortSignal.timeout(timeoutMs);
     const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
     // The signal covers the body as well as the headers, so an abort while

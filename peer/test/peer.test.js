@@ -497,3 +497,17 @@ test('a retry of a live request does not take the original turn out of reach of 
   assert.equal(firstSignal.aborted, true);
   await original;
 });
+
+test('a redirect is not followed, so the signed prompt goes only to the configured peer', async (t) => {
+  // Codex P2 4362462265: fetch re-sent the POST body and signature to the redirect target.
+  const { createServer } = await import('node:http');
+  let elsewhere = 0;
+  const other = createServer((request, response) => { elsewhere += 1; response.end('{}'); });
+  await new Promise((resolve) => other.listen(0, '127.0.0.1', resolve));
+  t.after(() => other.close());
+  const tool = await impostor(t, () => ({ status: 307, headers: { location: `http://127.0.0.1:${other.address().port}/login` }, body: '' }));
+  const output = await tool.execute({ target: 'studio/nova', prompt: 'private task' }, session());
+  assert.equal(elsewhere, 0);
+  assert.equal(output.status, 'failed');
+  assert.match(output.error, /redirect/);
+});

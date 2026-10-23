@@ -404,9 +404,16 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
         headers: { 'content-type': 'application/json', [SIGNATURE_HEADER]: sign(secret, raw) },
         body: raw,
         signal,
+        // A redirect would re-send the prompt and a valid signature to
+        // wherever the peer, or a proxy in front of it, points.
+        redirect: 'manual',
       });
     } catch (error) {
       return aborted() ?? { status: 'unreachable', requestId: id, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => {});
+      return { status: 'failed', requestId: id, error: `the peer answered ${response.status}, a redirect, which is not followed; check the peer url` };
     }
     let text;
     let answer;

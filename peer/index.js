@@ -31,6 +31,8 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 /** The longest delay a Node timer holds (2^31 - 1 ms, about 24.8 days). */
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 export const MAX_BODY_BYTES = 256 * 1024;
+/** The largest answer the sender reads; anything bigger is dropped before its signature is checked. */
+export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 /** How old a request may be when it arrives, and how far ahead of the receiver's clock. */
 export const FRESHNESS_WINDOW_MS = 10 * 60_000;
 export const CLOCK_SKEW_MS = 60_000;
@@ -38,6 +40,35 @@ export const SIGNATURE_HEADER = 'x-stratus-peer-signature';
 export const PEER_SESSION_PREFIX = 'peer:';
 
 const ID_PART = /^[A-Za-z0-9._-]{1,64}$/;
+/**
+ * What the listener says when it refuses before admission. Those refusals
+ * cannot be signed (there is no secret yet), so the sender shows only these
+ * fixed words and never text from an unsigned body.
+ */
+const UNSIGNED_REFUSALS = new Set(['not found', 'malformed', 'not allowed', 'stale', 'depth limit']);
+
+/** Reads a fetch response body, refusing once it passes `limit` bytes. */
+const readLimited = async (response, limit) => {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  if (!response.body) {
+    return '';
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.byteLength;
+    if (size > limit) {
+      await response.body.cancel().catch(() => {});
+      return undefined;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+};
 
 export const sign = (secret, body) => `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
 /**
@@ -365,23 +396,35 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
     let text;
     let answer;
     try {
-      text = await response.text();
+      text = await readLimited(response, MAX_RESPONSE_BYTES);
+      if (text === undefined) {
+        return aborted() ?? { status: 'failed', requestId: id, error: `the peer's answer was larger than ${MAX_RESPONSE_BYTES} bytes, so it was dropped` };
+      }
       answer = JSON.parse(text);
     } catch {
       return aborted() ?? { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };
     }
-    if (answer?.status === 'result' && typeof answer.text === 'string') {
-      // Only an answer signed with this pair's secret, for this request, is
-      // the peer's: on plain HTTP anything on the path could write one.
-      if (answer.re !== id || !signatureMatches(secret, text, response.headers.get(SIGNATURE_HEADER), signResponse)) {
+    // Only a body signed with this pair's secret, for this request, is the
+    // peer's: on plain HTTP anything on the path could write one. Text from
+    // any other body never reaches the tool output.
+    const signed = answer?.re === id && signatureMatches(secret, text, response.headers.get(SIGNATURE_HEADER), signResponse);
+    if (!signed) {
+      if (answer?.status === 'refused') {
+        const reason = UNSIGNED_REFUSALS.has(answer.reason) ? answer.reason : 'refused, with a reason not signed by the peer, so not shown';
+        return { status: 'refused', reason, requestId: id };
+      }
+      if (answer?.status === 'result') {
         return { status: 'failed', requestId: id, error: 'the answer was not signed by the peer for this request, so it was dropped' };
       }
+      return { status: 'failed', requestId: id, error: `the peer answered ${response.status} with a body not signed for this request` };
+    }
+    if (answer.status === 'result' && typeof answer.text === 'string') {
       return { status: 'result', from: `${daemon}/${agent}`, answer: answer.text, requestId: id };
     }
-    if (answer?.status === 'refused') {
+    if (answer.status === 'refused') {
       return { status: 'refused', reason: String(answer.reason ?? 'refused'), requestId: id };
     }
-    return { status: 'failed', requestId: id, error: String(answer?.error ?? `the peer answered ${response.status}`) };
+    return { status: 'failed', requestId: id, error: String(answer.error ?? `the peer answered ${response.status}`) };
   },
 });
 
@@ -395,7 +438,11 @@ export const createPlugin = (config = {}) => ({
       throw new Error('@stratusagent/plugin-peer needs "self": this daemon\'s peer name (letters, digits, ".", "_", "-").');
     }
     const log = context.log ?? (() => {});
-    const maxDepth = Number.isInteger(config.maxDepth) && config.maxDepth > 0 ? config.maxDepth : DEFAULT_MAX_DEPTH;
+    // A restrictive or mistyped limit must not quietly become the default.
+    if (config.maxDepth !== undefined && !(Number.isInteger(config.maxDepth) && config.maxDepth >= 1)) {
+      throw new Error('@stratusagent/plugin-peer: maxDepth must be a whole number of hops, 1 or more.');
+    }
+    const maxDepth = config.maxDepth ?? DEFAULT_MAX_DEPTH;
     // AbortSignal.timeout takes a whole number of milliseconds a timer can
     // hold; anything else would pass here and then throw on every call.
     if (config.timeoutMs !== undefined && !(Number.isInteger(config.timeoutMs) && config.timeoutMs >= 1 && config.timeoutMs <= MAX_TIMEOUT_MS)) {

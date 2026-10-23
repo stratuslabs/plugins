@@ -68,7 +68,7 @@ and restart both daemons.
 | `self` | required | This daemon's name as its peers know it. Letters, digits, `.`, `_`, `-` |
 | `peers` | none | Daemons this one may send to: `{ "<name>": { "url": "…" } }` |
 | `listen` | off | `{ host, port }` to accept requests on. Default host `127.0.0.1`, port `4180` |
-| `maxDepth` | `3` | Hops allowed in a chain of delegations, across every daemon in the chain |
+| `maxDepth` | `3` | Hops allowed in a chain of delegations, across every daemon in the chain. A whole number, 1 or more |
 | `timeoutMs` | 10 minutes | How long `peer.delegate` waits for an answer, in whole milliseconds (1 to 2147483647) |
 
 ## Who may reach whom
@@ -99,7 +99,9 @@ same secret, and names the request it answers, so an answer that someone
 on the path wrote or replayed comes back as `failed`, never as the agent's
 words. Refusals sent before a request is admitted can't be signed, so
 someone on the path can still make a call fail. They can't make it say
-anything.
+anything: an unsigned refusal or failure shows only fixed wording, never
+text from the body. Answers over 4 MiB are dropped while they are read,
+before the signature is checked.
 
 ## The hop budget spans daemons
 

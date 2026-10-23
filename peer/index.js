@@ -449,6 +449,12 @@ export const createPlugin = (config = {}) => ({
       throw new Error(`@stratusagent/plugin-peer: timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}.`);
     }
     const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // server.listen throws ERR_SOCKET_BAD_PORT on anything else, which would
+    // only surface when the channel starts. 0 asks the OS for a free port.
+    const port = config.listen?.port;
+    if (port !== undefined && !(Number.isInteger(port) && port >= 0 && port <= 65535)) {
+      throw new Error('@stratusagent/plugin-peer: listen.port must be a whole number from 0 to 65535.');
+    }
     const peers = config.peers ?? {};
     for (const [name, peer] of Object.entries(peers)) {
       if (!ID_PART.test(name)) {

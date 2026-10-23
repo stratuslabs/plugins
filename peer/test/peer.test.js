@@ -439,3 +439,13 @@ test('setup refuses a maxDepth that is not a positive whole number instead of wi
   }
   await createPlugin({ self: 'home', maxDepth: 1 }).setup(fakeContext({}).context);
 });
+
+test('setup refuses a listen.port Node would reject instead of failing at start', async () => {
+  // Codex P2 4361128988: 1.5, -1 and 65536 passed setup, then server.listen threw ERR_SOCKET_BAD_PORT.
+  for (const port of [1.5, -1, 65536, '4180']) {
+    await assert.rejects(createPlugin({ self: 'home', listen: { port } }).setup(fakeContext({}).context), /listen\.port must be a whole number/, String(port));
+  }
+  for (const port of [0, 4180, 65535]) {
+    await createPlugin({ self: 'home', listen: { port } }).setup(fakeContext({}).context);
+  }
+});

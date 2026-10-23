@@ -67,7 +67,7 @@ and restart both daemons.
 | --- | --- | --- |
 | `self` | required | This daemon's name as its peers know it. Letters, digits, `.`, `_`, `-` |
 | `peers` | none | Daemons this one may send to: `{ "<name>": { "url": "…" } }` |
-| `listen` | off | `{ host, port }` to accept requests on. Default host `127.0.0.1`, port `4180` |
+| `listen` | off | `{ host, port }` to accept requests on. Default host `127.0.0.1`, port `4180`. The port is a whole number from 0 to 65535 |
 | `maxDepth` | `3` | Hops allowed in a chain of delegations, across every daemon in the chain. A whole number, 1 or more |
 | `timeoutMs` | 10 minutes | How long `peer.delegate` waits for an answer, in whole milliseconds (1 to 2147483647) |
 

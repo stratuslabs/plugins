@@ -23,7 +23,7 @@
           "type": "object",
           "properties": {
             "host": { "type": "string" },
-            "port": { "type": "number" }
+            "port": { "type": "integer", "minimum": 0, "maximum": 65535 }
           },
           "additionalProperties": false
         },

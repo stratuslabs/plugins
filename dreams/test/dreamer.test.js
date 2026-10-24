@@ -174,7 +174,7 @@ test('a daemon that died mid-run moves on to the next experiment and never repla
     timers: fakeTimers(),
     kill: () => {},
   });
-  second.recover();
+  await second.recover();
   await second.tick();
   assert.equal(runs.length, 1);
   assert.equal(runs[0].args[4], b, 'the interrupted experiment is skipped');
@@ -261,4 +261,86 @@ test('a stop during a start that is still checking its path waits for it, and no
   await stopped;
   assert.equal(runs.length, 0, 'nothing spawns after stop');
   assert.deepEqual(claims.night('ava', '2026-10-23'), [], 'nothing spent: the next daemon runs it');
+});
+
+test('a reordered config after a restart still runs each experiment at most once a night', async () => {
+  const [a, b] = [experimentDir(), experimentDir()];
+  const now = night(23, 10);
+  const first = fixture({ agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } }, now });
+  await first.dreamer.tick();
+  assert.equal(first.runs[0].args[4], a);
+  // The daemon stops after A; the config is reordered before it restarts.
+  const stopped = first.dreamer.stop();
+  await exit(first.runs[0], null, 'SIGTERM');
+  await stopped;
+  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
+  const runs = [];
+  const second = createDreamer({
+    agents: parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: b, budget: '1h' }, { path: a, budget: '1h' }] } } }).agents,
+    claims: createClaimStore(() => state),
+    stateDir: () => state,
+    spawn: (command, args, options) => {
+      const child = new EventEmitter();
+      child.pid = 2;
+      runs.push({ args, options, child });
+      return child;
+    },
+    guard: async () => {},
+    secrets: async () => ({}),
+    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
+    now: () => now.value,
+    timers: fakeTimers(),
+    kill: () => {},
+  });
+  await second.tick();
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].args[4], b, 'B runs, not A again');
+  const spent = createClaimStore(() => state).night('ava', '2026-10-23');
+  assert.deepEqual(spent.map((entry) => [entry.index, entry.path]), [[0, a], [1, b]]);
+});
+
+test('recovery waits for a leftover process group to exit, with SIGKILL after the grace, before anything new starts', async () => {
+  const [a, b] = [experimentDir(), experimentDir()];
+  const agents = { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } };
+  const now = night(23, 10);
+  const first = fixture({ agents, now });
+  await first.dreamer.tick();
+  const leftover = first.runs[0].child.pid;
+  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
+  const alive = new Set([leftover]);
+  const kills = [];
+  const runs = [];
+  const second = createDreamer({
+    agents: parseDreamsConfig({ agents }).agents,
+    claims: createClaimStore(() => state),
+    stateDir: () => state,
+    spawn: (command, args, options) => {
+      runs.push({ args, aliveAtSpawn: alive.has(leftover) });
+      const child = new EventEmitter();
+      child.pid = 3;
+      return child;
+    },
+    guard: async () => {},
+    secrets: async () => ({}),
+    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
+    now: () => now.value,
+    timers: fakeTimers(),
+    sleep: async () => {},
+    owns: (pid) => pid === leftover,
+    kill: (target, signal) => {
+      if (signal !== 0) {
+        kills.push([target, signal]);
+      }
+      if (!alive.has(-target)) {
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      }
+      if (signal === 'SIGKILL') {
+        alive.delete(-target);
+      }
+    },
+  });
+  await second.begin();
+  assert.deepEqual(kills, [[-leftover, 'SIGTERM'], [-leftover, 'SIGKILL']], 'it ignored SIGTERM, so it got SIGKILL');
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].aliveAtSpawn, false, 'the next experiment starts only after the group is gone');
 });

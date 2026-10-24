@@ -38,6 +38,12 @@ export const createDreamer = ({
   warn = () => {},
   timers = { setTimeout, clearTimeout, setInterval, clearInterval },
   kill = (pid, signal) => process.kill(pid, signal),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  // Is this pid still the experimenter we started on this path?
+  owns = (pid, experimentPath) => {
+    const ps = spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    return ps.status === 0 && ps.stdout.includes('overnight') && ps.stdout.includes(experimentPath);
+  },
 }) => {
   // The experimenter starts claude and bash as children: signal the group.
   const killGroup = (pid, signal) => {
@@ -47,6 +53,25 @@ export const createDreamer = ({
       // Already gone.
     }
   };
+  const groupAlive = (pid) => {
+    try {
+      kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === 'EPERM';
+    }
+  };
+  const POLL_MS = 250;
+  const waitGone = async (pid, ms) => {
+    for (let waited = 0; groupAlive(pid) && waited < ms; waited += POLL_MS) {
+      await sleep(POLL_MS);
+    }
+    return !groupAlive(pid);
+  };
+  // Leftover groups from a previous daemon that would not die: the agent
+  // starts nothing while one is alive, so two runs never share a path.
+  const lingering = new Map();
+  let recovering = Promise.resolve();
   const running = new Map();
   const said = new Set();
   let interval;
@@ -104,8 +129,14 @@ export const createDreamer = ({
     if (spent.length >= Math.min(agent.maxPerNight, agent.experiments.length)) {
       return;
     }
+    // The claim's index is its order tonight; which experiment it is goes
+    // by path, so a config reordered mid-night never reruns a spent one.
     const index = spent.length;
-    const experiment = agent.experiments[index];
+    const spentPaths = new Set(spent.map((claimed) => claimed.path));
+    const experiment = agent.experiments.find((candidate) => !spentPaths.has(real(candidate.path)));
+    if (!experiment) {
+      return;
+    }
     const budget = clampBudget(experiment.budgetSeconds, window.end, now());
     if (budget === undefined) {
       once(`${agentId}:${window.night}:short`, log, `dreams: ${agentId} night ${window.night}: too little of the window is left to start experiment ${index + 1}, so none runs tonight.`);
@@ -194,12 +225,20 @@ export const createDreamer = ({
   };
 
   const tick = async () => {
+    await recovering;
     if (stopping) {
       return;
     }
     for (const [agentId, agent] of agents) {
       if (running.has(agentId)) {
         continue;
+      }
+      const leftover = lingering.get(agentId);
+      if (leftover !== undefined) {
+        if (groupAlive(leftover)) {
+          continue;
+        }
+        lingering.delete(agentId);
       }
       if (stopping) {
         return;
@@ -224,14 +263,20 @@ export const createDreamer = ({
    * end. Its process may still be running, detached: stop it if it is
    * still ours, then record what it got done.
    */
-  const recover = () => {
+  const recover = async () => {
     for (const agentId of agents.keys()) {
       for (const [night, entries] of Object.entries(claims.nights(agentId))) {
         for (const entry of entries.filter((candidate) => !candidate.result)) {
-          if (entry.pid) {
-            const ps = spawnSync('/bin/ps', ['-o', 'command=', '-p', String(entry.pid)], { encoding: 'utf8' });
-            if (ps.status === 0 && ps.stdout.includes('overnight') && ps.stdout.includes(entry.path)) {
-              killGroup(entry.pid, 'SIGTERM');
+          // The same stop as at the window's end: SIGTERM, the grace, then
+          // SIGKILL, and wait for the group to be gone.
+          if (entry.pid && owns(entry.pid, entry.path)) {
+            killGroup(entry.pid, 'SIGTERM');
+            if (!await waitGone(entry.pid, KILL_GRACE_MS)) {
+              killGroup(entry.pid, 'SIGKILL');
+              if (!await waitGone(entry.pid, KILL_GRACE_MS)) {
+                lingering.set(agentId, entry.pid);
+                warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent until it is gone.`);
+              }
             }
           }
           claims.finish(agentId, night, entry.index, {
@@ -251,7 +296,7 @@ export const createDreamer = ({
     recover,
     begin() {
       stopping = false;
-      recover();
+      recovering = recover().catch((error) => warn(`dreams: recovery failed: ${error.message}`));
       interval = timers.setInterval(() => void tick(), TICK_MS);
       interval.unref?.();
       return tick();

@@ -5,7 +5,8 @@ fleet needs a person: a session that has been running far too long, a
 schedule whose last run failed, a tool call that has waited all afternoon for
 an approval.
 
-Needs a Stratus host with `PluginContext.fleet` (stratuslabs/agent#412). On an
+Needs Stratus 0.13.4 or later, which added `PluginContext.fleet`
+(stratuslabs/agent#412). On an
 older one, `setup` fails and says so.
 
 ## Tools

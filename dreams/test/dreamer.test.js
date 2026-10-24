@@ -574,3 +574,131 @@ test('the window and budget are checked again after the async setup, before the 
   assert.equal(args[args.indexOf('--budget') + 1], '900s', 'the budget is cut to what is left now');
   assert.equal(cut.claims.night('ava', '2026-10-23')[0].budgetSeconds, 900);
 });
+
+// A second daemon on the first one's state, with its own process table.
+const restarted = (agents, now, state, { alive, kills, owns, sleep = async () => {}, claims = createClaimStore(() => state), warnings = [] }) => {
+  const runs = [];
+  const dreamer = createDreamer({
+    agents: parseDreamsConfig({ agents }).agents,
+    claims,
+    stateDir: () => state,
+    spawn: (command, args, options) => {
+      const child = new EventEmitter();
+      child.pid = 5;
+      runs.push({ args, options, child });
+      return child;
+    },
+    guard: async () => {},
+    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' }, bo: { anthropicApiKey: 'sk-test' } }),
+    keyProxy: fakeProxies().keyProxy,
+    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
+    now: () => now.value,
+    timers: fakeTimers(),
+    sleep,
+    owns,
+    warn: (message) => warnings.push(message),
+    kill: groupKill(alive, kills),
+  });
+  return { dreamer, runs, warnings };
+};
+
+test('a recovery error on one claim still recovers the rest, and blocks only that agent while its group lives', async () => {
+  const [a1, a2, b1, b2] = [experimentDir(), experimentDir(), experimentDir(), experimentDir()];
+  const agents = {
+    ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a1, budget: '1h' }, { path: a2, budget: '1h' }] },
+    bo: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: b1, budget: '1h' }, { path: b2, budget: '1h' }] },
+  };
+  const now = night(23, 10);
+  const first = fixture({ agents, now, secrets: { ava: { anthropicApiKey: 'sk-test' }, bo: { anthropicApiKey: 'sk-test' } } });
+  await first.dreamer.tick();
+  assert.equal(first.runs.length, 2);
+  const [avaPid, boPid] = first.runs.map((run) => run.child.pid);
+  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
+  const alive = new Set([avaPid, boPid]);
+  const kills = [];
+  const owns = (pid) => {
+    if (pid === avaPid) {
+      throw new Error('ps failed');
+    }
+    return true;
+  };
+  const { dreamer, runs, warnings } = restarted(agents, now, state, { alive, kills, owns });
+  await dreamer.begin();
+  assert.deepEqual(kills, [[-boPid, 'SIGTERM'], [-boPid, 'SIGKILL']], 'the claim after the failed one is still recovered');
+  assert.equal(createClaimStore(() => state).night('bo', '2026-10-23')[0].result.status, 'interrupted');
+  assert.ok(warnings.some((message) => message.includes('ava') && message.includes('ps failed')));
+  assert.deepEqual(runs.map((run) => run.args[4]), [b2], 'bo moves on; ava starts nothing while its old group is alive');
+  alive.delete(avaPid);
+  await dreamer.tick();
+  assert.deepEqual(runs.map((run) => run.args[4]), [b2, a2], 'ava starts once the group is gone');
+});
+
+test('a daemon stop during recovery waits for it to finish', async () => {
+  const exp = experimentDir();
+  const agents = { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } };
+  const now = night(23, 10);
+  const first = fixture({ agents, now });
+  await first.dreamer.tick();
+  const leftover = first.runs[0].child.pid;
+  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
+  let wake;
+  const sleep = () => new Promise((resolve) => {
+    wake = resolve;
+  });
+  const alive = new Set([leftover]);
+  const { dreamer } = restarted(agents, now, state, { alive, kills: [], owns: () => true, sleep });
+  void dreamer.begin();
+  await new Promise((resolve) => setImmediate(resolve));
+  let stopped = false;
+  const stopping = dreamer.stop().then(() => {
+    stopped = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(stopped, false, 'stop does not return while recovery is still stopping a group');
+  alive.delete(leftover);
+  wake();
+  await stopping;
+  assert.equal(createClaimStore(() => state).night('ava', '2026-10-23')[0].result.status, 'interrupted');
+});
+
+test('a report that cannot be spawned clears its timeout', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, timers, reports, claims } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports.length, 1);
+  reports[0].emit('error', new Error('spawn sandbox-exec ENOENT'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(claims.night('ava', '2026-10-23')[0].result, 'the run is finished');
+  assert.deepEqual([...timers.pending].filter((handle) => handle.ms === 120_000), [], 'no report timer is left armed');
+});
+
+test('claims that cannot be read at startup block only that agent', async () => {
+  const [a, b] = [experimentDir(), experimentDir()];
+  const agents = {
+    ava: { window: '23:00-07:00', experiments: [{ path: a, budget: '1h' }] },
+    bo: { window: '23:00-07:00', experiments: [{ path: b, budget: '1h' }] },
+  };
+  const now = night(23, 10);
+  const state = mkdtempSync(path.join(os.tmpdir(), 'dreams-state-'));
+  const store = createClaimStore(() => state);
+  const claims = new Proxy(store, {
+    get: (target, key) => (key === 'nights'
+      ? (agentId) => {
+        if (agentId === 'ava') {
+          throw new Error('claims.json is not valid JSON');
+        }
+        return target.nights(agentId);
+      }
+      : target[key]),
+  });
+  const { dreamer, runs, warnings } = restarted(agents, now, state, { alive: new Set(), kills: [], owns: () => true, claims });
+  await dreamer.begin();
+  assert.deepEqual(runs.map((run) => run.args[4]), [b]);
+  assert.ok(warnings.some((message) => message.includes('ava') && message.includes('not valid JSON')));
+});

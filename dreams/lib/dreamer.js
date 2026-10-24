@@ -87,6 +87,8 @@ export const createDreamer = ({
   // Experiment directories (real paths) with a run in them, across agents:
   // two runs in one directory would share workspace/ and experiments.jsonl.
   const busy = new Set();
+  // Agents whose claims could not be read at startup: they start nothing.
+  const unrecovered = new Set();
   let recovering = Promise.resolve();
   const running = new Map();
   const said = new Set();
@@ -131,7 +133,10 @@ export const createDreamer = ({
     const [command, args] = sandboxed(experimentDir, dirs, ['report', experimentDir]);
     const child = spawn(command, args, { cwd: experimentDir, env, stdio: 'ignore' });
     const timer = timers.setTimeout(() => child.kill('SIGKILL'), REPORT_TIMEOUT_MS);
-    child.on('error', () => resolve(undefined));
+    child.on('error', () => {
+      timers.clearTimeout(timer);
+      resolve(undefined);
+    });
     child.on('exit', (code) => {
       timers.clearTimeout(timer);
       resolve(code === 0 ? path.join(experimentDir, 'report.html') : undefined);
@@ -323,7 +328,7 @@ export const createDreamer = ({
       return;
     }
     for (const [agentId, agent] of agents) {
-      if (running.has(agentId)) {
+      if (running.has(agentId) || unrecovered.has(agentId)) {
         continue;
       }
       const leftover = lingering.get(agentId);
@@ -352,28 +357,50 @@ export const createDreamer = ({
     }
   };
 
+  const recoverOne = async (agentId, night, entry) => {
+    // The same stop as at the window's end: SIGTERM, the grace, then
+    // SIGKILL, and wait for the group to be gone.
+    if (entry.pid && owns(entry.pid, entry.path) && !await stopGroup(entry.pid)) {
+      lingering.set(agentId, { pid: entry.pid, path: entry.path });
+      busy.add(entry.path);
+      warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent or in ${entry.path} until it is gone.`);
+    }
+    claims.finish(agentId, night, entry.index, {
+      status: 'interrupted',
+      endedAt: now().toISOString(),
+      summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
+    });
+    log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
+  };
+
   /**
    * A claim with no result is an experiment the last daemon did not see
    * end. Its process may still be running, detached: stop it if it is
-   * still ours, then record what it got done.
+   * still ours, then record what it got done. A claim that fails to
+   * recover does not stop the others: its agent is blocked while the
+   * claim's group is alive, and the next daemon tries the claim again.
    */
   const recover = async () => {
     for (const agentId of agents.keys()) {
-      for (const [night, entries] of Object.entries(claims.nights(agentId))) {
+      let nights;
+      try {
+        nights = Object.entries(claims.nights(agentId));
+      } catch (error) {
+        unrecovered.add(agentId);
+        warn(`dreams: ${agentId}: recovery failed, nothing starts for this agent until the daemon restarts: ${error.message}`);
+        continue;
+      }
+      for (const [night, entries] of nights) {
         for (const entry of entries.filter((candidate) => !candidate.result)) {
-          // The same stop as at the window's end: SIGTERM, the grace, then
-          // SIGKILL, and wait for the group to be gone.
-          if (entry.pid && owns(entry.pid, entry.path) && !await stopGroup(entry.pid)) {
-            lingering.set(agentId, { pid: entry.pid, path: entry.path });
-            busy.add(entry.path);
-            warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent or in ${entry.path} until it is gone.`);
+          try {
+            await recoverOne(agentId, night, entry);
+          } catch (error) {
+            if (entry.pid && groupAlive(entry.pid)) {
+              lingering.set(agentId, { pid: entry.pid, path: entry.path });
+              busy.add(entry.path);
+            }
+            warn(`dreams: ${agentId} night ${night}: recovery of experiment ${entry.index + 1} failed: ${error.message}`);
           }
-          claims.finish(agentId, night, entry.index, {
-            status: 'interrupted',
-            endedAt: now().toISOString(),
-            summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
-          });
-          log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
         }
       }
     }
@@ -403,6 +430,8 @@ export const createDreamer = ({
         return runs;
       };
       const runs = terminateAll();
+      // Recovery may still be stopping an old group; it is not in running.
+      await recovering;
       // A start still checking its path finishes before stop returns: it
       // sees stopping and spawns nothing. Anything it did spawn is stopped too.
       await Promise.allSettled([...running.values()].filter((run) => run.starting).map((run) => run.starting));

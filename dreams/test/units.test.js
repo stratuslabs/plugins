@@ -1,7 +1,7 @@
 process.env.TZ = 'America/New_York';
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -169,4 +169,24 @@ test('a home secret that is a link is denied at its target too, since the sandbo
   assert.ok(denied.includes(path.join(home, '.ssh')), 'the link as named');
   assert.ok(denied.includes(elsewhere), 'and where it points');
   assert.ok(denied.includes(path.join(home, '.aws')), 'missing entries stay denied by name');
+});
+
+test('a link inside a home secret is denied at its target too, however deep', () => {
+  const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-home-')));
+  const shared = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-shared-')));
+  writeFileSync(path.join(shared, 'credentials'), 'secret');
+  mkdirSync(path.join(shared, 'keys'));
+  mkdirSync(path.join(home, '.aws'));
+  symlinkSync(path.join(shared, 'credentials'), path.join(home, '.aws', 'credentials'));
+  mkdirSync(path.join(home, '.config', 'gh', 'deep'), { recursive: true });
+  symlinkSync(path.join(shared, 'keys'), path.join(home, '.config', 'gh', 'deep', 'keys'));
+  const denied = homeSecretPaths(home);
+  assert.ok(denied.includes(path.join(shared, 'credentials')), 'a linked file');
+  assert.ok(denied.includes(path.join(shared, 'keys')), 'a linked directory further down');
+  assert.ok(!denied.includes(shared), 'only the targets, not their parent');
+  mkdirSync(path.join(home, '.stratus', 'agents', 'ava', 'workspace'), { recursive: true });
+  symlinkSync(path.join(shared, 'keys'), path.join(home, '.stratus', 'agents', 'ava', 'workspace', 'store'));
+  const withStratus = homeSecretPaths(home);
+  assert.ok(withStratus.includes(path.join(home, '.stratus')), 'the Stratus home is denied whole');
+  assert.equal(withStratus.length, denied.length, 'but its workspace links are not walked');
 });

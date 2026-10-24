@@ -21,7 +21,7 @@ process tree:
 | --- | --- |
 | Writable | `workspace/`, `best/`, `experiments.jsonl`, `report.html`, plus a private home and tmp for each experiment in the plugin's state directory |
 | Read-only | the rest of the experiment directory, including `evaluate.sh` and `program.md`, the system, the install directories of `overnight`, `claude` and node, and your `readPaths` |
-| Unreadable | everything else in your home, and never `~/.ssh`, `~/.aws`, `~/.claude`, `~/.claude.json`, `~/.config/gh`, `~/Library/Keychains`, `~/.stratus`, every agent workspace or any path Stratus protects, even if a read path covers them |
+| Unreadable | everything else in your home, and never `~/.ssh`, `~/.aws`, `~/.claude`, `~/.claude.json`, `~/.config/gh`, `~/Library/Keychains`, `~/.stratus`, every agent workspace or any path Stratus protects, even if a read path covers them. A link inside one of those secret directories (outside `~/.stratus`) is denied where it points, too. |
 | Network | on, because `claude` needs the API |
 | Anthropic key | never in the sandbox: see below |
 

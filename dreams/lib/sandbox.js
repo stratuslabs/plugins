@@ -1,4 +1,4 @@
-import { accessSync, constants, realpathSync } from 'node:fs';
+import { accessSync, constants, lstatSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -66,7 +66,60 @@ export const real = (target) => {
  * points: the sandbox checks resolved paths, so a `~/.ssh` that links into
  * an allowed read path would otherwise be readable.
  */
-export const homeSecretPaths = (home) => [...new Set(HOME_SECRETS.map((entry) => path.join(home, entry)).flatMap((target) => [target, real(target)]))];
+const SECRET_WALK_LIMIT = 50_000;
+
+/**
+ * Every link under a secret, by where it points. The sandbox checks the
+ * resolved path, so `~/.aws/credentials` linked into a read path would be
+ * readable through the target though `~/.aws` is denied. Links are not
+ * followed while walking; their targets are denied whole. A tree too big
+ * to walk is refused rather than half-checked.
+ */
+const linkTargetsUnder = (root) => {
+  const targets = [];
+  const pending = [root];
+  let seen = 0;
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      seen += 1;
+      if (seen > SECRET_WALK_LIMIT) {
+        throw new Error(
+          `@stratusagent/plugin-dreams cannot check ${root} for links to secrets elsewhere: it holds more than ${SECRET_WALK_LIMIT} entries. `
+          + 'No experiment runs until it is smaller.',
+        );
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        targets.push(real(full));
+      } else if (entry.isDirectory()) {
+        pending.push(full);
+      }
+    }
+  }
+  return targets;
+};
+
+export const homeSecretPaths = (home) => [...new Set(HOME_SECRETS.map((entry) => path.join(home, entry)).flatMap((target) => {
+  const resolved = real(target);
+  let isDir = false;
+  try {
+    isDir = lstatSync(resolved).isDirectory();
+  } catch {
+    // Missing: denied by name.
+  }
+  // Not the Stratus home: it holds the agents' workspaces, which are fenced
+  // from experiments separately and full of package-manager links whose
+  // targets (a pnpm store, a toolchain) an experiment may need to read.
+  const walk = isDir && path.relative(home, target) !== '.stratus';
+  return [target, resolved, ...(walk ? linkTargetsUnder(resolved) : [])];
+}))];
 
 const subpaths = (list) => list.map((target) => `(subpath ${sbpl(target)})`).join(' ');
 const literals = (list) => list.map((target) => `(literal ${sbpl(target)})`).join(' ');

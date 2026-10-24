@@ -115,11 +115,10 @@ test('claims survive a reload, keep two weeks, and refuse to read a corrupt file
   for (let day = 1; day <= 16; day += 1) {
     claims.claim('ava', `2026-10-${String(day).padStart(2, '0')}`, { index: 0, path: '/x', offset: 0 });
   }
-  claims.update('ava', '2026-10-16', 0, { pid: 42 });
   claims.finish('ava', '2026-10-16', 0, { status: 'finished' });
   const again = createClaimStore(() => dir);
   assert.equal(Object.keys(again.nights('ava')).length, 14);
-  assert.deepEqual(again.night('ava', '2026-10-16'), [{ index: 0, path: '/x', offset: 0, pid: 42, result: { status: 'finished' } }]);
+  assert.deepEqual(again.night('ava', '2026-10-16'), [{ index: 0, path: '/x', offset: 0, result: { status: 'finished' } }]);
   assert.deepEqual(again.night('ava', '2026-10-01'), []);
   writeFileSync(path.join(dir, 'claims', 'ava.json'), '{oops');
   assert.throws(() => again.night('ava', '2026-10-16'), /cannot read its claims/);

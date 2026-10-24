@@ -147,7 +147,6 @@ export const createPlugin = (config = {}, options = {}) => {
             },
             ...(options.now ? { now: options.now } : {}),
             ...(options.timers ? { timers: options.timers } : {}),
-            ...(options.kill ? { kill: options.kill } : {}),
             log: (message) => context.log?.(message),
             warn: (message) => context.warn?.(message),
           });

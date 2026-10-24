@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { createClaimStore } from '../lib/claims.js';
 import { parseDreamsConfig } from '../lib/config.js';
 import { createDreamer } from '../lib/dreamer.js';
 import { SANDBOX_EXEC } from '../lib/sandbox.js';
+import { LOCK_BUSY, TETHER } from '../lib/tether.js';
 
 const fakeTimers = () => {
   const pending = new Set();
@@ -50,20 +51,24 @@ const fakeProxies = () => {
   return { opened, keyProxy };
 };
 
-// kill(-pid, 0) throws ESRCH unless the group is in `alive`.
-const groupKill = (alive, kills, stubborn = new Set()) => (target, signal) => {
-  if (signal !== 0) {
-    kills.push([target, signal]);
+// Runs start under the tether: record the command it was given to run,
+// and the signals the daemon sends the tether.
+let pids = 900_000;
+const fakeChild = (kills) => {
+  const child = new EventEmitter();
+  child.pid = (pids += 1);
+  child.kill = (signal) => kills.push(signal);
+  return child;
+};
+const unwrap = (command, args, options, child) => {
+  if (command === process.execPath && args[0] === TETHER) {
+    const split = args.indexOf('--');
+    return { command: args[split + 1], args: args.slice(split + 2), tether: { lock: args[1], grace: args[2] }, options, child };
   }
-  if (!alive.has(-target)) {
-    throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
-  }
-  if (signal === 'SIGKILL' && !stubborn.has(-target)) {
-    alive.delete(-target);
-  }
+  return { command, args, options, child };
 };
 
-const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secrets = { ava: { anthropicApiKey: 'sk-test' } }, alive = new Set(), stubborn = new Set(), holdReports = false }) => {
+const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secrets = { ava: { anthropicApiKey: 'sk-test' } }, holdReports = false }) => {
   const state = mkdtempSync(path.join(os.tmpdir(), 'dreams-state-'));
   const claims = createClaimStore(() => state);
   const timers = fakeTimers();
@@ -72,13 +77,10 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
   const warnings = [];
   const proxies = fakeProxies();
   const reports = [];
-  let pid = 900_000;
   const spawn = (command, args, options) => {
-    const child = new EventEmitter();
-    child.pid = (pid += 1);
-    child.kill = () => {};
-    const call = { command, args, options, child };
-    if (args.includes('report')) {
+    const child = fakeChild(kills);
+    const call = unwrap(command, args, options, child);
+    if (call.args.includes('report')) {
       if (holdReports) {
         reports.push(child);
       } else {
@@ -100,12 +102,34 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin:/bin' },
     now: () => now.value,
     timers,
-    sleep: async () => {},
     keyProxy: proxies.keyProxy,
     warn: (message) => warnings.push(message),
-    kill: groupKill(alive, kills, stubborn),
   });
-  return { dreamer, claims, runs, kills, timers, proxies, warnings, alive, reports };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports };
+};
+
+// A second daemon on the first one's state.
+const restarted = (agents, now, state, { claims = createClaimStore(() => state), warnings = [] } = {}) => {
+  const runs = [];
+  const kills = [];
+  const dreamer = createDreamer({
+    agents: parseDreamsConfig({ agents }).agents,
+    claims,
+    stateDir: () => state,
+    spawn: (command, args, options) => {
+      const child = fakeChild(kills);
+      runs.push(unwrap(command, args, options, child));
+      return child;
+    },
+    guard: async () => {},
+    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' }, bo: { anthropicApiKey: 'sk-test' } }),
+    keyProxy: fakeProxies().keyProxy,
+    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
+    now: () => now.value,
+    timers: fakeTimers(),
+    warn: (message) => warnings.push(message),
+  });
+  return { dreamer, runs, kills, warnings };
 };
 
 const experimentDir = () => {
@@ -152,7 +176,10 @@ test('the run is sandboxed, uses claude only, has a clean env and a budget cut t
   assert.deepEqual(run.args.slice(2), [
     '/opt/x/bin/overnight', 'run', exp, '--budget', `${4 * 3600 - 15 * 60}s`, '--agent', 'claude', '--direction', 'minimize', '--max-experiments', '3',
   ]);
-  assert.equal(run.options.detached, true);
+  // Under the tether, with a pipe from the daemon on its stdin.
+  assert.equal(run.tether.grace, '30000');
+  assert.equal(run.options.stdio[0], 'pipe');
+  assert.equal(run.options.detached, undefined, 'the tether puts the experiment in its own group');
   assert.deepEqual(Object.keys(run.options.env).sort(), ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR', 'HOME', 'LANG', 'PATH', 'TMPDIR']);
   // The real key stays in the daemon: the run gets a loopback proxy and a
   // token for it that is worthless anywhere else.
@@ -200,47 +227,29 @@ test('a daemon that died mid-run moves on to the next experiment and never repla
   appendFileSync(path.join(a, 'experiments.jsonl'), '{"experiment_id":1,"score":2,"best_score":2,"improved":true,"description":"x"}\n');
   // The daemon is gone; its child never reports. A new daemon on the same state:
   const state = first.runs[0].options.env.HOME.split('/agents/')[0];
-  const runs = [];
-  const second = createDreamer({
-    agents: parseDreamsConfig({ agents }).agents,
-    claims: createClaimStore(() => state),
-    stateDir: () => state,
-    spawn: (command, args, options) => {
-      const child = new EventEmitter();
-      child.pid = 1;
-      runs.push({ args, options, child });
-      return child;
-    },
-    guard: async () => {},
-    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
-    keyProxy: fakeProxies().keyProxy,
-    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
-    now: () => now.value,
-    timers: fakeTimers(),
-    kill: groupKill(new Set(), []),
-  });
-  await second.recover();
-  await second.tick();
+  const { dreamer: second, runs, kills } = restarted(agents, now, state);
+  await second.begin();
   assert.equal(runs.length, 1);
   assert.equal(runs[0].args[4], b, 'the interrupted experiment is skipped');
+  assert.deepEqual(kills, [], 'nothing from the old daemon is looked for or signalled');
   const [spent] = createClaimStore(() => state).night('ava', '2026-10-23');
   assert.equal(spent.result.status, 'interrupted');
   assert.equal(spent.result.summary.attempts, 1, 'and what it got done is still summarized');
 });
 
-test('the window end stops the process group: SIGTERM, then SIGKILL after the grace', async () => {
+test('the window end asks the tether to stop the run, once', async () => {
   const exp = experimentDir();
   const { dreamer, runs, kills, timers, claims } = fixture({
     agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '8h' }] } },
     now: night(23, 0),
   });
   await dreamer.tick();
-  const pid = runs[0].child.pid;
   timers.fire((handle) => handle.ms === 8 * 3600_000);
-  assert.deepEqual(kills, [[-pid, 'SIGTERM']]);
-  timers.fire((handle) => handle.ms === 30_000);
-  assert.deepEqual(kills, [[-pid, 'SIGTERM'], [-pid, 'SIGKILL']]);
+  assert.deepEqual(kills, ['SIGTERM'], 'the tether owns the grace and the SIGKILL');
+  const stopped = dreamer.stop();
+  assert.deepEqual(kills, ['SIGTERM'], 'a stop after that asks nothing more');
   await exit(runs[0], null, 'SIGKILL');
+  await stopped;
   const [entry] = claims.night('ava', '2026-10-23');
   assert.equal(entry.result.status, 'stopped-at-window-end');
   assert.equal(entry.result.signal, 'SIGKILL');
@@ -254,7 +263,7 @@ test('stopping the daemon stops the run and records it', async () => {
   });
   await dreamer.tick();
   const stopped = dreamer.stop();
-  assert.deepEqual(kills, [[-runs[0].child.pid, 'SIGTERM']]);
+  assert.deepEqual(kills, ['SIGTERM']);
   runs[0].child.emit('exit', null, 'SIGTERM');
   await stopped;
   assert.equal(claims.night('ava', '2026-10-23')[0].result.status, 'stopped-by-daemon');
@@ -319,25 +328,7 @@ test('a reordered config after a restart still runs each experiment at most once
   await exit(first.runs[0], null, 'SIGTERM');
   await stopped;
   const state = first.runs[0].options.env.HOME.split('/agents/')[0];
-  const runs = [];
-  const second = createDreamer({
-    agents: parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: b, budget: '1h' }, { path: a, budget: '1h' }] } } }).agents,
-    claims: createClaimStore(() => state),
-    stateDir: () => state,
-    spawn: (command, args, options) => {
-      const child = new EventEmitter();
-      child.pid = 2;
-      runs.push({ args, options, child });
-      return child;
-    },
-    guard: async () => {},
-    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
-    keyProxy: fakeProxies().keyProxy,
-    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
-    now: () => now.value,
-    timers: fakeTimers(),
-    kill: groupKill(new Set(), []),
-  });
+  const { dreamer: second, runs } = restarted({ ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: b, budget: '1h' }, { path: a, budget: '1h' }] } }, now, state);
   await second.tick();
   assert.equal(runs.length, 1);
   assert.equal(runs[0].args[4], b, 'B runs, not A again');
@@ -345,53 +336,43 @@ test('a reordered config after a restart still runs each experiment at most once
   assert.deepEqual(spent.map((entry) => [entry.index, entry.path]), [[0, a], [1, b]]);
 });
 
-test('recovery waits for a leftover process group to exit, with SIGKILL after the grace, before anything new starts', async () => {
-  const [a, b] = [experimentDir(), experimentDir()];
-  const agents = { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } };
+test('after a restart, a run that is still stopping keeps its directory until its tether lets go', async () => {
+  const exp = experimentDir();
   const now = night(23, 10);
-  const first = fixture({ agents, now });
+  const first = fixture({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } }, now });
   await first.dreamer.tick();
-  const leftover = first.runs[0].child.pid;
   const state = first.runs[0].options.env.HOME.split('/agents/')[0];
-  const alive = new Set([leftover]);
-  const kills = [];
-  const runs = [];
-  const second = createDreamer({
-    agents: parseDreamsConfig({ agents }).agents,
-    claims: createClaimStore(() => state),
-    stateDir: () => state,
-    spawn: (command, args, options) => {
-      runs.push({ args, aliveAtSpawn: alive.has(leftover) });
-      const child = new EventEmitter();
-      child.pid = 3;
-      return child;
-    },
-    guard: async () => {},
-    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
-    keyProxy: fakeProxies().keyProxy,
-    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
-    now: () => now.value,
-    timers: fakeTimers(),
-    sleep: async () => {},
-    owns: (pid) => pid === leftover,
-    kill: (target, signal) => {
-      if (signal !== 0) {
-        kills.push([target, signal]);
-      }
-      if (!alive.has(-target)) {
-        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
-      }
-      if (signal === 'SIGKILL') {
-        alive.delete(-target);
-      }
-    },
-  });
-  await second.begin();
-  assert.deepEqual(kills, [[-leftover, 'SIGTERM'], [-leftover, 'SIGKILL']], 'it ignored SIGTERM, so it got SIGKILL');
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].aliveAtSpawn, false, 'the next experiment starts only after the group is gone');
+  // The old run's tether is still in its grace and holds the lock. The
+  // config moved the directory to another agent before the restart.
+  const O_EXLOCK = 0x20;
+  const held = openSync(first.runs[0].tether.lock, constants.O_CREAT | constants.O_RDWR | O_EXLOCK | constants.O_NONBLOCK, 0o600);
+  const { dreamer, runs, kills } = restarted({ bo: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } }, now, state);
+  await dreamer.begin();
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'nothing starts in the directory while the old run holds it');
+  assert.deepEqual(createClaimStore(() => state).night('bo', '2026-10-23'), [], 'and nothing is spent');
+  closeSync(held);
+  await dreamer.tick();
+  assert.equal(runs.length, 1, 'it starts once the old tether is gone');
+  assert.equal(runs[0].tether.lock, first.runs[0].tether.lock, 'one lock per directory, whichever agent runs it');
+  assert.deepEqual(kills, []);
 });
 
+test('a tether that finds the lock taken runs nothing and the experiment is recorded as failed to start', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, claims, reports, proxies } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  await exit(runs[0], LOCK_BUSY);
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result.status, 'failed-to-start');
+  assert.match(entry.result.error, /earlier daemon/);
+  assert.equal(reports.length, 0, 'no report for a run that never ran');
+  assert.equal(proxies.opened[0].closed, true);
+});
 test('the key proxy closes when the run ends', async () => {
   const exp = experimentDir();
   const { dreamer, runs, proxies } = fixture({
@@ -418,52 +399,6 @@ test('with no key stored nothing runs and nothing is spent: login mode is not su
   assert.deepEqual(claims.night('ava', '2026-10-23'), []);
   assert.equal(warnings.length, 1, 'said once');
   assert.match(warnings[0], /stratus channel set dreams --agent ava anthropicApiKey/);
-});
-
-test('a leader that exits leaving its group alive: the group is stopped before the run ends', async () => {
-  const exp = experimentDir();
-  const alive = new Set();
-  const { dreamer, runs, kills, claims, proxies } = fixture({
-    agents: { ava: { window: '23:00-07:00', maxPerNight: 1, experiments: [{ path: exp, budget: '1h' }] } },
-    now: night(23, 0),
-    alive,
-  });
-  await dreamer.tick();
-  const pid = runs[0].child.pid;
-  alive.add(pid);
-  // evaluate.sh left something in the background; the leader exits.
-  await exit(runs[0], 0);
-  assert.deepEqual(kills, [[-pid, 'SIGTERM'], [-pid, 'SIGKILL']], 'TERM, the grace, then KILL');
-  assert.equal(alive.has(pid), false);
-  const [entry] = claims.night('ava', '2026-10-23');
-  assert.equal(entry.result.status, 'finished');
-  assert.equal(entry.result.strays, 'stopped');
-  assert.equal(proxies.opened[0].closed, true, 'the proxy outlives every member of the group');
-});
-
-test('a group that survives SIGKILL after its leader exits blocks that agent until it is gone', async () => {
-  const [a, b] = [experimentDir(), experimentDir()];
-  const alive = new Set();
-  const stubborn = new Set();
-  const { dreamer, runs, claims } = fixture({
-    agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } },
-    now: night(23, 0),
-    alive,
-    stubborn,
-  });
-  await dreamer.tick();
-  const pid = runs[0].child.pid;
-  // A member SIGKILL cannot end yet (say, stuck in uninterruptible I/O).
-  alive.add(pid);
-  stubborn.add(pid);
-  await exit(runs[0], 0);
-  assert.equal(claims.night('ava', '2026-10-23')[0].result.strays, 'survived');
-  await dreamer.tick();
-  assert.equal(runs.length, 1, 'nothing new starts while the group lives');
-  stubborn.clear();
-  alive.delete(pid);
-  await dreamer.tick();
-  assert.equal(runs.length, 2, 'and the next one starts once it is gone');
 });
 
 test('two agents never run the same experiment directory at once, even through a symlink', async () => {
@@ -502,7 +437,7 @@ test('a setup failure after the key proxy opens closes it, and retries do not pi
   assert.ok(warnings.some((message) => message.includes('cannot express the path')));
 });
 
-test('a daemon stop after the leader and its group are gone signals nothing and arms no SIGKILL', async () => {
+test('a daemon stop after the tether has exited signals nothing', async () => {
   const exp = experimentDir();
   const { dreamer, runs, kills, timers, reports } = fixture({
     agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
@@ -517,7 +452,7 @@ test('a daemon stop after the leader and its group are gone signals nothing and 
   reports[0].emit('exit', 0, null);
   await stopped;
   assert.deepEqual(kills, [], 'the pid may be reused by now: no signal');
-  assert.equal([...timers.pending].filter((handle) => handle.ms === 30_000).length, 0, 'and no SIGKILL timer left armed');
+  assert.equal([...timers.pending].length, 0, 'and no timer is left armed');
 });
 
 test('the experiment directory stays busy until its report and summary are done', async () => {
@@ -575,92 +510,6 @@ test('the window and budget are checked again after the async setup, before the 
   assert.equal(cut.claims.night('ava', '2026-10-23')[0].budgetSeconds, 900);
 });
 
-// A second daemon on the first one's state, with its own process table.
-const restarted = (agents, now, state, { alive, kills, owns, sleep = async () => {}, claims = createClaimStore(() => state), warnings = [] }) => {
-  const runs = [];
-  const dreamer = createDreamer({
-    agents: parseDreamsConfig({ agents }).agents,
-    claims,
-    stateDir: () => state,
-    spawn: (command, args, options) => {
-      const child = new EventEmitter();
-      child.pid = 5;
-      runs.push({ args, options, child });
-      return child;
-    },
-    guard: async () => {},
-    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' }, bo: { anthropicApiKey: 'sk-test' } }),
-    keyProxy: fakeProxies().keyProxy,
-    tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
-    now: () => now.value,
-    timers: fakeTimers(),
-    sleep,
-    owns,
-    warn: (message) => warnings.push(message),
-    kill: groupKill(alive, kills),
-  });
-  return { dreamer, runs, warnings };
-};
-
-test('a recovery error on one claim still recovers the rest, and blocks only that agent while its group lives', async () => {
-  const [a1, a2, b1, b2] = [experimentDir(), experimentDir(), experimentDir(), experimentDir()];
-  const agents = {
-    ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a1, budget: '1h' }, { path: a2, budget: '1h' }] },
-    bo: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: b1, budget: '1h' }, { path: b2, budget: '1h' }] },
-  };
-  const now = night(23, 10);
-  const first = fixture({ agents, now, secrets: { ava: { anthropicApiKey: 'sk-test' }, bo: { anthropicApiKey: 'sk-test' } } });
-  await first.dreamer.tick();
-  assert.equal(first.runs.length, 2);
-  const [avaPid, boPid] = first.runs.map((run) => run.child.pid);
-  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
-  const alive = new Set([avaPid, boPid]);
-  const kills = [];
-  const owns = (pid) => {
-    if (pid === avaPid) {
-      throw new Error('ps failed');
-    }
-    return true;
-  };
-  const { dreamer, runs, warnings } = restarted(agents, now, state, { alive, kills, owns });
-  await dreamer.begin();
-  assert.deepEqual(kills, [[-boPid, 'SIGTERM'], [-boPid, 'SIGKILL']], 'the claim after the failed one is still recovered');
-  assert.equal(createClaimStore(() => state).night('bo', '2026-10-23')[0].result.status, 'interrupted');
-  assert.ok(warnings.some((message) => message.includes('ava') && message.includes('ps failed')));
-  assert.deepEqual(runs.map((run) => run.args[4]), [b2], 'bo moves on; ava starts nothing while its old group is alive');
-  alive.delete(avaPid);
-  await dreamer.tick();
-  assert.deepEqual(runs.map((run) => run.args[4]), [b2, a2], 'ava starts once the group is gone');
-});
-
-test('a daemon stop during recovery waits for it to finish', async () => {
-  const exp = experimentDir();
-  const agents = { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } };
-  const now = night(23, 10);
-  const first = fixture({ agents, now });
-  await first.dreamer.tick();
-  const leftover = first.runs[0].child.pid;
-  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
-  let wake;
-  const sleep = () => new Promise((resolve) => {
-    wake = resolve;
-  });
-  const alive = new Set([leftover]);
-  const { dreamer } = restarted(agents, now, state, { alive, kills: [], owns: () => true, sleep });
-  void dreamer.begin();
-  await new Promise((resolve) => setImmediate(resolve));
-  let stopped = false;
-  const stopping = dreamer.stop().then(() => {
-    stopped = true;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(stopped, false, 'stop does not return while recovery is still stopping a group');
-  alive.delete(leftover);
-  wake();
-  await stopping;
-  assert.equal(createClaimStore(() => state).night('ava', '2026-10-23')[0].result.status, 'interrupted');
-});
-
 test('a report that cannot be spawned clears its timeout', async () => {
   const exp = experimentDir();
   const { dreamer, runs, timers, reports, claims } = fixture({
@@ -678,7 +527,7 @@ test('a report that cannot be spawned clears its timeout', async () => {
   assert.deepEqual([...timers.pending].filter((handle) => handle.ms === 120_000), [], 'no report timer is left armed');
 });
 
-test('claims that cannot be read at startup block only that agent', async () => {
+test('a claim file that cannot be read blocks only that agent, and never reads as nothing spent', async () => {
   const [a, b] = [experimentDir(), experimentDir()];
   const agents = {
     ava: { window: '23:00-07:00', experiments: [{ path: a, budget: '1h' }] },
@@ -686,19 +535,11 @@ test('claims that cannot be read at startup block only that agent', async () => 
   };
   const now = night(23, 10);
   const state = mkdtempSync(path.join(os.tmpdir(), 'dreams-state-'));
-  const store = createClaimStore(() => state);
-  const claims = new Proxy(store, {
-    get: (target, key) => (key === 'nights'
-      ? (agentId) => {
-        if (agentId === 'ava') {
-          throw new Error('claims.json is not valid JSON');
-        }
-        return target.nights(agentId);
-      }
-      : target[key]),
-  });
-  const { dreamer, runs, warnings } = restarted(agents, now, state, { alive: new Set(), kills: [], owns: () => true, claims });
+  mkdirSync(path.join(state, 'claims'));
+  writeFileSync(path.join(state, 'claims', 'ava.json'), '{oops');
+  const { dreamer, runs, warnings } = restarted(agents, now, state);
   await dreamer.begin();
+  await dreamer.tick();
   assert.deepEqual(runs.map((run) => run.args[4]), [b]);
-  assert.ok(warnings.some((message) => message.includes('ava') && message.includes('not valid JSON')));
+  assert.ok(warnings.some((message) => message.includes('ava') && message.includes('cannot read its claims')));
 });

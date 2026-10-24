@@ -34,25 +34,12 @@ const context = ({ workspaces = [], protectedPaths = [] } = {}) => {
   };
 };
 
-const children = new Map();
-// A group is gone once its leader has exited: kill(-pid, 0) says so.
-const exited = new Set();
-const killFake = (pid, signal) => {
-  if (signal === 0) {
-    if (exited.has(-pid) || !children.has(-pid)) {
-      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
-    }
-    return;
-  }
-  exited.add(-pid);
-  setImmediate(() => children.get(-pid)?.emit('exit', null, signal));
-};
-
+let pids = 950_000;
+// A tether exits by the signal it was asked to stop with.
 const fakeSpawn = (calls, { sandbox = true } = {}) => (command, args, options) => {
   const child = new EventEmitter();
-  child.pid = 950_000 + children.size;
-  children.set(child.pid, child);
-  child.kill = () => {};
+  child.pid = (pids += 1);
+  child.kill = (signal) => setImmediate(() => child.emit('exit', null, signal));
   calls.push({ command, args, options });
   if (args.includes('report')) {
     setImmediate(() => child.emit('exit', 0, null));
@@ -93,7 +80,7 @@ const startedAt = async ({ workspaces = [], protectedPaths = [], exp }) => {
       overnightPath: tool(tools, 'overnight'),
       claudePath: tool(path.join(tools, 'claude'), 'claude'),
     },
-    { platform: 'darwin', spawn: fakeSpawn(calls), home: tmp('dreams-home-'), now: () => new Date(2026, 9, 23, 12, 0), kill: killFake },
+    { platform: 'darwin', spawn: fakeSpawn(calls), home: tmp('dreams-home-'), now: () => new Date(2026, 9, 23, 12, 0) },
   );
   plugin.setup(ctx);
   await ctx.registered.channels[0].adapter.start();

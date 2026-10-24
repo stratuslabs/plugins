@@ -43,9 +43,13 @@ spend tokens on your key through the proxy. It can't read the key itself,
 and the token stops working when the run ends. A spend limit on the key
 caps the cost.
 
-When the experimenter exits but something `evaluate.sh` started is still
-running in its process group, the plugin stops the group (SIGTERM, 30s, then
-SIGKILL) before it records the run as ended. One experiment directory belongs
+A run never outlives the daemon. Each one runs under a small tether process
+that holds a pipe from the daemon: when the daemon stops, crashes or is
+killed, the pipe closes and the tether stops the run's whole process group
+(SIGTERM, 30s, then SIGKILL). When the experimenter exits but something
+`evaluate.sh` started is still running in its group, the tether stops that
+too before the run is recorded as ended. Code that leaves its process group
+on purpose (`setsid`) escapes this; the sandbox still applies to it. One experiment directory belongs
 to one agent: config that lists it twice is refused at load, and two agents
 never run in the same directory at once, even through a symlink. That comes with running agent-written code. Running the daemon
 as a dedicated low-privilege user would narrow it further, but that's host
@@ -114,10 +118,13 @@ contains, any agent workspace or protected path. Whoever can edit
   experimenter can overrun its budget by one agent call plus one evaluation
   (up to 15 minutes). If less than 10 minutes remain, nothing starts. At the
   window's end the process group gets SIGTERM, then SIGKILL 30 seconds later.
+- **Restarts:** a daemon restart ends that night's run, since the run goes
+  with the daemon. `best/` and `experiments.jsonl` keep everything it got
+  done, and the next night picks up from there.
 - **At most once:** each experiment is claimed, and the claim synced to disk,
   before its process starts. If the daemon dies mid-run, the next daemon marks
-  that experiment `interrupted`, stops its process if it's still running, and
-  moves on to the next experiment. The interrupted one isn't retried that
+  that experiment `interrupted` and moves on to the next experiment, once the
+  old run has finished stopping and let go of its directory. The interrupted one isn't retried that
   night.
 - **Report:** when a run ends, the plugin runs `overnight report` (same
   sandbox) and summarizes only the lines appended to `experiments.jsonl` that

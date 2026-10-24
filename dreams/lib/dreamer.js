@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -6,12 +5,18 @@ import { startKeyProxy } from './keyproxy.js';
 import { clampBudget, nightAt } from './window.js';
 import { SANDBOX_EXEC, experimentProfile, real } from './sandbox.js';
 import { summarizeFile } from './summary.js';
+import { LOCK_BUSY, TETHER, isLocked } from './tether.js';
 
 /**
  * Runs each agent's experiment dreams in its window: at most `maxPerNight`
  * a night, in config order, one at a time per agent and per experiment
  * directory, each claimed durably before its process starts and stopped,
  * with its whole process group, at the window's end.
+ *
+ * A run never outlives the daemon: it runs under lib/tether.js, which
+ * stops its group when the daemon's pipe to it closes. A restart finds
+ * claims with no result, records them as interrupted and moves on; it has
+ * nothing to find, signal or adopt.
  */
 
 export const TICK_MS = 60_000;
@@ -39,57 +44,11 @@ export const createDreamer = ({
   log = () => {},
   warn = () => {},
   timers = { setTimeout, clearTimeout, setInterval, clearInterval },
-  kill = (pid, signal) => process.kill(pid, signal),
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   keyProxy = startKeyProxy,
-  // Is this pid still the experimenter we started on this path?
-  owns = (pid, experimentPath) => {
-    const ps = spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
-    return ps.status === 0 && ps.stdout.includes('overnight') && ps.stdout.includes(experimentPath);
-  },
 }) => {
-  // The experimenter starts claude and bash as children: signal the group.
-  const killGroup = (pid, signal) => {
-    try {
-      kill(-pid, signal);
-    } catch {
-      // Already gone.
-    }
-  };
-  const groupAlive = (pid) => {
-    try {
-      kill(-pid, 0);
-      return true;
-    } catch (error) {
-      return error.code === 'EPERM';
-    }
-  };
-  const POLL_MS = 250;
-  const waitGone = async (pid, ms) => {
-    for (let waited = 0; groupAlive(pid) && waited < ms; waited += POLL_MS) {
-      await sleep(POLL_MS);
-    }
-    return !groupAlive(pid);
-  };
-  // SIGTERM, the grace, SIGKILL, the grace: true once the group is gone.
-  const stopGroup = async (pid) => {
-    killGroup(pid, 'SIGTERM');
-    if (await waitGone(pid, KILL_GRACE_MS)) {
-      return true;
-    }
-    killGroup(pid, 'SIGKILL');
-    return waitGone(pid, KILL_GRACE_MS);
-  };
-  // Groups that would not die, from a previous daemon or left behind by a
-  // leader that exited: the agent starts nothing while one is alive, and
-  // its experiment directory stays busy.
-  const lingering = new Map();
   // Experiment directories (real paths) with a run in them, across agents:
   // two runs in one directory would share workspace/ and experiments.jsonl.
   const busy = new Set();
-  // Agents whose claims could not be read at startup: they start nothing.
-  const unrecovered = new Set();
-  let recovering = Promise.resolve();
   const running = new Map();
   const said = new Set();
   let interval;
@@ -100,6 +59,14 @@ export const createDreamer = ({
       said.add(key);
       write(message);
     }
+  };
+
+  // One lock per experiment directory, held by its run's tether: a run
+  // from a daemon that just died keeps the directory until it is gone.
+  const lockFor = (experimentDir) => {
+    const dir = path.join(stateDir(), 'locks');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    return path.join(dir, `${createHash('sha256').update(experimentDir).digest('hex').slice(0, 12)}.lock`);
   };
 
   const dirsFor = (agentId, experimentDir) => {
@@ -167,7 +134,11 @@ export const createDreamer = ({
     }
     const experimentDir = real(experiment.path);
     if (busy.has(experimentDir)) {
-      // Another agent is running it, or left a group behind in it: wait.
+      // Another agent is running it: wait.
+      return;
+    }
+    if (isLocked(lockFor(experimentDir))) {
+      once(`${experimentDir}:locked`, log, `dreams: a run from an earlier daemon is still stopping in ${experimentDir}; waiting for it.`);
       return;
     }
     busy.add(experimentDir);
@@ -237,6 +208,7 @@ export const createDreamer = ({
     const argv = ['run', experimentDir, '--budget', `${budget}s`, '--agent', 'claude', '--direction', experiment.direction,
       ...(experiment.maxExperiments ? ['--max-experiments', String(experiment.maxExperiments)] : [])];
     const [command, args] = sandboxed(experimentDir, dirs, argv);
+    const lockFile = lockFor(experimentDir);
     const logFile = path.join(dirs.logs, `${window.night}-${index + 1}.log`);
 
     // Spent before it runs: a daemon that dies after this line moves on to
@@ -246,26 +218,27 @@ export const createDreamer = ({
     const out = openSync(logFile, 'a', 0o600);
     let child;
     try {
-      child = spawn(command, args, { cwd: experimentDir, env, detached: true, stdio: ['ignore', out, out] });
+      // The tether's stdin is a pipe this daemon never writes to: when the
+      // daemon is gone, it closes, and the tether stops the run.
+      child = spawn(process.execPath, [TETHER, lockFile, String(KILL_GRACE_MS), '--', command, ...args], { cwd: experimentDir, env, stdio: ['pipe', out, out] });
     } catch (error) {
       claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
       throw error;
     } finally {
       closeSync(out);
     }
-    claims.update(agentId, window.night, index, { pid: child.pid });
-    log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} started (${experimentDir}, budget ${budget}s, pid ${child.pid}).`);
-    const run = { child, reason: undefined, killTimer: undefined };
+    // Nothing is ever written; an EPIPE after the tether exits is expected.
+    child.stdin?.on('error', () => {});
+    log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} started (${experimentDir}, budget ${budget}s).`);
+    const run = { child, reason: undefined };
     running.set(agentId, run);
     const terminate = (reason) => {
-      // Once the leader has exited, finish() owns the group: its pid may be
-      // reused when the group is gone, so nothing else signals it.
       if (run.reason || run.exited) {
         return;
       }
       run.reason = reason;
-      killGroup(child.pid, 'SIGTERM');
-      run.killTimer = timers.setTimeout(() => killGroup(child.pid, 'SIGKILL'), KILL_GRACE_MS);
+      // The tether stops the group: SIGTERM, the grace, then SIGKILL.
+      child.kill('SIGTERM');
     };
     run.terminate = terminate;
     const windowTimer = timers.setTimeout(() => terminate('stopped-at-window-end'), Math.max(0, window.end.getTime() - now().getTime()));
@@ -278,20 +251,12 @@ export const createDreamer = ({
         finished = true;
         run.exited = true;
         timers.clearTimeout(windowTimer);
-        if (run.killTimer) {
-          timers.clearTimeout(run.killTimer);
-        }
-        // The leader is gone, but code evaluate.sh started may not be: the
-        // run, and its proxy token, end only when the whole group has.
-        let strays;
-        if (!error && groupAlive(child.pid)) {
-          strays = await stopGroup(child.pid) ? 'stopped' : 'survived';
-          if (strays === 'survived') {
-            lingering.set(agentId, { pid: child.pid, path: experimentDir });
-            warn(`dreams: ${agentId}: process group ${child.pid} outlived its experimenter and survived SIGKILL; nothing starts for this agent or in ${experimentDir} until it is gone.`);
-          }
-        }
+        // The tether exits only once the whole group has, so the proxy
+        // token is worthless by the time it closes.
         await proxy.close();
+        if (exitCode === LOCK_BUSY) {
+          error = new Error(`a run from an earlier daemon still holds ${experimentDir}`);
+        }
         const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
         const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
         claims.finish(agentId, window.night, index, {
@@ -299,7 +264,6 @@ export const createDreamer = ({
           ...(exitCode !== null && exitCode !== undefined ? { exitCode } : {}),
           ...(signal ? { signal } : {}),
           ...(error ? { error: error.message } : {}),
-          ...(strays ? { strays } : {}),
           endedAt: now().toISOString(),
           log: logFile,
           ...(reportPath ? { report: reportPath } : {}),
@@ -307,9 +271,7 @@ export const createDreamer = ({
         });
         log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} ${error ? 'failed to start' : 'ended'}: ${summary.attempts} attempts, ${summary.kept} kept.`);
         // Free the directory only after the report and summary have read it.
-        if (strays !== 'survived') {
-          busy.delete(experimentDir);
-        }
+        busy.delete(experimentDir);
         running.delete(agentId);
         resolve();
         if (!stopping) {
@@ -323,21 +285,12 @@ export const createDreamer = ({
   };
 
   const tick = async () => {
-    await recovering;
     if (stopping) {
       return;
     }
     for (const [agentId, agent] of agents) {
-      if (running.has(agentId) || unrecovered.has(agentId)) {
+      if (running.has(agentId)) {
         continue;
-      }
-      const leftover = lingering.get(agentId);
-      if (leftover !== undefined) {
-        if (groupAlive(leftover.pid)) {
-          continue;
-        }
-        lingering.delete(agentId);
-        busy.delete(leftover.path);
       }
       if (stopping) {
         return;
@@ -357,50 +310,29 @@ export const createDreamer = ({
     }
   };
 
-  const recoverOne = async (agentId, night, entry) => {
-    // The same stop as at the window's end: SIGTERM, the grace, then
-    // SIGKILL, and wait for the group to be gone.
-    if (entry.pid && owns(entry.pid, entry.path) && !await stopGroup(entry.pid)) {
-      lingering.set(agentId, { pid: entry.pid, path: entry.path });
-      busy.add(entry.path);
-      warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent or in ${entry.path} until it is gone.`);
-    }
-    claims.finish(agentId, night, entry.index, {
-      status: 'interrupted',
-      endedAt: now().toISOString(),
-      summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
-    });
-    log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
-  };
-
   /**
    * A claim with no result is an experiment the last daemon did not see
-   * end. Its process may still be running, detached: stop it if it is
-   * still ours, then record what it got done. A claim that fails to
-   * recover does not stop the others: its agent is blocked while the
-   * claim's group is alive, and the next daemon tries the claim again.
+   * end. Its tether stopped it when that daemon went away; record what it
+   * got done. Claims that cannot be read stay unread: that agent's next
+   * start reads them again and refuses, so it never reruns a spent one.
    */
-  const recover = async () => {
+  const recover = () => {
     for (const agentId of agents.keys()) {
       let nights;
       try {
         nights = Object.entries(claims.nights(agentId));
       } catch (error) {
-        unrecovered.add(agentId);
-        warn(`dreams: ${agentId}: recovery failed, nothing starts for this agent until the daemon restarts: ${error.message}`);
+        warn(`dreams: ${agentId}: ${error.message}`);
         continue;
       }
       for (const [night, entries] of nights) {
         for (const entry of entries.filter((candidate) => !candidate.result)) {
-          try {
-            await recoverOne(agentId, night, entry);
-          } catch (error) {
-            if (entry.pid && groupAlive(entry.pid)) {
-              lingering.set(agentId, { pid: entry.pid, path: entry.path });
-              busy.add(entry.path);
-            }
-            warn(`dreams: ${agentId} night ${night}: recovery of experiment ${entry.index + 1} failed: ${error.message}`);
-          }
+          claims.finish(agentId, night, entry.index, {
+            status: 'interrupted',
+            endedAt: now().toISOString(),
+            summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
+          });
+          log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
         }
       }
     }
@@ -412,7 +344,11 @@ export const createDreamer = ({
     recover,
     begin() {
       stopping = false;
-      recovering = recover().catch((error) => warn(`dreams: recovery failed: ${error.message}`));
+      try {
+        recover();
+      } catch (error) {
+        warn(`dreams: recovery failed: ${error.message}`);
+      }
       interval = timers.setInterval(() => void tick(), TICK_MS);
       interval.unref?.();
       return tick();
@@ -430,8 +366,6 @@ export const createDreamer = ({
         return runs;
       };
       const runs = terminateAll();
-      // Recovery may still be stopping an old group; it is not in running.
-      await recovering;
       // A start still checking its path finishes before stop returns: it
       // sees stopping and spawns nothing. Anything it did spawn is stopped too.
       await Promise.allSettled([...running.values()].filter((run) => run.starting).map((run) => run.starting));

@@ -69,15 +69,6 @@ export const createClaimStore = (directory) => {
       state.nights[night] = [...(state.nights[night] ?? []), entry];
       save(agentId, state);
     },
-    /** Add fields to a claim, such as the pid once the process exists. */
-    update(agentId, night, index, fields) {
-      const state = load(agentId);
-      const entry = (state.nights[night] ?? []).find((candidate) => candidate.index === index);
-      if (entry) {
-        Object.assign(entry, fields);
-        save(agentId, state);
-      }
-    },
     finish(agentId, night, index, result) {
       const state = load(agentId);
       const entry = (state.nights[night] ?? []).find((candidate) => candidate.index === index);

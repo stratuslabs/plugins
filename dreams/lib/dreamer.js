@@ -219,6 +219,14 @@ export const createDreamer = ({
     if (stopping) {
       return undefined;
     }
+    // The key, the guard and the proxy all awaited: the window may have
+    // closed, or shrunk, since the budget was cut.
+    budget = clampBudget(experiment.budgetSeconds, window.end, now());
+    if (budget === undefined) {
+      once(`${agentId}:${window.night}:short`, log, `dreams: ${agentId} night ${window.night}: too little of the window is left to start experiment ${index + 1}, so none runs tonight.`);
+      return undefined;
+    }
+    entry.budgetSeconds = budget;
     const dirs = dirsFor(agentId, experimentDir);
     const env = childEnv(dirs, proxy);
     const argv = ['run', experimentDir, '--budget', `${budget}s`, '--agent', 'claude', '--direction', experiment.direction,
@@ -245,7 +253,9 @@ export const createDreamer = ({
     const run = { child, reason: undefined, killTimer: undefined };
     running.set(agentId, run);
     const terminate = (reason) => {
-      if (run.reason) {
+      // Once the leader has exited, finish() owns the group: its pid may be
+      // reused when the group is gone, so nothing else signals it.
+      if (run.reason || run.exited) {
         return;
       }
       run.reason = reason;
@@ -261,6 +271,7 @@ export const createDreamer = ({
           return;
         }
         finished = true;
+        run.exited = true;
         timers.clearTimeout(windowTimer);
         if (run.killTimer) {
           timers.clearTimeout(run.killTimer);
@@ -276,9 +287,6 @@ export const createDreamer = ({
           }
         }
         await proxy.close();
-        if (strays !== 'survived') {
-          busy.delete(experimentDir);
-        }
         const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
         const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
         claims.finish(agentId, window.night, index, {
@@ -293,6 +301,10 @@ export const createDreamer = ({
           summary,
         });
         log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} ${error ? 'failed to start' : 'ended'}: ${summary.attempts} attempts, ${summary.kept} kept.`);
+        // Free the directory only after the report and summary have read it.
+        if (strays !== 'survived') {
+          busy.delete(experimentDir);
+        }
         running.delete(agentId);
         resolve();
         if (!stopping) {

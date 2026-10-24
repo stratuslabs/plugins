@@ -63,7 +63,7 @@ const groupKill = (alive, kills, stubborn = new Set()) => (target, signal) => {
   }
 };
 
-const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secrets = { ava: { anthropicApiKey: 'sk-test' } }, alive = new Set(), stubborn = new Set() }) => {
+const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secrets = { ava: { anthropicApiKey: 'sk-test' } }, alive = new Set(), stubborn = new Set(), holdReports = false }) => {
   const state = mkdtempSync(path.join(os.tmpdir(), 'dreams-state-'));
   const claims = createClaimStore(() => state);
   const timers = fakeTimers();
@@ -71,6 +71,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
   const kills = [];
   const warnings = [];
   const proxies = fakeProxies();
+  const reports = [];
   let pid = 900_000;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -78,7 +79,11 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     child.kill = () => {};
     const call = { command, args, options, child };
     if (args.includes('report')) {
-      setImmediate(() => child.emit('exit', 0, null));
+      if (holdReports) {
+        reports.push(child);
+      } else {
+        setImmediate(() => child.emit('exit', 0, null));
+      }
     } else {
       onSpawn(call, claims);
       runs.push(call);
@@ -91,7 +96,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     stateDir: () => state,
     spawn,
     guard,
-    secrets: async () => secrets,
+    secrets: typeof secrets === 'function' ? secrets : async () => secrets,
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin:/bin' },
     now: () => now.value,
     timers,
@@ -100,7 +105,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     warn: (message) => warnings.push(message),
     kill: groupKill(alive, kills, stubborn),
   });
-  return { dreamer, claims, runs, kills, timers, proxies, warnings, alive };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, alive, reports };
 };
 
 const experimentDir = () => {
@@ -495,4 +500,77 @@ test('a setup failure after the key proxy opens closes it, and retries do not pi
   assert.ok(proxies.opened.length >= 1);
   assert.deepEqual(proxies.opened.map((proxy) => proxy.closed), proxies.opened.map(() => true), 'every proxy opened for a failed setup is closed');
   assert.ok(warnings.some((message) => message.includes('cannot express the path')));
+});
+
+test('a daemon stop after the leader and its group are gone signals nothing and arms no SIGKILL', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, kills, timers, reports } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports.length, 1, 'finish is waiting on the report');
+  const stopped = dreamer.stop();
+  reports[0].emit('exit', 0, null);
+  await stopped;
+  assert.deepEqual(kills, [], 'the pid may be reused by now: no signal');
+  assert.equal([...timers.pending].filter((handle) => handle.ms === 30_000).length, 0, 'and no SIGKILL timer left armed');
+});
+
+test('the experiment directory stays busy until its report and summary are done', async () => {
+  const exp = experimentDir();
+  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
+  symlinkSync(exp, link);
+  const { dreamer, runs, reports } = fixture({
+    agents: {
+      ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
+      bo: { window: '23:00-07:00', experiments: [{ path: link, budget: '1h' }] },
+    },
+    now: night(23, 0),
+    secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await dreamer.tick();
+  assert.equal(runs.length, 1, 'the second agent waits while the first run is still reporting');
+  reports[0].emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runs.length, 2, 'and runs once the report is done');
+});
+
+test('the window and budget are checked again after the async setup, before the claim', async () => {
+  const exp = experimentDir();
+  const closed = night(23, 0);
+  const late = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: closed,
+    secrets: async () => {
+      closed.value = new Date(2026, 9, 24, 7, 5);
+      return { ava: { anthropicApiKey: 'sk-test' } };
+    },
+  });
+  await late.dreamer.tick();
+  assert.equal(late.runs.length, 0, 'the window closed while setting up: nothing spawns');
+  assert.deepEqual(late.claims.night('ava', '2026-10-23'), [], 'and nothing is spent');
+  assert.deepEqual(late.proxies.opened.map((proxy) => proxy.closed), late.proxies.opened.map(() => true));
+
+  const tight = night(23, 0);
+  const cut = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '8h' }] } },
+    now: tight,
+    secrets: async () => {
+      tight.value = new Date(2026, 9, 24, 6, 30);
+      return { ava: { anthropicApiKey: 'sk-test' } };
+    },
+  });
+  await cut.dreamer.tick();
+  assert.equal(cut.runs.length, 1);
+  const args = cut.runs[0].args;
+  assert.equal(args[args.indexOf('--budget') + 1], '900s', 'the budget is cut to what is left now');
+  assert.equal(cut.claims.night('ava', '2026-10-23')[0].budgetSeconds, 900);
 });

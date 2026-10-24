@@ -4,6 +4,7 @@
   "private": true,
   "description": "Discord channel for Stratus: each agent answers as its own bot in DMs and allowlisted guild channels.",
   "type": "module",
+  "exports": "./index.js",
   "license": "MIT",
   "engines": {
     "node": ">=22"
@@ -17,5 +18,73 @@
   },
   "devDependencies": {
     "ws": "^8.22.0"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [
+        {
+          "name": "discord"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "allowFrom": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "principals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "allowBots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "guilds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "requireMention": {
+                "type": "boolean"
+              },
+              "channels": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "requireMention": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
   }
 }

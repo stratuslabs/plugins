@@ -3,17 +3,23 @@
  * is a list of Discord ids (snowflakes), never names: a name can be taken by
  * someone else, an id can't.
  *
+ * The host's plugin-block shape: settings at the top are every agent's
+ * defaults, and `agents.<id>` says what differs for one agent. A key in an
+ * agent's entry replaces the default whole (lists aren't merged), so an
+ * agent's `allowFrom` never quietly includes someone the defaults named.
+ *
  * {
- *   agents: {
- *     <agentId>: {
- *       allowFrom: [userId],        // who may DM the agent
- *       approvers: [userId],        // who may press approval buttons
- *       principals?: [userId],      // trusted senders; defaults to allowFrom + approvers
- *       guilds?: { <guildId>: { requireMention?: true, channels?: { <channelId>: { requireMention? } } } },
- *       allowBots?: [userId],       // other bots it answers; none by default
- *     }
- *   }
+ *   allowFrom: [userId],        // who may DM the agent
+ *   approvers: [userId],        // who may press approval buttons
+ *   principals?: [userId],      // trusted senders; defaults to allowFrom + approvers
+ *   guilds?: { <guildId>: { requireMention?: true, channels?: { <channelId>: { requireMention? } } } },
+ *   allowBots?: [userId],       // other bots it answers; none by default
+ *   agents?: { <agentId>: { ...any of the above } }
  * }
+ *
+ * The agents it covers are those under `agents` plus `withTokens`, the
+ * agents with a stored bot token: storing one is how an agent is put on
+ * Discord, and the defaults then say whom it answers.
  *
  * A guild with no `channels` lets the agent work in every channel of it the
  * bot can see. A guild with `channels` is an allowlist of them.
@@ -70,16 +76,19 @@ const guildsOf = (value, agentId) => {
   return guilds;
 };
 
-export const parseDiscordConfig = (config = {}) => {
+export const parseDiscordConfig = (config = {}, { withTokens = [] } = {}) => {
+  const { agents: overrides = {}, ...defaults } = config;
   const agents = new Map();
-  for (const [agentId, agent] of Object.entries(config.agents ?? {})) {
+  const agentIds = new Set([...Object.keys(overrides), ...withTokens]);
+  for (const agentId of agentIds) {
+    const agent = { ...defaults, ...(overrides[agentId] ?? {}) };
     if (!AGENT_ID.test(agentId)) {
       throw new Error(`plugin-discord: ${JSON.stringify(agentId)} is not an agent id.`);
     }
     const allowFrom = ids(agent?.allowFrom, `agents.${agentId}.allowFrom`);
     const approvers = ids(agent?.approvers, `agents.${agentId}.approvers`);
     if (approvers.size === 0) {
-      throw new Error(`plugin-discord: agents.${agentId}.approvers is empty, so nobody could answer this agent's approvals in Discord. List at least one user id.`);
+      throw new Error(`plugin-discord: ${agentId} has no approvers, so nobody could answer its approvals in Discord. List at least one user id in approvers, at the top of the plugin block or under agents.${agentId}.`);
     }
     const principals = agent?.principals === undefined
       ? new Set([...allowFrom, ...approvers])

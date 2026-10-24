@@ -40,6 +40,9 @@ export const postText = async (rest, channelId, text, { replyTo, embeds = false 
 export const editText = (rest, channelId, messageId, text) =>
   rest.patch(Routes.channelMessage(channelId, messageId), { body: { content: text, allowed_mentions: NO_PINGS } });
 
+/** Take a message down: a streamed piece the reply no longer needs. */
+export const removeMessage = (rest, channelId, messageId) => rest.delete(Routes.channelMessage(channelId, messageId));
+
 /** "Agent is typing…" for about ten seconds. */
 export const typing = (rest, channelId) => rest.post(Routes.channelTyping(channelId));
 

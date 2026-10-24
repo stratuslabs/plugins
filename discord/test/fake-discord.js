@@ -5,12 +5,12 @@ export const BOT = '111111111111111111';
 
 /**
  * Just enough of Discord for the adapter's own tests: `GET /gateway/bot`,
- * message, typing and thread routes over REST, and a gateway that says
+ * message (post, edit, delete), typing and thread routes over REST, and a gateway that says
  * hello, answers heartbeats, identifies and resumes. Records what it was
  * sent. `closeOnIdentify` makes it refuse the identify with a close code.
  */
 export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
-  const state = { identifies: [], resumes: [], posts: [], patches: [], typing: [], threads: [], sockets: [], seq: 0 };
+  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], typing: [], threads: [], sockets: [], seq: 0 };
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
@@ -36,6 +36,11 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
       if (req.method === 'PATCH' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
         state.patches.push({ channelId: match[1], messageId: match[2], body: json });
         return send(200, { id: match[2] });
+      }
+      if (req.method === 'DELETE' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
+        state.deletes.push({ channelId: match[1], messageId: match[2] });
+        res.writeHead(204);
+        return res.end();
       }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/typing$/))) {
         state.typing.push(match[1]);

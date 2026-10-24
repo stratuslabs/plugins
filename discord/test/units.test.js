@@ -51,6 +51,18 @@ test('config: ids must be Discord snowflakes, and every agent needs someone who 
   assert.equal(parsed.guilds.get(GUILD).channels.get(CHANNEL).requireMention, true, 'a channel inherits the guild default');
 });
 
+test('config: top-level settings are every agent\'s defaults; an agent entry replaces a key whole', () => {
+  const parsed = parseDiscordConfig(
+    { allowFrom: [OWNER], approvers: [OWNER], agents: { bo: { allowFrom: [OTHER] } } },
+    { withTokens: ['ava', 'bo'] },
+  );
+  assert.deepEqual([...parsed.agents.keys()].sort(), ['ava', 'bo'], 'an agent with a token is covered by the defaults');
+  assert.deepEqual([...parsed.agents.get('ava').allowFrom], [OWNER]);
+  assert.deepEqual([...parsed.agents.get('bo').allowFrom], [OTHER], 'not merged with the default list');
+  assert.deepEqual([...parsed.agents.get('bo').approvers], [OWNER], 'keys it does not name come from the defaults');
+  assert.throws(() => parseDiscordConfig({}, { withTokens: ['ava'] }), /ava has no approvers/);
+});
+
 test('admission: DMs only from allowFrom', () => {
   const ava = config().agents.get('ava');
   assert.deepEqual(admit(message({ guildId: undefined, mentions: [], content: 'hi' }), ava, BOT), { admit: true, addressed: true, kind: 'direct', principal: true });

@@ -1,15 +1,52 @@
-# @stratusagent/plugin-discord (in progress, not loadable yet)
+# @stratusagent/plugin-discord (in progress, not published)
 
 A Discord channel for Stratus: each agent answers as its own Discord bot in
 DMs and in guild channels you allowlist. The plan and its decisions are in
 the private plans repo (roadmap/20, V1 section).
 
-Built so far: config parsing, admission (who and where the bot answers),
-session routing (DM, thread, a top-level mention opening a thread), and
-splitting replies to Discord's 2000-character limit, the Gateway
-connection (`@discordjs/ws`: heartbeats, resume, reconnect; a refused token
-or Message Content intent fails with what to fix) and sending over REST
-(`@discordjs/rest`: chunked posts that ping nobody and show no link
-previews, edits, typing, a thread per conversation). Not built yet:
-streaming throttle, approvals, restart backfill, and the plugin entry point.
-The package stays private until then.
+## Setup (as built so far)
+
+1. Create one Discord application per agent. Under Bot, turn on
+   "Message Content Intent".
+2. Store its token as the channel's transport secret, never as an agent
+   credential: `stratus channel set discord --agent <id> botToken`.
+3. Enable the plugin. Settings at the top of the block apply to every agent;
+   `agents.<id>` replaces a key for one agent (lists are replaced, not
+   merged). Everything is a Discord id, never a name:
+
+```jsonc
+"@stratusagent/plugin-discord": {
+  "enabled": true,
+  "allowFrom": ["<your user id>"],   // who may DM the agent
+  "approvers": ["<your user id>"],   // required: who may answer its approvals
+  "guilds": { "<guild id>": {} },     // guilds it works in; mention needed by default
+  "agents": { "ava": { "guilds": { "<guild id>": { "channels": { "<channel id>": { "requireMention": false } } } } } }
+}
+```
+
+Every agent with a stored token is on Discord; one with no approvers in
+either place fails the load with its name.
+
+## Built
+
+- Config, admission (who and where the bot answers), session routing (DM,
+  thread, a top-level mention opening a thread) and chunking to Discord's
+  2000-character limit.
+- The Gateway connection (`@discordjs/ws`: heartbeats, resume, reconnect; a
+  refused token or Message Content intent fails with what to fix) and REST
+  sends (`@discordjs/rest`: posts that ping nobody and show no link
+  previews, edits, deletes, typing, a thread per conversation).
+- The plugin entry point and adapter: each admitted message is a turn on
+  its session, with the sender's trust label (`user` for a principal,
+  `unknown` for anyone else, including other bots).
+- Streaming: the first words post at once, then edits at most every 1.5s.
+  Words before a tool call stay as their own message, a running tool shows
+  as `⚙ name…`, a long reply continues in new messages, and the final reply
+  replaces the streamed text.
+
+## Not built yet
+
+Approval prompts (none are shown in Discord yet, so keep gated tools away
+from a Discord-facing agent until they are), Stop, restart backfill, attachments, `discord:` destinations for
+`message.send` and schedules, and reading a conversation. The package stays
+private until then.

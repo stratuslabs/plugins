@@ -50,6 +50,8 @@ export const createDreamer = ({
   // two runs in one directory would share workspace/ and experiments.jsonl.
   const busy = new Set();
   const running = new Map();
+  // Agents with a claim from the last daemon whose run may still be stopping.
+  const waiting = new Set();
   const said = new Set();
   let interval;
   let stopping = false;
@@ -104,7 +106,7 @@ export const createDreamer = ({
     const [command, args] = tethered(lockFor(experimentDir), ...sandboxed(experimentDir, dirs, ['report', experimentDir]));
     const child = spawn(command, args, { cwd: experimentDir, env, stdio: ['pipe', 'ignore', 'ignore'] });
     child.stdin?.on('error', () => {});
-    const timer = timers.setTimeout(() => child.kill('SIGTERM'), REPORT_TIMEOUT_MS);
+    const timer = timers.setTimeout(() => child.stdin.end(), REPORT_TIMEOUT_MS);
     child.on('error', () => {
       timers.clearTimeout(timer);
       resolve(undefined);
@@ -242,8 +244,10 @@ export const createDreamer = ({
         return;
       }
       run.reason = reason;
-      // The tether stops the group: SIGTERM, the grace, then SIGKILL.
-      child.kill('SIGTERM');
+      // Closing the pipe asks the tether to stop the group (SIGTERM, the
+      // grace, then SIGKILL). Unlike a signal, it can't arrive before the
+      // tether is listening: the close waits in the pipe until it reads.
+      child.stdin.end();
     };
     run.terminate = terminate;
     const windowTimer = timers.setTimeout(() => terminate('stopped-at-window-end'), Math.max(0, window.end.getTime() - now().getTime()));
@@ -299,8 +303,11 @@ export const createDreamer = ({
     if (stopping) {
       return;
     }
+    if (waiting.size > 0) {
+      recover([...waiting]);
+    }
     for (const [agentId, agent] of agents) {
-      if (running.has(agentId)) {
+      if (running.has(agentId) || waiting.has(agentId)) {
         continue;
       }
       if (stopping) {
@@ -323,16 +330,28 @@ export const createDreamer = ({
 
   /**
    * A claim with no result is an experiment the last daemon did not see
-   * end. Its tether stopped it when that daemon went away; record what it
-   * got done. Claims that cannot be read stay unread: that agent's next
-   * start reads them again and refuses, so it never reruns a spent one.
+   * end. Its tether stops it when that daemon goes away, but that takes up
+   * to two graces, and the run can still write until then. So while its
+   * directory's lock is held, the claim waits and the agent starts nothing
+   * else; each tick looks again. Once the lock is free, it is recorded with
+   * what it got done. Claims that cannot be read stay unread: that agent's
+   * next start reads them again and refuses, so it never reruns a spent one.
    */
-  const recover = () => {
-    for (const agentId of agents.keys()) {
+  const recover = (agentIds = [...agents.keys()]) => {
+    for (const agentId of agentIds) {
+      // Held until this agent's claims are known to be settled, so a check
+      // that throws keeps it waiting rather than letting it start.
+      waiting.add(agentId);
       // One agent's unreadable claims or full disk does not stop the rest.
       try {
+        let stillHeld = false;
         for (const [night, entries] of Object.entries(claims.nights(agentId))) {
           for (const entry of entries.filter((candidate) => !candidate.result)) {
+            if (isLocked(lockFor(entry.path))) {
+              stillHeld = true;
+              once(`${agentId}:${night}:${entry.index}:held`, log, `dreams: ${agentId} night ${night}: experiment ${entry.index + 1} from the last daemon is still stopping; waiting for it.`);
+              continue;
+            }
             claims.finish(agentId, night, entry.index, {
               status: 'interrupted',
               endedAt: now().toISOString(),
@@ -341,8 +360,11 @@ export const createDreamer = ({
             log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
           }
         }
+        if (!stillHeld) {
+          waiting.delete(agentId);
+        }
       } catch (error) {
-        warn(`dreams: ${agentId}: ${error.message}`);
+        once(`${agentId}:recover:${error.message}`, warn, `dreams: ${agentId}: ${error.message}`);
       }
     }
   };

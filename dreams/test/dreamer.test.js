@@ -58,6 +58,8 @@ const fakeChild = (kills) => {
   const child = new EventEmitter();
   child.pid = (pids += 1);
   child.kill = (signal) => kills.push(signal);
+  // The daemon asks the tether to stop by closing its stdin.
+  child.stdin = { on() {}, end: () => kills.push('close-stdin') };
   return child;
 };
 const unwrap = (command, args, options, child) => {
@@ -247,9 +249,9 @@ test('the window end asks the tether to stop the run, once', async () => {
   });
   await dreamer.tick();
   timers.fire((handle) => handle.ms === 8 * 3600_000);
-  assert.deepEqual(kills, ['SIGTERM'], 'the tether owns the grace and the SIGKILL');
+  assert.deepEqual(kills, ['close-stdin'], 'a closed pipe, never a signal: the tether owns the grace and the SIGKILL');
   const stopped = dreamer.stop();
-  assert.deepEqual(kills, ['SIGTERM'], 'a stop after that asks nothing more');
+  assert.deepEqual(kills, ['close-stdin'], 'a stop after that asks nothing more');
   await exit(runs[0], null, 'SIGKILL');
   await stopped;
   const [entry] = claims.night('ava', '2026-10-23');
@@ -265,7 +267,7 @@ test('stopping the daemon stops the run and records it', async () => {
   });
   await dreamer.tick();
   const stopped = dreamer.stop();
-  assert.deepEqual(kills, ['SIGTERM']);
+  assert.deepEqual(kills, ['close-stdin']);
   runs[0].child.emit('exit', null, 'SIGTERM');
   await stopped;
   assert.equal(claims.night('ava', '2026-10-23')[0].result.status, 'stopped-by-daemon');
@@ -358,6 +360,32 @@ test('after a restart, a run that is still stopping keeps its directory until it
   assert.equal(runs.length, 1, 'it starts once the old tether is gone');
   assert.equal(runs[0].tether.lock, first.runs[0].tether.lock, 'one lock per directory, whichever agent runs it');
   assert.deepEqual(kills, []);
+});
+
+test('after a restart, an agent whose last run is still stopping waits for it before recording it or starting another', async () => {
+  const [a, b] = [experimentDir(), experimentDir()];
+  const agents = { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } };
+  const now = night(23, 10);
+  const first = fixture({ agents, now });
+  await first.dreamer.tick();
+  const state = first.runs[0].options.env.HOME.split('/agents/')[0];
+  const O_EXLOCK = 0x20;
+  const held = openSync(first.runs[0].tether.lock, constants.O_CREAT | constants.O_RDWR | O_EXLOCK | constants.O_NONBLOCK, 0o600);
+  const { dreamer, runs } = restarted(agents, now, state);
+  await dreamer.begin();
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'the agent starts nothing while its old run still holds its directory');
+  const [pending] = createClaimStore(() => state).night('ava', '2026-10-23');
+  assert.equal(pending.result, undefined, 'and the old claim is not summarized while the run can still write');
+  // The old run's last lines land during its grace.
+  appendFileSync(path.join(a, 'experiments.jsonl'), '{"experiment_id":1,"score":2,"best_score":2,"improved":true,"description":"x"}\n');
+  closeSync(held);
+  await dreamer.tick();
+  const [spent] = createClaimStore(() => state).night('ava', '2026-10-23');
+  assert.equal(spent.result.status, 'interrupted');
+  assert.equal(spent.result.summary.attempts, 1, 'recorded with what it wrote before it let go');
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].args[4], b, 'then the next experiment starts');
 });
 
 test('a tether that finds the lock taken runs nothing and the experiment is recorded as failed to start', async () => {
@@ -453,7 +481,7 @@ test('a daemon stop after the tether has exited signals nothing', async () => {
   const stopped = dreamer.stop();
   reports[0].emit('exit', 0, null);
   await stopped;
-  assert.deepEqual(kills, [], 'the pid may be reused by now: no signal');
+  assert.deepEqual(kills, [], 'the pid may be reused by now: nothing is sent');
   assert.equal([...timers.pending].length, 0, 'and no timer is left armed');
 });
 
@@ -561,7 +589,7 @@ test('the report runs under the tether too, on the run\'s lock, and its timeout 
   assert.equal(reportCalls[0].tether?.lock, runs[0].tether.lock, 'nothing else starts in the directory while it reports');
   assert.equal(reportCalls[0].options.stdio[0], 'pipe', 'and it goes if the daemon does');
   timers.fire((handle) => handle.ms === 120_000);
-  assert.deepEqual(kills, ['SIGTERM'], 'the tether stops the report\'s whole group');
+  assert.deepEqual(kills, ['close-stdin'], 'the tether stops the report\'s whole group');
   reportCalls[0].child.emit('exit', null, 'SIGTERM');
 });
 

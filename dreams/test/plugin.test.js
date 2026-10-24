@@ -35,11 +35,12 @@ const context = ({ workspaces = [], protectedPaths = [] } = {}) => {
 };
 
 let pids = 950_000;
-// A tether exits by the signal it was asked to stop with.
+// A tether asked to stop (its stdin closed) exits by the leader's SIGTERM.
 const fakeSpawn = (calls, { sandbox = true } = {}) => (command, args, options) => {
   const child = new EventEmitter();
   child.pid = (pids += 1);
   child.kill = (signal) => setImmediate(() => child.emit('exit', null, signal));
+  child.stdin = { on() {}, end: () => setImmediate(() => child.emit('exit', null, 'SIGTERM')) };
   calls.push({ command, args, options });
   if (args.includes('report')) {
     setImmediate(() => child.emit('exit', 0, null));

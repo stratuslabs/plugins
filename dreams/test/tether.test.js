@@ -127,3 +127,37 @@ test('the run lock is held for the life of the tether, and a second tether on it
   assert.notEqual(await done, 'still running');
   assert.ok(await until(() => !isLocked(lock)), 'the lock is free once the tether is gone');
 });
+
+test('a stop asked before the run starts starts nothing', async () => {
+  const dir = tmp();
+  const marker = path.join(dir, 'ran');
+  const child = tether(dir, `echo $$ > ${marker}; sleep 300`);
+  // Closed before the tether has read a byte: the close waits in the pipe.
+  child.stdin.end();
+  assert.deepEqual(await exited(child), { code: 143, signal: null });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.throws(() => readFileSync(marker), /ENOENT/, 'the experiment never ran');
+});
+
+test('a SIGTERM at any point in the tether\'s start leaves nothing running', async () => {
+  for (const delay of [0, 5, 10, 20, 40, 80]) {
+    const dir = tmp();
+    const pids = path.join(dir, 'pids');
+    const child = tether(dir, strayScript(pids));
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    const done = exited(child);
+    child.kill('SIGTERM');
+    assert.notEqual(await done, 'still running', `delay ${delay}`);
+    child.stdin.end();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    let started;
+    try {
+      started = readFileSync(pids, 'utf8').trim().split(' ').map(Number);
+    } catch {
+      continue;
+    }
+    for (const pid of started) {
+      assert.throws(() => process.kill(pid, 0), /ESRCH/, `delay ${delay}: pid ${pid} outlived its tether`);
+    }
+  }
+});

@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
  * that the daemon never writes to. The script runs the experiment in the
  * same group and:
  *
- * - when the pipe closes, because the daemon crashed or was killed, or on
- *   SIGTERM, the daemon's stop, stops the whole group: SIGTERM, the
- *   grace, then SIGKILL;
+ * - when the pipe closes (the daemon's stop closes it, and so does a
+ *   daemon that crashed or was killed), or on SIGTERM, stops the whole
+ *   group: SIGTERM, the grace, then SIGKILL;
  * - when the experiment's leader exits, stops whatever it left in the
  *   group, then exits the way the leader did;
  * - holds the experiment's run lock while it lives, so a run left over
@@ -75,10 +75,12 @@ const main = async (argv) => {
     throw error;
   }
 
-  // The experiment leads a group of its own, so this script can tell
-  // whether anything in it is still alive without counting itself.
-  const child = spawn(command, args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
-  const group = child.pid;
+  // Every way to ask for a stop is listened for before anything is started:
+  // a SIGTERM that landed between the spawn and its handler would kill
+  // only this script and leave the group running with nobody watching it.
+  let group;
+  let requested = false;
+  let stopping;
   const groupAlive = () => {
     if (group === undefined) {
       return false;
@@ -103,9 +105,13 @@ const main = async (argv) => {
     }
     return !groupAlive();
   };
-  // SIGTERM, the grace, SIGKILL, the grace.
-  let stopping;
+  // SIGTERM, the grace, SIGKILL, the grace. Asked before the spawn, it is
+  // remembered, and the spawn never happens.
   const stopGroup = () => {
+    requested = true;
+    if (group === undefined) {
+      return Promise.resolve();
+    }
     stopping ??= (async () => {
       if (!groupAlive()) {
         return;
@@ -122,6 +128,25 @@ const main = async (argv) => {
     return stopping;
   };
 
+  // The daemon closes the pipe to ask for a stop, and a daemon that is
+  // gone closes it too. SIGTERM does the same.
+  process.on('SIGTERM', () => void stopGroup());
+  process.on('SIGHUP', () => {});
+  process.on('SIGINT', () => {});
+  for (const event of ['end', 'close', 'error']) {
+    process.stdin.on(event, () => void stopGroup());
+  }
+  process.stdin.resume();
+  // Give a close that was already waiting in the pipe its turn.
+  await new Promise((resolve) => setImmediate(resolve));
+  if (requested) {
+    process.exit(128 + 15);
+  }
+
+  // The experiment leads a group of its own, so this script can tell
+  // whether anything in it is still alive without counting itself.
+  const child = spawn(command, args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  group = child.pid;
   const leaderExit = new Promise((resolve) => {
     child.once('exit', (code, signal) => resolve({ code, signal }));
     child.once('error', (error) => {
@@ -129,16 +154,9 @@ const main = async (argv) => {
       resolve({ code: 127, signal: null });
     });
   });
-
-  // The daemon asks for a stop with SIGTERM; this script owns the rest.
-  process.on('SIGTERM', () => void stopGroup());
-  process.on('SIGHUP', () => {});
-  process.on('SIGINT', () => {});
-  // The daemon never writes: end of input means it is gone.
-  for (const event of ['end', 'close', 'error']) {
-    process.stdin.on(event, () => void stopGroup());
+  if (requested) {
+    void stopGroup();
   }
-  process.stdin.resume();
 
   const { code, signal } = await leaderExit;
   // Whatever the leader left behind goes with it.

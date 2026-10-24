@@ -34,7 +34,7 @@ Any AG-UI client that speaks the HTTP + SSE transport (CopilotKit's
 | --- | --- |
 | a dispatch for the run | `RUN_STARTED`, then `RUN_FINISHED` (`outcome: success`) or `RUN_ERROR` |
 | streamed text (`provider.delta`) | `TEXT_MESSAGE_START` / `_CONTENT` / `_END` |
-| a non-streaming provider's reply | the same three, whole |
+| a non-streaming provider's reply | the same three, whole, one message per text part |
 | `tool.called` | `TOOL_CALL_START`, `TOOL_CALL_ARGS` (the input as JSON), `TOOL_CALL_END` |
 | `tool.completed` | `TOOL_CALL_RESULT` |
 | the AG-UI `threadId` | one durable Stratus session, `agui:<agent>:<threadId>` |
@@ -76,8 +76,22 @@ would need.
 - Client-supplied `tools` and `state` (ignored), reasoning events, usage,
   `editedArgs` on resume.
 - Authentication beyond a static token on a loopback-only port.
+- A `reset` delta (a fallback provider took over mid-stream) is not
+  handled. AG-UI has no way to retract streamed text, so the client keeps
+  the abandoned partial next to the new answer. A real version would end
+  the partial message and say it was dropped, or buffer until the response.
 
 ## Verified
+
+- Real AG-UI client, not committed: `HttpAgent` from `@ag-ui/client`
+  1.0.3 (its event verifier on) against a real gateway (agent main
+  146b74b) with this plugin loaded through the plugin loader and the demo
+  provider. Three runs on one thread: two text runs, then one with a tool
+  call and its result. Every event passed `EventSchemas` from
+  `@ag-ui/core/schemas` 1.0.3, the client built the expected message list
+  (assistant text, assistant tool call, tool result, assistant text), and
+  a wrong token got a 401. Not checked: a real model provider, a browser
+  UI such as CopilotKit, and interrupts through `HttpAgent`.
 
 - Unit: input validation; delta, tool call and result mapping; per-session
   filtering; interrupt then resume (approved and cancelled) over real HTTP

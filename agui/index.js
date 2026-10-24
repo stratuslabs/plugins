@@ -168,12 +168,15 @@ export const streamSession = (bus, sessionId, emit, hooks = {}) => {
       return;
     }
     if (event.type === 'provider.response') {
-      // A provider that does not stream says it all here.
+      // A provider that does not stream says it all here: one message per
+      // text part, the way Stratus stores them in the session.
       if (!streamedThisResponse) {
-        const text = (event.parts ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('');
-        if (text) {
-          startText();
-          emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: open, delta: text });
+        for (const part of event.parts ?? []) {
+          if (part.type === 'text' && part.text) {
+            endText();
+            startText();
+            emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: open, delta: part.text });
+          }
         }
       }
       endText();

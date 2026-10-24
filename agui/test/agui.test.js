@@ -75,6 +75,24 @@ test('streamed text, a tool call and its result map to AG-UI events, for this se
   assert.equal(bus.count, 0);
 });
 
+test('a non-streamed reply with several text parts is one AG-UI message per part, as Stratus stores it', () => {
+  const bus = fakeBus();
+  const events = [];
+  const stream = streamSession(bus, 's-1', (event) => events.push(event));
+  bus.emit({ type: 'provider.response', sessionId: 's-1', parts: [{ type: 'text', text: 'First.' }, { type: 'text', text: 'Second.' }] });
+  stream.unsubscribe();
+  const shape = events.map((event) => [event.type, event.delta ?? '']);
+  assert.deepEqual(shape, [
+    ['TEXT_MESSAGE_START', ''],
+    ['TEXT_MESSAGE_CONTENT', 'First.'],
+    ['TEXT_MESSAGE_END', ''],
+    ['TEXT_MESSAGE_START', ''],
+    ['TEXT_MESSAGE_CONTENT', 'Second.'],
+    ['TEXT_MESSAGE_END', ''],
+  ]);
+  assert.notEqual(events[0].messageId, events[3].messageId);
+});
+
 import { createAguiAdapter } from '../index.js';
 
 /** A gateway whose one turn asks to run `shell.run`, then finishes. */

@@ -5,8 +5,17 @@
   "description": "Discord channel for Stratus: each agent answers as its own bot in DMs and allowlisted guild channels.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "^2.0.4"
+  },
+  "devDependencies": {
+    "ws": "^8.22.0"
   }
 }

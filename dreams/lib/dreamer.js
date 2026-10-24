@@ -96,10 +96,15 @@ export const createDreamer = ({
     ['-p', experimentProfile({ experimentDir, home: dirs.home, tmp: dirs.tmp, read: tools.read, deny: tools.deny() }), tools.overnight, ...argv],
   ];
 
+  // Under a tether like the run: on the directory's lock, gone with the
+  // daemon, and its whole group stopped at the timeout.
+  const tethered = (lockFile, command, args) => [process.execPath, [TETHER, lockFile, String(KILL_GRACE_MS), '--', command, ...args]];
+
   const report = (experimentDir, dirs, env) => new Promise((resolve) => {
-    const [command, args] = sandboxed(experimentDir, dirs, ['report', experimentDir]);
-    const child = spawn(command, args, { cwd: experimentDir, env, stdio: 'ignore' });
-    const timer = timers.setTimeout(() => child.kill('SIGKILL'), REPORT_TIMEOUT_MS);
+    const [command, args] = tethered(lockFor(experimentDir), ...sandboxed(experimentDir, dirs, ['report', experimentDir]));
+    const child = spawn(command, args, { cwd: experimentDir, env, stdio: ['pipe', 'ignore', 'ignore'] });
+    child.stdin?.on('error', () => {});
+    const timer = timers.setTimeout(() => child.kill('SIGTERM'), REPORT_TIMEOUT_MS);
     child.on('error', () => {
       timers.clearTimeout(timer);
       resolve(undefined);
@@ -220,7 +225,7 @@ export const createDreamer = ({
     try {
       // The tether's stdin is a pipe this daemon never writes to: when the
       // daemon is gone, it closes, and the tether stops the run.
-      child = spawn(process.execPath, [TETHER, lockFile, String(KILL_GRACE_MS), '--', command, ...args], { cwd: experimentDir, env, stdio: ['pipe', out, out] });
+      child = spawn(...tethered(lockFile, command, args), { cwd: experimentDir, env, stdio: ['pipe', out, out] });
     } catch (error) {
       claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
       throw error;
@@ -251,25 +256,31 @@ export const createDreamer = ({
         finished = true;
         run.exited = true;
         timers.clearTimeout(windowTimer);
-        // The tether exits only once the whole group has, so the proxy
-        // token is worthless by the time it closes.
-        await proxy.close();
-        if (exitCode === LOCK_BUSY) {
-          error = new Error(`a run from an earlier daemon still holds ${experimentDir}`);
+        try {
+          // The tether exits only once the whole group has, so the proxy
+          // token is worthless by the time it closes.
+          await proxy.close();
+          if (exitCode === LOCK_BUSY) {
+            error = new Error(`a run from an earlier daemon still holds ${experimentDir}`);
+          }
+          const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
+          const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
+          claims.finish(agentId, window.night, index, {
+            status: error ? 'failed-to-start' : run.reason ?? 'finished',
+            ...(exitCode !== null && exitCode !== undefined ? { exitCode } : {}),
+            ...(signal ? { signal } : {}),
+            ...(error ? { error: error.message } : {}),
+            endedAt: now().toISOString(),
+            log: logFile,
+            ...(reportPath ? { report: reportPath } : {}),
+            summary,
+          });
+          log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} ${error ? 'failed to start' : 'ended'}: ${summary.attempts} attempts, ${summary.kept} kept.`);
+        } catch (failure) {
+          // A full disk or an unreadable log must not leave the agent and
+          // the directory held, or a daemon stop waiting, forever.
+          warn(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} ended, but recording it failed: ${failure.message}`);
         }
-        const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
-        const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
-        claims.finish(agentId, window.night, index, {
-          status: error ? 'failed-to-start' : run.reason ?? 'finished',
-          ...(exitCode !== null && exitCode !== undefined ? { exitCode } : {}),
-          ...(signal ? { signal } : {}),
-          ...(error ? { error: error.message } : {}),
-          endedAt: now().toISOString(),
-          log: logFile,
-          ...(reportPath ? { report: reportPath } : {}),
-          summary,
-        });
-        log(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} ${error ? 'failed to start' : 'ended'}: ${summary.attempts} attempts, ${summary.kept} kept.`);
         // Free the directory only after the report and summary have read it.
         busy.delete(experimentDir);
         running.delete(agentId);
@@ -318,22 +329,20 @@ export const createDreamer = ({
    */
   const recover = () => {
     for (const agentId of agents.keys()) {
-      let nights;
+      // One agent's unreadable claims or full disk does not stop the rest.
       try {
-        nights = Object.entries(claims.nights(agentId));
+        for (const [night, entries] of Object.entries(claims.nights(agentId))) {
+          for (const entry of entries.filter((candidate) => !candidate.result)) {
+            claims.finish(agentId, night, entry.index, {
+              status: 'interrupted',
+              endedAt: now().toISOString(),
+              summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
+            });
+            log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
+          }
+        }
       } catch (error) {
         warn(`dreams: ${agentId}: ${error.message}`);
-        continue;
-      }
-      for (const [night, entries] of nights) {
-        for (const entry of entries.filter((candidate) => !candidate.result)) {
-          claims.finish(agentId, night, entry.index, {
-            status: 'interrupted',
-            endedAt: now().toISOString(),
-            summary: summarizeFile(path.join(entry.path, 'experiments.jsonl'), entry.offset),
-          });
-          log(`dreams: ${agentId} night ${night}: experiment ${entry.index + 1} was interrupted by a daemon stop and is not run again tonight.`);
-        }
       }
     }
   };

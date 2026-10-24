@@ -141,3 +141,21 @@ test('config: one experiment directory belongs to one agent, once', () => {
     /\/x\/exp is listed twice for ava/,
   );
 });
+
+test('the summary reads a bounded amount of a log the model can grow without limit', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'dreams-'));
+  const file = path.join(dir, 'experiments.jsonl');
+  const old = line({ experiment_id: 1, description: 'old night', score: 1.5, best_score: 1.5, improved: true });
+  const before = 'x'.repeat(5000) + '\n' + old;
+  const tonight = Array.from({ length: 50 }, (_, i) => line({ experiment_id: i + 2, description: 'try', score: 1, best_score: 1, improved: true })).join('');
+  writeFileSync(file, before + tonight);
+  const one = Buffer.byteLength(line({ experiment_id: 2, description: 'try', score: 1, best_score: 1, improved: true }));
+  const summary = summarizeFile(file, Buffer.byteLength(before), { limit: one * 10 + 5, tail: Buffer.byteLength(old) + 3 });
+  assert.equal(summary.attempts, 10, 'only whole lines inside the limit count');
+  assert.equal(summary.startBest, 1.5, 'the best before tonight still comes from the tail before the offset');
+  assert.match(summary.notes.join(' '), /larger than/);
+
+  const shrunk = summarizeFile(file, 10 * 1024 * 1024, { limit: one * 3 + 5 });
+  assert.equal(shrunk.attempts, 3, 'a shortened log is read from its end, bounded too');
+  assert.match(shrunk.notes.join(' '), /shorter/);
+});

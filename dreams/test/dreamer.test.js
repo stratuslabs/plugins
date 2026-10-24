@@ -77,10 +77,12 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
   const warnings = [];
   const proxies = fakeProxies();
   const reports = [];
+  const reportCalls = [];
   const spawn = (command, args, options) => {
     const child = fakeChild(kills);
     const call = unwrap(command, args, options, child);
     if (call.args.includes('report')) {
+      reportCalls.push(call);
       if (holdReports) {
         reports.push(child);
       } else {
@@ -105,7 +107,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     keyProxy: proxies.keyProxy,
     warn: (message) => warnings.push(message),
   });
-  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports, reportCalls };
 };
 
 // A second daemon on the first one's state.
@@ -542,4 +544,44 @@ test('a claim file that cannot be read blocks only that agent, and never reads a
   await dreamer.tick();
   assert.deepEqual(runs.map((run) => run.args[4]), [b]);
   assert.ok(warnings.some((message) => message.includes('ava') && message.includes('cannot read its claims')));
+});
+
+test('the report runs under the tether too, on the run\'s lock, and its timeout asks the tether to stop it', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, kills, timers, reportCalls } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reportCalls.length, 1);
+  assert.equal(reportCalls[0].command, SANDBOX_EXEC);
+  assert.equal(reportCalls[0].tether?.lock, runs[0].tether.lock, 'nothing else starts in the directory while it reports');
+  assert.equal(reportCalls[0].options.stdio[0], 'pipe', 'and it goes if the daemon does');
+  timers.fire((handle) => handle.ms === 120_000);
+  assert.deepEqual(kills, ['SIGTERM'], 'the tether stops the report\'s whole group');
+  reportCalls[0].child.emit('exit', null, 'SIGTERM');
+});
+
+test('a run whose end cannot be recorded still frees its agent and directory, and stop still returns', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, claims, warnings } = fixture({
+    agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: exp, budget: '1h' }, { path: experimentDir(), budget: '1h' }] } },
+    now: night(23, 0),
+  });
+  await dreamer.tick();
+  const finish = claims.finish;
+  claims.finish = () => {
+    throw new Error('ENOSPC: no space left on device');
+  };
+  await exit(runs[0]);
+  claims.finish = finish;
+  assert.ok(warnings.some((message) => message.includes('ENOSPC')), 'the failure is said');
+  assert.equal(dreamer.running.has('ava') && dreamer.running.get('ava').child === runs[0].child, false, 'the agent is free');
+  assert.equal(runs.length, 2, 'and the next experiment starts');
+  const stopped = dreamer.stop();
+  runs[1].child.emit('exit', null, 'SIGTERM');
+  await stopped;
 });

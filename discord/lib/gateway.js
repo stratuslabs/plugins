@@ -24,7 +24,7 @@ const FATAL = new Map([
  *
  * `api` points both at another Discord, for tests.
  */
-export const connectBot = async ({ token, onMessage, onInteraction, onFatal, log = () => {}, api }) => {
+export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onReconnect, log = () => {}, api }) => {
   const rest = new REST({ version: '10', ...(api ? { api } : {}) }).setToken(token);
   const manager = new WebSocketManager({ token, intents: INTENTS, rest, compression: null });
   const threads = new Map();
@@ -38,9 +38,16 @@ export const connectBot = async ({ token, onMessage, onInteraction, onFatal, log
   // await below: handled here, still thrown there.
   readyOnce.catch(() => {});
 
+  let readies = 0;
   manager.on(WebSocketShardEvents.Ready, (data) => {
     botId = data.user.id;
+    readies += 1;
     ready.resolve();
+    // A READY after the first is a new session, not a resume: Discord
+    // replays nothing from before it.
+    if (readies > 1) {
+      onReconnect?.();
+    }
   });
   manager.on(WebSocketShardEvents.Resumed, () => log('discord gateway resumed'));
   manager.on(WebSocketShardEvents.Closed, (code) => {

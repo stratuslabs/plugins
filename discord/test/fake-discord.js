@@ -130,6 +130,10 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
       state.seq += 1;
       current.send(JSON.stringify({ op: 0, t, s: state.seq, d }));
     },
+    /** End the session the way Discord does after a long outage: not resumable, so the bot identifies again. */
+    invalidate() {
+      current.send(JSON.stringify({ op: 9, d: false }));
+    },
     /** Drop the connection the way a network blip does: a resumable close. */
     drop() {
       current.close(4000, 'blip');
@@ -137,6 +141,8 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
     async close() {
       for (const client of wss.clients) client.terminate();
       await new Promise((resolve) => wss.close(resolve));
+      // Keep-alive REST connections would hold the close open.
+      server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },
   };

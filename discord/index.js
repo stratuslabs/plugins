@@ -29,7 +29,16 @@ export const createPlugin = (config = {}, options = {}) => ({
         warn(`discord: ${agentId} is configured but has no bot token. Store one with \`stratus channel set discord --agent ${agentId} botToken\`.`);
       }
     }
-    const adapter = createDiscordAdapter({ config: parsed, secrets, api: options.api, log, warn, ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}) });
+    const adapter = createDiscordAdapter({
+      config: parsed,
+      secrets,
+      api: options.api,
+      log,
+      warn,
+      ...(context.stateDirectory ? { stateDirectory: context.stateDirectory } : {}),
+      ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+      ...(options.positionsWriteDelayMs !== undefined ? { positionsWriteDelayMs: options.positionsWriteDelayMs } : {}),
+    });
     context.channels.register({ adapter, agents });
   },
 });

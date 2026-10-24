@@ -61,6 +61,20 @@ either place fails the load with its name.
   channels when it lists them. A DM is a destination only when it is with
   someone in `allowFrom` or `approvers`, and is never read. Ids only.
 
+- Restarts: a message sent while the daemon was down (or reconnecting
+  after Discord dropped the session) is answered once it is back. Each
+  conversation's read position is kept in the plugin's state directory
+  (`positions.json`); a message being answered holds it until its answer
+  is out, and one that reached a daemon on its way down is told so and
+  kept. Only conversations the agent has answered in are read, back at most
+  a day and 200 messages each.
+
 ## Not built yet
 
-Restart backfill and attachments. The package stays private until then.
+Attachments. The package stays private until then.
+
+## Known issue
+
+If the daemon stops while Discord is unreachable, `@discordjs/ws` 2.0.4
+keeps retrying the connection after `destroy()`, which can keep the process
+from exiting on its own. Being looked at.

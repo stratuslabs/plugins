@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { admit } from './admission.js';
 import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId } from './approvals.js';
 import { connectBot } from './gateway.js';
+import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
+import { createPositions } from './positions.js';
 import { createRenderer } from './render.js';
 import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, typing } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
@@ -30,7 +32,11 @@ const authorName = (raw) => raw.member?.nick ?? raw.author?.global_name ?? raw.a
 /** How long stop() lets replies already being written finish. */
 export const DRAIN_TIMEOUT_MS = 10_000;
 
-export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS }) => {
+/** How far back a restart looks for messages it missed, and how many it reads per conversation. */
+export const BACKFILL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const BACKFILL_LIMIT = 200;
+
+export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
   const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
@@ -41,6 +47,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   let gateway;
   let unsubscribe;
   let stopping = false;
+  const positions = createPositions({ stateDirectory, warn, ...(positionsWriteDelayMs !== undefined ? { writeDelayMs: positionsWriteDelayMs } : {}) });
 
   const track = (promise) => {
     const tracked = promise.catch((error) => warn(`discord: ${error instanceof Error ? error.message : String(error)}`));
@@ -265,6 +272,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         const sessionId = sessionIdFor(agentId, route);
         if (stopTurns(sessionId, message.authorId, authorName(raw))) {
           firstSighting(agentId, message.id);
+          positions.passed(agentId, message);
           log(`discord: ${message.authorId} stopped ${agentId} in ${message.channelId}`);
           return;
         }
@@ -272,11 +280,25 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     }
     const verdict = admit(message, agent, bot.botId);
     if (!verdict.admit) {
+      positions.passed(agentId, message);
       return;
     }
     if (!firstSighting(agentId, message.id)) {
       return;
     }
+    // Held until its answer is out, so a restart before then finds it again.
+    positions.begin(agentId, message);
+    let outcome;
+    try {
+      outcome = await answer(agentId, agent, bot, message, raw, verdict);
+    } finally {
+      if (outcome !== 'kept') {
+        positions.end(agentId, message);
+      }
+    }
+  };
+
+  const answer = async (agentId, agent, bot, message, raw, verdict) => {
     const text = withoutMention(message.content, bot.botId);
     if (text.length === 0) {
       // Attachments aren't read yet, and a bare mention asks nothing.
@@ -388,10 +410,74 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       await renderer.finalize(repeat === 'finished' ? turnReplyFor(session, idempotencyKey) : latestTurnReply(session));
       return;
     }
+    if (failure?.name === 'GatewayStoppingError') {
+      // Reached a daemon on its way down: it stays held, so the next start
+      // reads it again and answers it then.
+      await renderer.finalize(failure.restarting === true
+        ? "I'm restarting. I'll answer this when I'm back."
+        : "I'm shutting down. I'll answer this when I'm running again.");
+      return 'kept';
+    }
     await renderer.fail(failure instanceof Error ? failure.message : String(failure));
   };
 
   const addressing = createAddressing({ bots, config });
+
+  /**
+   * After a (re)connect: read on from where each conversation was left and
+   * hand every message found to the same path a live one takes. Admission,
+   * the in-memory dedupe and the gateway's idempotency key decide what is
+   * answered; a turn that finished before the restart is posted from the
+   * session, not run again. Bounded to the last day and BACKFILL_LIMIT
+   * messages per conversation.
+   */
+  const backfill = async (agentId, agent, bot) => {
+    const floor = (BigInt(Date.now() - BACKFILL_MAX_AGE_MS) - 1420070400000n) << 22n;
+    let handed = 0;
+    for (const { conversation, after, guildId, parentId } of positions.conversations(agentId)) {
+      if (stopping) {
+        return;
+      }
+      if (parentId && !bot.threads.has(conversation)) {
+        bot.threads.set(conversation, parentId);
+      }
+      let cursor = BigInt(after) > floor ? BigInt(after) : floor;
+      for (let read = 0; read < BACKFILL_LIMIT;) {
+        let page;
+        try {
+          page = await bot.rest.get(`/channels/${conversation}/messages`, { query: new URLSearchParams({ limit: '100', after: String(cursor) }) });
+        } catch (error) {
+          if (error?.status === 403 || error?.status === 404) {
+            // Gone, or no longer visible to this bot: nothing to read there again.
+            positions.drop(agentId, conversation);
+          } else {
+            warn(`discord: ${agentId} could not read ${conversation} for messages sent while it was down: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          break;
+        }
+        if (!Array.isArray(page) || page.length === 0) {
+          break;
+        }
+        const ordered = [...page].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1)).slice(0, BACKFILL_LIMIT - read);
+        for (const raw of ordered) {
+          // A REST message says neither its guild nor, for a thread, its parent.
+          const data = { ...raw, channel_id: conversation, ...(guildId ? { guild_id: guildId } : {}) };
+          if (!stopping) {
+            handed += 1;
+            track(handle(agentId, agent, bot, normalizeMessage(data, bot.threads), data));
+          }
+        }
+        read += ordered.length;
+        cursor = BigInt(ordered[ordered.length - 1].id);
+        if (page.length < 100) {
+          break;
+        }
+      }
+    }
+    if (handed > 0) {
+      log(`discord: ${agentId} read ${handed} message${handed === 1 ? '' : 's'} sent while it was away`);
+    }
+  };
 
   return {
     name: 'discord',
@@ -403,6 +489,11 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       gateway = host;
       stopping = false;
       unsubscribe = host.bus.subscribe(onBusEvent);
+      if (stateDirectory) {
+        positions.load();
+      } else {
+        warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down will not be answered when it is back.');
+      }
       const roster = new Set(host.agents().map((agent) => agent.id));
       for (const [agentId, agent] of config.agents) {
         if (!roster.has(agentId)) {
@@ -436,10 +527,20 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
               }
             },
             onFatal: (error) => warn(`discord: ${agentId}: ${error.message}`),
+            // A new session (not a resume) means Discord won't replay what
+            // was missed while disconnected; read it instead.
+            onReconnect: () => {
+              if (!stopping) {
+                track(ready.then((connected) => backfill(agentId, agent, connected)));
+              }
+            },
           });
           bots.set(agentId, bot);
           resolveBot(bot);
           log(`discord: ${agentId} connected as bot ${bot.botId}`);
+          if (stateDirectory) {
+            track(backfill(agentId, agent, bot));
+          }
         } catch (error) {
           warn(`discord: ${agentId} could not connect: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -469,6 +570,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         }
         warn(`discord: stopped with ${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'} unfinished after ${drainTimeoutMs}ms`);
       }
+      positions.flush();
       unsubscribe?.();
       unsubscribe = undefined;
     },

@@ -64,6 +64,19 @@ test('it carries the agents it dreams for as a channel, and starts nothing in se
   assert.equal(calls.length, 0);
 });
 
+test('a host without the workspace or protected-path lists refuses to dream, since it could not fence experiments', () => {
+  const config = { agents: { ava: { window: '23:00-07:00', experiments: [{ path: '/x/exp' }] } } };
+  for (const missing of ['workspaces', 'protectedPaths']) {
+    const ctx = context();
+    delete ctx[missing];
+    assert.throws(() => createPlugin(config, { platform: 'darwin', spawn: fakeSpawn([]) }).setup(ctx), /cannot run/, missing);
+  }
+  // With no agents configured nothing runs, so nothing needs fencing.
+  const bare = context();
+  delete bare.workspaces;
+  createPlugin({}, { platform: 'darwin', spawn: fakeSpawn([]) }).setup(bare);
+});
+
 test('start refuses where no sandbox can be applied', async () => {
   const ctx = context();
   const plugin = createPlugin({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: '/x/exp' }] } } }, { platform: 'darwin', spawn: fakeSpawn([], { sandbox: false }) });

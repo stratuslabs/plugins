@@ -95,9 +95,17 @@ export const createPlugin = (config = {}, options = {}) => {
         return;
       }
 
+      // Without both lists an experiment inside an agent's workspace would
+      // look unfenced, and an agent could rewrite tomorrow night's
+      // evaluate.sh. Refused rather than read as empty.
+      for (const [key, kind] of [['workspaces', 'workspace list'], ['protectedPaths', 'protected-path list']]) {
+        if (typeof context[key]?.all !== 'function') {
+          throw new Error(`This host hands plugins no ${kind}, so ${NAME} cannot run: it could not keep experiments out of agent workspaces.`);
+        }
+      }
       const protectedList = async () => [
-        ...(await context.protectedPaths?.all() ?? []),
-        ...(await context.workspaces?.all() ?? []),
+        ...(await context.protectedPaths.all()),
+        ...(await context.workspaces.all()),
       ].map(real);
       let denyCache = homeSecretPaths(home);
 

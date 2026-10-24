@@ -9,6 +9,7 @@ agent's core any bigger.
 | Package | What it adds | Notes |
 | --- | --- | --- |
 | [`plugin-spawn`](./spawn) | `agent.spawn`: run several tasks at once in short-lived sub-agents, each with only the tools you hand it | Each sub-agent's calls are judged again |
+| [`plugin-fleet`](./fleet) | `fleet.agents`, `fleet.sessions`, `fleet.schedules`, `fleet.approvals`: read-only fleet metadata for an agent that reports what needs a person | Needs `PluginContext.fleet` (agent#412). No messages, prompts or approval inputs |
 | [`plugin-peer`](./peer) | `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | Signed HTTP, a secret per pair of agents, one hop limit across daemons |
 | [`plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`: an agent shows a native screen as A2UI v1.0, validated against your catalogs | Comes with the `a2ui-screens` skill |
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |

@@ -54,6 +54,7 @@ const fakeGateway = (agents = ['ava']) => {
           emit: (event) => bus.emit({ sessionId: input.sessionId, ...event }),
           finish(reply) {
             active = undefined;
+            turn.settled = true;
             resolve({
               id: input.sessionId,
               status: 'completed',
@@ -65,13 +66,34 @@ const fakeGateway = (agents = ['ava']) => {
           },
           reject(error) {
             active = undefined;
+            turn.settled = true;
             reject(error);
           },
         };
         turns.push(turn);
       });
     },
-    resolveApproval: () => false,
+    resolutions: [],
+    pending: new Set(),
+    resolveApproval(input) {
+      this.resolutions.push(input);
+      if (!this.pending.has(input.requestId)) {
+        return false;
+      }
+      this.pending.delete(input.requestId);
+      bus.emit({ type: 'tool.approval-resolved', sessionId: 'any', requestId: input.requestId, answer: input.answer, reason: input.reason ?? 'decided', ...(input.actor ? { actor: input.actor } : {}) });
+      return true;
+    },
+    aborts: [],
+    abortTurns(sessionId, reason) {
+      this.aborts.push({ sessionId, reason });
+      return turns.filter((turn) => turn.input.sessionId === sessionId && !turn.settled).length;
+    },
+    /** Park a gated call the way the gateway does, and say so on the bus. */
+    ask(fields) {
+      this.pending.add(fields.requestId);
+      bus.emit({ type: 'tool.approval-requested', agentId: 'ava', risk: 'gated', call: { id: 'c1', toolName: 'shell.run', input: { command: 'ls' } }, ...fields });
+    },
   };
 };
 
@@ -81,8 +103,8 @@ const config = {
   },
 };
 
-const setUp = async (t, { pluginConfig = config, secrets = { ava: { botToken: TOKEN } } } = {}) => {
-  const discord = await fakeDiscord();
+const setUp = async (t, { pluginConfig = config, secrets = { ava: { botToken: TOKEN } }, refuse } = {}) => {
+  const discord = await fakeDiscord(refuse ? { closeOnIdentify: refuse } : {});
   const registered = [];
   const plugin = createPlugin(pluginConfig, { api: discord.api, drainTimeoutMs: 200 });
   await plugin.setup({
@@ -237,4 +259,120 @@ test('stop disconnects the bot and leaves the bus', async (t) => {
   assert.equal(gateway.listeners.size, 1);
   await adapter.stop();
   assert.equal(gateway.listeners.size, 0);
+});
+
+const click = (discord, { requestId, answer, user, channelId = DM, messageId = '1', interactionId = '880000000000000001' }) =>
+  discord.dispatch('INTERACTION_CREATE', {
+    id: interactionId, token: `tok-${interactionId}`, type: 3, channel_id: channelId,
+    data: { custom_id: `stratus:approval:${answer}:${requestId}`, component_type: 2 },
+    message: { id: messageId }, user: { id: user },
+  });
+
+test('an approval is asked in the conversation, and an approver\'s click decides it', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  gateway.ask({ sessionId: `discord:ava:@dm:${DM}`, requestId: 'req-1', always: 'scope', metadata: { channel: 'discord', discordChannel: DM } });
+  await until(() => discord.state.posts.length === 1, 'the prompt');
+  const prompt = discord.state.posts[0];
+  assert.equal(prompt.channelId, DM);
+  assert.match(prompt.body.content, /wants to run `shell.run` \(gated\)/);
+  assert.equal(prompt.body.components[0].components.length, 3);
+  assert.deepEqual(prompt.body.allowed_mentions, { parse: [], replied_user: false });
+
+  click(discord, { requestId: 'req-1', answer: 'always', user: OWNER });
+  await until(() => discord.state.callbacks.length === 1, 'the click answered');
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: OWNER }]);
+  assert.equal(discord.state.callbacks[0].body.type, 6, 'acknowledged without a message');
+  assert.equal(discord.state.callbacks[0].authorization, undefined, 'answered with the interaction token, not the bot token');
+  await until(() => discord.state.patches.length === 1, 'the prompt settled');
+  assert.match(discord.state.patches[0].body.content, /Allowed, and this command's scope now runs without asking/);
+  assert.deepEqual(discord.state.patches[0].body.components, [], 'no buttons left on a settled prompt');
+});
+
+test('someone who is not an approver is told so privately, and the request stays pending', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  gateway.ask({ sessionId: `discord:ava:@dm:${DM}`, requestId: 'req-2', metadata: { channel: 'discord', discordChannel: DM } });
+  await until(() => discord.state.posts.length === 1, 'the prompt');
+  click(discord, { requestId: 'req-2', answer: 'deny', user: STRANGER });
+  await until(() => discord.state.callbacks.length === 1, 'the refusal');
+  assert.equal(discord.state.callbacks[0].body.type, 4);
+  assert.equal(discord.state.callbacks[0].body.data.flags, 64, 'ephemeral');
+  assert.match(discord.state.callbacks[0].body.data.content, /not an approver/);
+  assert.deepEqual(gateway.resolutions, []);
+  assert.ok(gateway.pending.has('req-2'));
+});
+
+test('a request for another channel\'s conversation, or none, is left alone', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  gateway.ask({ sessionId: 'slack:ava:T1:C1:1', requestId: 'req-3', metadata: { channel: 'slack', slackChannel: 'C1' } });
+  gateway.ask({ sessionId: 'cli', requestId: 'req-4' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(discord.state.posts.length, 0);
+  assert.deepEqual(gateway.resolutions, [], 'not denied: another surface may be asking');
+});
+
+test('a request in a Discord conversation whose bot could not connect is denied as undeliverable, not left to time out', async (t) => {
+  const { registered, gateway } = await setUp(t, { refuse: 4004 });
+  await registered[0].adapter.start(gateway);
+  gateway.ask({ sessionId: `discord:ava:@dm:${DM}`, requestId: 'req-5', metadata: { channel: 'discord', discordChannel: DM } });
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-5', answer: 'deny', reason: 'undeliverable' }]);
+});
+
+test('a click on a prompt nothing is waiting for says so and takes its buttons off', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  click(discord, { requestId: 'gone', answer: 'once', user: OWNER });
+  await until(() => discord.state.callbacks.length === 1, 'the answer');
+  assert.equal(discord.state.callbacks[0].body.type, 7, 'updates the message it was on');
+  assert.deepEqual(discord.state.callbacks[0].body.data.components, []);
+  assert.match(discord.state.callbacks[0].body.data.content, /no longer pending/);
+});
+
+test('an approver saying stop ends the running turn and the reply says who stopped it', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, content: 'write me an essay' }));
+  await until(() => gateway.turns.length === 1, 'the turn');
+  const [turn] = gateway.turns;
+  turn.start();
+  turn.emit({ type: 'provider.delta', delta: { type: 'text', text: 'Once upon' } });
+  await until(() => discord.state.posts.length === 1, 'streaming');
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000009', channel_id: DM, content: 'stop' }));
+  await until(() => gateway.aborts.length === 1, 'the stop');
+  assert.equal(gateway.aborts[0].sessionId, `discord:ava:@dm:${DM}`);
+  assert.equal(turn.input.signal.aborted, true, 'the turn this adapter started is aborted too');
+  assert.equal(gateway.turns.length, 1, 'the stop is not a turn of its own');
+  turn.reject(new Error('aborted'));
+  await until(() => discord.state.patches.some((patch) => /Stopped by Dylan/.test(patch.body.content)), 'the stopped reply');
+  assert.match(discord.state.patches.at(-1).body.content, /^Once upon\n\n-# Stopped by Dylan\.$/);
+});
+
+test('stop from someone who is not an approver, or with nothing running, is an ordinary message', async (t) => {
+  const { discord, registered, gateway } = await setUp(t, {
+    pluginConfig: { agents: { ava: { allowFrom: [OWNER, STRANGER], approvers: [OWNER] } } },
+  });
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, content: 'stop', author: { id: STRANGER, username: 'sam' } }));
+  await until(() => gateway.turns.length === 1, 'a turn');
+  assert.equal(gateway.aborts.length, 0);
+  gateway.turns[0].finish('ok');
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000010', channel_id: '777777777777777778', content: 'stop' }));
+  await until(() => gateway.turns.length === 2, 'a second turn');
+  assert.equal(gateway.turns[1].input.userMessage, 'stop');
+});
+
+test('stopping with a turn still running stops its typing too', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  const adapter = registered[0].adapter;
+  await adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  gateway.turns[0].start();
+  await until(() => discord.state.typing.length === 1, 'typing');
+  await adapter.stop();
+  const typed = discord.state.typing.length;
+  await new Promise((resolve) => setTimeout(resolve, 8500));
+  assert.equal(discord.state.typing.length, typed, 'no typing after stop');
 });

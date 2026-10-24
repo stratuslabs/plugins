@@ -44,9 +44,18 @@ either place fails the load with its name.
   as `⚙ name…`, a long reply continues in new messages, and the final reply
   replaces the streamed text.
 
+- Approvals: a gated call in a Discord conversation is asked there, with
+  Allow once / Always allow / Deny buttons (no Always where nothing would be
+  remembered). Only the agent's approvers can decide; anyone else is told
+  privately and the request stays pending. Every ending rewrites the prompt
+  without buttons. A request from another surface's conversation is left
+  to that surface.
+- Stop: an approver sending `stop` in a DM or thread ends the running turn,
+  which keeps what it said and adds who stopped it. With nothing running,
+  `stop` is an ordinary message.
+
 ## Not built yet
 
-Approval prompts (none are shown in Discord yet, so keep gated tools away
-from a Discord-facing agent until they are), Stop, restart backfill, attachments, `discord:` destinations for
+Restart backfill, attachments, `discord:` destinations for
 `message.send` and schedules, and reading a conversation. The package stays
 private until then.

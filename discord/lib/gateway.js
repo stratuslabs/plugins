@@ -19,11 +19,12 @@ const FATAL = new Map([
  * One agent's bot connection: the gateway for what comes in, REST for what
  * goes out. `@discordjs/ws` does heartbeats, identify throttling, resume and
  * reconnect. `onMessage(message, raw)` gets every MESSAGE_CREATE in the
- * adapter's form; admission is the caller's.
+ * adapter's form, and `onInteraction(raw)` every INTERACTION_CREATE (a button
+ * click); admission is the caller's.
  *
  * `api` points both at another Discord, for tests.
  */
-export const connectBot = async ({ token, onMessage, onFatal, log = () => {}, api }) => {
+export const connectBot = async ({ token, onMessage, onInteraction, onFatal, log = () => {}, api }) => {
   const rest = new REST({ version: '10', ...(api ? { api } : {}) }).setToken(token);
   const manager = new WebSocketManager({ token, intents: INTENTS, rest, compression: null });
   const threads = new Map();
@@ -59,6 +60,8 @@ export const connectBot = async ({ token, onMessage, onFatal, log = () => {}, ap
     }
     if (payload.t === 'MESSAGE_CREATE' && botId !== undefined) {
       onMessage(normalizeMessage(payload.d, threads), payload.d);
+    } else if (payload.t === 'INTERACTION_CREATE' && botId !== undefined) {
+      onInteraction?.(payload.d);
     }
   });
 

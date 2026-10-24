@@ -40,6 +40,26 @@ export const postText = async (rest, channelId, text, { replyTo, embeds = false 
 export const editText = (rest, channelId, messageId, text) =>
   rest.patch(Routes.channelMessage(channelId, messageId), { body: { content: text, allowed_mentions: NO_PINGS } });
 
+/** Post one message with components (an approval prompt). Returns its id. */
+export const postPrompt = async (rest, channelId, { content, components }) => {
+  const posted = await rest.post(Routes.channelMessages(channelId), {
+    body: { content, components, allowed_mentions: NO_PINGS, flags: SUPPRESS_EMBEDS },
+  });
+  return posted.id;
+};
+
+/** Rewrite a prompt: new text, and the buttons it still offers (none once settled). */
+export const editPrompt = (rest, channelId, messageId, { content, components = [] }) =>
+  rest.patch(Routes.channelMessage(channelId, messageId), { body: { content, components, allowed_mentions: NO_PINGS } });
+
+/**
+ * Answer a button click. Discord wants this within three seconds or shows
+ * the clicker "This interaction failed". It is authorized by the
+ * interaction's own token, not the bot's.
+ */
+export const answerInteraction = (rest, interaction, body) =>
+  rest.post(`/interactions/${interaction.id}/${interaction.token}/callback`, { body, auth: false });
+
 /** Take a message down: a streamed piece the reply no longer needs. */
 export const removeMessage = (rest, channelId, messageId) => rest.delete(Routes.channelMessage(channelId, messageId));
 

@@ -136,3 +136,31 @@ test('chunk: every piece fits Discord, splits at lines, and code fences stay clo
   assert.ok(chunk(word).every((piece) => piece.length <= DISCORD_LIMIT), 'a line longer than the limit is cut');
   assert.equal(chunk(word).join(''), word);
 });
+
+test('stop: only the word, with this bot mentioned or nobody', async () => {
+  const { isStopRequest } = await import('../lib/stop.js');
+  for (const yes of ['stop', 'Stop.', `<@${BOT}> stop!`, `stop <@!${BOT}>`]) {
+    assert.equal(isStopRequest(yes, BOT), true, yes);
+  }
+  for (const no of ['stop that', 'please stop', `<@${OTHER}> stop`, 'stop <@&123456789012345678>', 'don\'t stop']) {
+    assert.equal(isStopRequest(no, BOT), false, no);
+  }
+});
+
+test('approval prompt: shows the call, offers Always only when it means something, and round-trips its ids', async () => {
+  const { approvalMessage, parseCustomId, outcomeMessage } = await import('../lib/approvals.js');
+  const prompt = approvalMessage({ agentName: 'Ava', toolName: 'shell.run', risk: 'gated', input: { command: 'rm -rf build ```' }, oneShot: false, always: 'scope', requestId: 'req-1' });
+  assert.match(prompt.content, /\*\*Ava\*\* wants to run `shell.run` \(gated\)/);
+  assert.match(prompt.content, /"command": "rm -rf build `​``"/, 'model text cannot close the code block');
+  assert.match(prompt.content, /Always allow\*\* remembers this command's scope/);
+  const ids = prompt.components[0].components.map((button) => parseCustomId(button.custom_id));
+  assert.deepEqual(ids, [{ answer: 'once', requestId: 'req-1' }, { answer: 'always', requestId: 'req-1' }, { answer: 'deny', requestId: 'req-1' }]);
+  const oneShot = approvalMessage({ agentName: 'Ava', toolName: 'x', risk: 'dangerous', input: {}, oneShot: true, requestId: 'req-2' });
+  assert.deepEqual(oneShot.components[0].components.map((button) => button.label), ['Allow once', 'Deny']);
+  assert.equal(parseCustomId('something:else'), undefined);
+  assert.equal(parseCustomId('stratus:approval:maybe:req'), undefined);
+  const post = { agentName: 'Ava', agentId: 'ava', toolName: 'x', risk: 'gated', oneShot: false, always: 'session', approvers: new Set([OWNER]) };
+  assert.equal(outcomeMessage(post, { answer: 'once', reason: 'decided', actor: OWNER }), `**Ava**: \`x\` (gated): Allowed once by <@${OWNER}>.`);
+  assert.equal(outcomeMessage(post, { answer: 'deny', reason: 'timeout' }), '**Ava**: `x` (gated): Expired without an answer, denied.');
+  assert.match(outcomeMessage(post, { answer: 'once', reason: 'decided', actor: 'dashboard' }), /by `dashboard`/);
+});

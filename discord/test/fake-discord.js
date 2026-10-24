@@ -10,7 +10,7 @@ export const BOT = '111111111111111111';
  * sent. `closeOnIdentify` makes it refuse the identify with a close code.
  */
 export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
-  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], typing: [], threads: [], sockets: [], seq: 0 };
+  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], seq: 0 };
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
@@ -36,6 +36,11 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
       if (req.method === 'PATCH' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
         state.patches.push({ channelId: match[1], messageId: match[2], body: json });
         return send(200, { id: match[2] });
+      }
+      if (req.method === 'POST' && (match = url.match(/^\/interactions\/(\d+)\/([^/]+)\/callback$/))) {
+        state.callbacks.push({ id: match[1], token: match[2], body: json, authorization: req.headers.authorization });
+        res.writeHead(204);
+        return res.end();
       }
       if (req.method === 'DELETE' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
         state.deletes.push({ channelId: match[1], messageId: match[2] });

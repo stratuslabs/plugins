@@ -237,6 +237,23 @@ export const createRenderer = ({
       return { spoke: posted > 0 };
     },
 
+    /** Stopped by an approver: keep what it said, and say who stopped it. */
+    async stopped(by) {
+      finished = true;
+      stopTimers();
+      tool = undefined;
+      const said = live().text.trim().length > 0 ? `${live().text}\n\n` : '';
+      live().text = `${said}-# Stopped by ${by}.`;
+      await sync();
+      return { spoke: posted > 0 };
+    },
+
+    /** The adapter is stopping with this turn unfinished: no more timers or requests. */
+    halt() {
+      finished = true;
+      stopTimers();
+    },
+
     /** Another delivery answers this turn: take down what this one put up. */
     async withdraw() {
       finished = true;

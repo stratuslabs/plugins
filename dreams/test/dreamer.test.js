@@ -283,7 +283,7 @@ test('a stop during a start that is still checking its path waits for it, and no
   const exp = experimentDir();
   let release;
   const order = [];
-  const { dreamer, runs, claims } = fixture({
+  const { dreamer, runs, claims, proxies } = fixture({
     agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
     now: night(23, 0),
     guard: () => new Promise((resolve) => {
@@ -300,6 +300,7 @@ test('a stop during a start that is still checking its path waits for it, and no
   await stopped;
   assert.equal(runs.length, 0, 'nothing spawns after stop');
   assert.deepEqual(claims.night('ava', '2026-10-23'), [], 'nothing spent: the next daemon runs it');
+  assert.deepEqual(proxies.opened.map((proxy) => proxy.closed), proxies.opened.map(() => true), 'a proxy opened for it is closed');
 });
 
 test('a reordered config after a restart still runs each experiment at most once a night', async () => {
@@ -477,4 +478,21 @@ test('two agents never run the same experiment directory at once, even through a
   assert.equal(runs.length, 1, 'the second agent waits for the path');
   await exit(runs[0]);
   assert.equal(runs.length, 2, 'and runs once it is free');
+});
+
+test('a setup failure after the key proxy opens closes it, and retries do not pile up proxies', async () => {
+  const parent = experimentDir();
+  // A quote can't be written into a sandbox profile, so experimentProfile throws.
+  const exp = path.join(parent, 'say "hi"');
+  mkdirSync(path.join(exp, 'workspace'), { recursive: true });
+  const { dreamer, runs, proxies, warnings } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+  });
+  await dreamer.tick();
+  await dreamer.tick();
+  assert.equal(runs.length, 0);
+  assert.ok(proxies.opened.length >= 1);
+  assert.deepEqual(proxies.opened.map((proxy) => proxy.closed), proxies.opened.map(() => true), 'every proxy opened for a failed setup is closed');
+  assert.ok(warnings.some((message) => message.includes('cannot express the path')));
 });

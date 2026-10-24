@@ -194,11 +194,30 @@ export const createDreamer = ({
       return false;
     }
     const proxy = await keyProxy({ apiKey });
+    let child;
+    try {
+      child = await setUp(agentId, window, index, experiment, experimentDir, budget, entry, proxy);
+    } catch (error) {
+      await proxy.close();
+      throw error;
+    }
+    if (child === undefined) {
+      await proxy.close();
+      return false;
+    }
+    return true;
+  };
+
+  /**
+   * Everything between opening the run's key proxy and handing it to a
+   * running process. It returns the child, or undefined when a stop came in
+   * first; its caller closes the proxy whenever no child got it.
+   */
+  const setUp = async (agentId, window, index, experiment, experimentDir, budget, entry, proxy) => {
     // The last await before the claim: a stop that came in while this start
     // was checking its path spends nothing and spawns nothing.
     if (stopping) {
-      await proxy.close();
-      return false;
+      return undefined;
     }
     const dirs = dirsFor(agentId, experimentDir);
     const env = childEnv(dirs, proxy);
@@ -216,7 +235,6 @@ export const createDreamer = ({
     try {
       child = spawn(command, args, { cwd: experimentDir, env, detached: true, stdio: ['ignore', out, out] });
     } catch (error) {
-      await proxy.close();
       claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
       throw error;
     } finally {
@@ -284,7 +302,7 @@ export const createDreamer = ({
       child.once('error', (error) => void finish(null, null, error));
       child.once('exit', (code, signal) => void finish(code, signal));
     });
-    return true;
+    return child;
   };
 
   const tick = async () => {

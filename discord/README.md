@@ -54,8 +54,13 @@ either place fails the load with its name.
   which keeps what it said and adds who stopped it. With nothing running,
   `stop` is an ordinary message.
 
+- Destinations and reads: `message.send` and schedules post to
+  `discord:<channel id>` (with `thread` naming a thread in it, or a message
+  to reply under), and `message.read` reads a channel or one thread in it.
+  Both stop where admission stops: a server under `guilds`, only its listed
+  channels when it lists them. A DM is a destination only when it is with
+  someone in `allowFrom` or `approvers`, and is never read. Ids only.
+
 ## Not built yet
 
-Restart backfill, attachments, `discord:` destinations for
-`message.send` and schedules, and reading a conversation. The package stays
-private until then.
+Restart backfill and attachments. The package stays private until then.

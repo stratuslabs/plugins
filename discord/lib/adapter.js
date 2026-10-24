@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { admit } from './admission.js';
 import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId } from './approvals.js';
 import { connectBot } from './gateway.js';
+import { createAddressing } from './outbound.js';
 import { createRenderer } from './render.js';
 import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, typing } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
@@ -390,8 +391,13 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     await renderer.fail(failure instanceof Error ? failure.message : String(failure));
   };
 
+  const addressing = createAddressing({ bots, config });
+
   return {
     name: 'discord',
+    resolveOutbound: addressing.resolveOutbound,
+    readConversation: addressing.readConversation,
+    conversationKindFor: addressing.conversationKindFor,
 
     async start(host) {
       gateway = host;

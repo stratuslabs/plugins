@@ -10,7 +10,9 @@ export const BOT = '111111111111111111';
  * sent. `closeOnIdentify` makes it refuse the identify with a close code.
  */
 export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
-  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], seq: 0 };
+  // `channels` (id -> channel object) and `history` (channel id -> its
+  // messages, any order) are the test's to fill; GETs read them.
+  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], gets: [], channels: {}, history: {}, seq: 0 };
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
@@ -29,6 +31,36 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
         return send(200, { url: `ws://127.0.0.1:${port}/gw`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 } });
       }
       let match;
+      if (req.method === 'GET') {
+        state.gets.push(url);
+      }
+      if (req.method === 'GET' && (match = url.match(/^\/channels\/(\d+)$/))) {
+        const channel = state.channels[match[1]];
+        return channel ? send(200, channel) : send(404, { message: 'Unknown Channel', code: 10003 });
+      }
+      if (req.method === 'GET' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
+        const found = (state.history[match[1]] ?? []).find((m) => m.id === match[2]);
+        return found ? send(200, found) : send(404, { message: 'Unknown Message', code: 10008 });
+      }
+      if (req.method === 'GET' && (match = url.match(/^\/channels\/(\d+)\/messages(?:\?(.*))?$/))) {
+        if (!state.channels[match[1]]) {
+          return send(404, { message: 'Unknown Channel', code: 10003 });
+        }
+        // Discord's paging: newest first always; `after` takes the
+        // messages just after the id, `before` (or nothing) those just
+        // before it.
+        const query = new URLSearchParams(match[2] ?? '');
+        const limit = Number(query.get('limit') ?? 50);
+        const all = [...(state.history[match[1]] ?? [])].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+        let page;
+        if (query.has('after')) {
+          page = all.filter((m) => BigInt(m.id) > BigInt(query.get('after'))).slice(0, limit);
+        } else {
+          const before = query.has('before') ? BigInt(query.get('before')) : undefined;
+          page = all.filter((m) => before === undefined || BigInt(m.id) < before).slice(-limit);
+        }
+        return send(200, page.reverse());
+      }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/messages$/))) {
         state.posts.push({ channelId: match[1], body: json, authorization: req.headers.authorization });
         return send(200, { id: id(), channel_id: match[1] });

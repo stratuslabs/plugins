@@ -1,7 +1,7 @@
 process.env.TZ = 'America/New_York';
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { createClaimStore } from '../lib/claims.js';
 import { parseDreamsConfig, parseDuration, parseWindow } from '../lib/config.js';
 import { summarizeFile, summarizeLog } from '../lib/summary.js';
 import { clampBudget, nightAt } from '../lib/window.js';
+import { homeSecretPaths } from '../lib/sandbox.js';
 
 const local = (y, mo, d, h, mi = 0) => new Date(y, mo - 1, d, h, mi);
 const W = parseWindow('23:00-07:00', 'window');
@@ -158,4 +159,14 @@ test('the summary reads a bounded amount of a log the model can grow without lim
   const shrunk = summarizeFile(file, 10 * 1024 * 1024, { limit: one * 3 + 5 });
   assert.equal(shrunk.attempts, 3, 'a shortened log is read from its end, bounded too');
   assert.match(shrunk.notes.join(' '), /shorter/);
+});
+
+test('a home secret that is a link is denied at its target too, since the sandbox checks resolved paths', () => {
+  const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-home-')));
+  const elsewhere = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-keys-')));
+  symlinkSync(elsewhere, path.join(home, '.ssh'));
+  const denied = homeSecretPaths(home);
+  assert.ok(denied.includes(path.join(home, '.ssh')), 'the link as named');
+  assert.ok(denied.includes(elsewhere), 'and where it points');
+  assert.ok(denied.includes(path.join(home, '.aws')), 'missing entries stay denied by name');
 });

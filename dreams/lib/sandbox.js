@@ -61,6 +61,13 @@ export const real = (target) => {
   }
 };
 
+/**
+ * The home secrets to deny, each as named and, when it is a link, where it
+ * points: the sandbox checks resolved paths, so a `~/.ssh` that links into
+ * an allowed read path would otherwise be readable.
+ */
+export const homeSecretPaths = (home) => [...new Set(HOME_SECRETS.map((entry) => path.join(home, entry)).flatMap((target) => [target, real(target)]))];
+
 const subpaths = (list) => list.map((target) => `(subpath ${sbpl(target)})`).join(' ');
 const literals = (list) => list.map((target) => `(literal ${sbpl(target)})`).join(' ');
 

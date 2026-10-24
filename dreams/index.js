@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createClaimStore } from './lib/claims.js';
 import { parseDreamsConfig } from './lib/config.js';
 import { createDreamer } from './lib/dreamer.js';
-import { HOME_SECRETS, findTool, installRoot, real, sandboxAvailable } from './lib/sandbox.js';
+import { findTool, homeSecretPaths, installRoot, real, sandboxAvailable } from './lib/sandbox.js';
 
 /**
  * @stratusagent/plugin-dreams: overnight experiment dreams (roadmap 34, v1).
@@ -99,14 +99,14 @@ export const createPlugin = (config = {}, options = {}) => {
         ...(await context.protectedPaths?.all() ?? []),
         ...(await context.workspaces?.all() ?? []),
       ].map(real);
-      let denyCache = HOME_SECRETS.map((entry) => path.join(home, entry));
+      let denyCache = homeSecretPaths(home);
 
       // Operator config only, and never inside, or around, anything an
       // agent can edit or the host protects: whoever can change
       // evaluate.sh runs code on this host the next night.
       const guard = async (experimentDir) => {
         const fenced = await protectedList();
-        denyCache = [...HOME_SECRETS.map((entry) => path.join(home, entry)), ...fenced];
+        denyCache = [...homeSecretPaths(home), ...fenced];
         const clash = fenced.find((root) => within(experimentDir, root) || within(root, experimentDir));
         if (clash) {
           throw new Error(`${experimentDir} overlaps ${clash}, an agent workspace or a path the host protects. Move the experiment out of it.`);

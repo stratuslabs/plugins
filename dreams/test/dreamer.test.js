@@ -239,3 +239,26 @@ test('a refused path is spent as refused and never spawned; too little window le
   assert.equal(late.runs.length, 0);
   assert.deepEqual(late.claims.night('ava', '2026-10-23'), [], 'not claimed: nothing was spent');
 });
+
+test('a stop during a start that is still checking its path waits for it, and nothing spawns', { timeout: 5000 }, async () => {
+  const exp = experimentDir();
+  let release;
+  const order = [];
+  const { dreamer, runs, claims } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    guard: () => new Promise((resolve) => {
+      release = resolve;
+    }),
+  });
+  const ticking = dreamer.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopped = dreamer.stop().then(() => order.push('stopped'));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, [], 'stop waits for the in-flight start');
+  release();
+  await ticking;
+  await stopped;
+  assert.equal(runs.length, 0, 'nothing spawns after stop');
+  assert.deepEqual(claims.night('ava', '2026-10-23'), [], 'nothing spent: the next daemon runs it');
+});

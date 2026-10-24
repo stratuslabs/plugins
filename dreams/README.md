@@ -43,6 +43,9 @@ contains, any agent workspace or protected path. Whoever can edit
 1. Install the experimenter and Claude Code where the daemon's `PATH` finds
    them, or set `overnightPath` and `claudePath`:
    `pip install overnight-experimenter`. Python 3.10 or newer is required.
+   The experimenter runs the command `claude`, so `claudePath` must name a
+   file called `claude`. To use a wrapper, put it in its own directory under
+   that name.
 2. Create an experiment: `overnight init ~/experiments/judge-prompt`, then
    write its `program.md`, `evaluate.sh` and `workspace/`. Run it once by hand
    to check it scores.

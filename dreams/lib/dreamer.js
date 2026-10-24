@@ -121,6 +121,11 @@ export const createDreamer = ({
       return;
     }
     const apiKey = (await secrets())?.[agentId]?.anthropicApiKey;
+    // The last await before the claim: a stop that came in while this start
+    // was checking its path spends nothing and spawns nothing.
+    if (stopping) {
+      return;
+    }
     const dirs = dirsFor(agentId, experimentDir);
     const env = childEnv(dirs, apiKey);
     const argv = ['run', experimentDir, '--budget', `${budget}s`, '--agent', 'claude', '--direction', experiment.direction,
@@ -196,13 +201,18 @@ export const createDreamer = ({
       if (running.has(agentId)) {
         continue;
       }
-      running.set(agentId, { starting: true });
+      if (stopping) {
+        return;
+      }
+      const placeholder = { starting: undefined };
+      running.set(agentId, placeholder);
+      placeholder.starting = start(agentId, agent);
       try {
-        await start(agentId, agent);
+        await placeholder.starting;
       } catch (error) {
         once(`${agentId}:error:${error.message}`, warn, `dreams: ${agentId}: ${error.message}`);
       } finally {
-        if (running.get(agentId)?.starting) {
+        if (running.get(agentId) === placeholder) {
           running.delete(agentId);
         }
       }
@@ -251,11 +261,18 @@ export const createDreamer = ({
       if (interval) {
         timers.clearInterval(interval);
       }
-      const runs = [...running.values()].filter((run) => run.child);
-      for (const run of runs) {
-        run.terminate('stopped-by-daemon');
-      }
-      await Promise.all(runs.map((run) => run.done));
+      const terminateAll = () => {
+        const runs = [...running.values()].filter((run) => run.child);
+        for (const run of runs) {
+          run.terminate('stopped-by-daemon');
+        }
+        return runs;
+      };
+      const runs = terminateAll();
+      // A start still checking its path finishes before stop returns: it
+      // sees stopping and spawns nothing. Anything it did spawn is stopped too.
+      await Promise.allSettled([...running.values()].filter((run) => run.starting).map((run) => run.starting));
+      await Promise.all([...runs, ...terminateAll()].map((run) => run.done));
     },
   };
 };

@@ -125,3 +125,8 @@ test('claims survive a reload, keep two weeks, and refuse to read a corrupt file
   assert.throws(() => again.night('ava', '2026-10-16'), /cannot read its claims/);
   assert.match(readFileSync(path.join(dir, 'claims', 'ava.json'), 'utf8'), /oops/);
 });
+
+test('claudePath must be named claude: the experimenter runs the literal command claude', () => {
+  assert.throws(() => parseDreamsConfig({ claudePath: '/opt/wrap/claude-wrapper' }), /claudePath must name an executable called "claude"/);
+  assert.equal(parseDreamsConfig({ claudePath: '/opt/homebrew/bin/claude' }).claudePath, '/opt/homebrew/bin/claude');
+});

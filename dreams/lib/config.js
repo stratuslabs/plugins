@@ -87,6 +87,13 @@ const parseExperiment = (raw, where) => {
  *   "readPaths": ["~/.pyenv"], "overnightPath": "/opt/homebrew/bin/overnight", "claudePath": "/opt/homebrew/bin/claude" }
  * ```
  */
+// The experimenter runs the literal command `claude`, found on the PATH
+// the plugin gives it with this file's directory first. Any other name
+// would run whatever `claude` sits beside it, or nothing.
+const claudeAt = (file) => (path.basename(file) === 'claude'
+  ? file
+  : fail(`claudePath must name an executable called "claude" (got ${JSON.stringify(path.basename(file))}): overnight-experimenter runs the command "claude". For a wrapper, put it in its own directory as "claude".`));
+
 export const parseDreamsConfig = (config, { home } = {}) => {
   const raw = config ?? {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -128,6 +135,6 @@ export const parseDreamsConfig = (config, { home } = {}) => {
     agents,
     readPaths,
     ...(raw.overnightPath !== undefined ? { overnightPath: absolute(expand(raw.overnightPath), 'overnightPath') } : {}),
-    ...(raw.claudePath !== undefined ? { claudePath: absolute(expand(raw.claudePath), 'claudePath') } : {}),
+    ...(raw.claudePath !== undefined ? { claudePath: claudeAt(absolute(expand(raw.claudePath), 'claudePath')) } : {}),
   };
 };

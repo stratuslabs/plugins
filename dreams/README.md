@@ -23,14 +23,31 @@ process tree:
 | Read-only | the rest of the experiment directory, including `evaluate.sh` and `program.md`, the system, the install directories of `overnight`, `claude` and node, and your `readPaths` |
 | Unreadable | everything else in your home, and never `~/.ssh`, `~/.aws`, `~/.claude`, `~/.claude.json`, `~/.config/gh`, `~/Library/Keychains`, `~/.stratus`, every agent workspace or any path Stratus protects, even if a read path covers them |
 | Network | on, because `claude` needs the API |
+| Anthropic key | never in the sandbox: see below |
 
 `HOME` and `CLAUDE_CONFIG_DIR` point at that private home, so the
 experimenter's Claude never sees your `~/.claude`. A hook it plants in its own
 settings can reach only its next sandboxed run.
 
+The Anthropic key stays in the daemon. Each run gets a loopback proxy that
+the plugin runs outside the sandbox, on `127.0.0.1` and a random port.
+The run's `claude` gets `ANTHROPIC_BASE_URL` pointing at it, plus a random
+per-run token as its `ANTHROPIC_API_KEY`. The proxy forwards only requests
+that carry that token, only to `api.anthropic.com`, and swaps the token for
+the real key on the way. It closes when the run's whole process group is gone.
+
 **What's still open:** code the model writes into `workspace/` runs during
 `evaluate.sh` with network access, and with read access to whatever the
-sandbox allows. That comes with running agent-written code. Running the daemon
+sandbox allows. It can read the run's token, so while the run lasts it can
+spend tokens on your key through the proxy. It can't read the key itself,
+and the token stops working when the run ends. A spend limit on the key
+caps the cost.
+
+When the experimenter exits but something `evaluate.sh` started is still
+running in its process group, the plugin stops the group (SIGTERM, 30s, then
+SIGKILL) before it records the run as ended. One experiment directory belongs
+to one agent: config that lists it twice is refused at load, and two agents
+never run in the same directory at once, even through a symlink. That comes with running agent-written code. Running the daemon
 as a dedicated low-privilege user would narrow it further, but that's host
 setup, not something this plugin can do.
 
@@ -56,8 +73,9 @@ contains, any agent workspace or protected path. Whoever can edit
    stratus channel set dreams --agent atlas anthropicApiKey
    ```
 
-   With no key stored, `claude` runs with whatever login its private config
-   directory has, which starts out as none.
+   With no key stored, no dream runs and the daemon log says so once. Logging
+   `claude` in instead isn't supported: a login in the run's config directory
+   would be as readable to `evaluate.sh` as a key in its environment.
 4. Enable the plugin in a trusted config:
 
    ```jsonc

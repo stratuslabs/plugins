@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -36,12 +36,41 @@ const fakeTimers = () => {
   };
 };
 
-const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {} }) => {
+// Stands in for the loopback key proxy: records what it was given.
+const fakeProxies = () => {
+  const opened = [];
+  const keyProxy = async ({ apiKey }) => {
+    const proxy = { apiKey, token: `run-token-${opened.length + 1}`, baseUrl: `http://127.0.0.1:${40000 + opened.length}`, closed: false };
+    proxy.close = async () => {
+      proxy.closed = true;
+    };
+    opened.push(proxy);
+    return proxy;
+  };
+  return { opened, keyProxy };
+};
+
+// kill(-pid, 0) throws ESRCH unless the group is in `alive`.
+const groupKill = (alive, kills, stubborn = new Set()) => (target, signal) => {
+  if (signal !== 0) {
+    kills.push([target, signal]);
+  }
+  if (!alive.has(-target)) {
+    throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+  }
+  if (signal === 'SIGKILL' && !stubborn.has(-target)) {
+    alive.delete(-target);
+  }
+};
+
+const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secrets = { ava: { anthropicApiKey: 'sk-test' } }, alive = new Set(), stubborn = new Set() }) => {
   const state = mkdtempSync(path.join(os.tmpdir(), 'dreams-state-'));
   const claims = createClaimStore(() => state);
   const timers = fakeTimers();
   const runs = [];
   const kills = [];
+  const warnings = [];
+  const proxies = fakeProxies();
   let pid = 900_000;
   const spawn = (command, args, options) => {
     const child = new EventEmitter();
@@ -62,13 +91,16 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {} }) =>
     stateDir: () => state,
     spawn,
     guard,
-    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
+    secrets: async () => secrets,
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin:/bin' },
     now: () => now.value,
     timers,
-    kill: (target, signal) => kills.push([target, signal]),
+    sleep: async () => {},
+    keyProxy: proxies.keyProxy,
+    warn: (message) => warnings.push(message),
+    kill: groupKill(alive, kills, stubborn),
   });
-  return { dreamer, claims, runs, kills, timers };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, alive };
 };
 
 const experimentDir = () => {
@@ -104,7 +136,7 @@ test('an experiment is claimed, durably, before its process starts', async () =>
 
 test('the run is sandboxed, uses claude only, has a clean env and a budget cut to the window', async () => {
   const exp = experimentDir();
-  const { dreamer, runs } = fixture({
+  const { dreamer, runs, proxies } = fixture({
     agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '8h', direction: 'minimize', maxExperiments: 3 }] } },
     now: night(3, 0, 24),
   });
@@ -116,7 +148,14 @@ test('the run is sandboxed, uses claude only, has a clean env and a budget cut t
     '/opt/x/bin/overnight', 'run', exp, '--budget', `${4 * 3600 - 15 * 60}s`, '--agent', 'claude', '--direction', 'minimize', '--max-experiments', '3',
   ]);
   assert.equal(run.options.detached, true);
-  assert.deepEqual(Object.keys(run.options.env).sort(), ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', 'HOME', 'LANG', 'PATH', 'TMPDIR']);
+  assert.deepEqual(Object.keys(run.options.env).sort(), ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR', 'HOME', 'LANG', 'PATH', 'TMPDIR']);
+  // The real key stays in the daemon: the run gets a loopback proxy and a
+  // token for it that is worthless anywhere else.
+  assert.equal(proxies.opened.length, 1);
+  assert.equal(proxies.opened[0].apiKey, 'sk-test');
+  assert.equal(run.options.env.ANTHROPIC_BASE_URL, proxies.opened[0].baseUrl);
+  assert.equal(run.options.env.ANTHROPIC_API_KEY, proxies.opened[0].token);
+  assert.ok(!Object.values(run.options.env).includes('sk-test'), 'the real key is nowhere in the env');
   assert.ok(run.options.env.CLAUDE_CONFIG_DIR.startsWith(run.options.env.HOME));
   assert.notEqual(run.options.env.HOME, os.homedir());
 });
@@ -168,11 +207,12 @@ test('a daemon that died mid-run moves on to the next experiment and never repla
       return child;
     },
     guard: async () => {},
-    secrets: async () => ({}),
+    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
+    keyProxy: fakeProxies().keyProxy,
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
     now: () => now.value,
     timers: fakeTimers(),
-    kill: () => {},
+    kill: groupKill(new Set(), []),
   });
   await second.recover();
   await second.tick();
@@ -181,7 +221,6 @@ test('a daemon that died mid-run moves on to the next experiment and never repla
   const [spent] = createClaimStore(() => state).night('ava', '2026-10-23');
   assert.equal(spent.result.status, 'interrupted');
   assert.equal(spent.result.summary.attempts, 1, 'and what it got done is still summarized');
-  assert.ok(!('ANTHROPIC_API_KEY' in runs[0].options.env), 'no key stored means none passed');
 });
 
 test('the window end stops the process group: SIGTERM, then SIGKILL after the grace', async () => {
@@ -286,11 +325,12 @@ test('a reordered config after a restart still runs each experiment at most once
       return child;
     },
     guard: async () => {},
-    secrets: async () => ({}),
+    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
+    keyProxy: fakeProxies().keyProxy,
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
     now: () => now.value,
     timers: fakeTimers(),
-    kill: () => {},
+    kill: groupKill(new Set(), []),
   });
   await second.tick();
   assert.equal(runs.length, 1);
@@ -321,7 +361,8 @@ test('recovery waits for a leftover process group to exit, with SIGKILL after th
       return child;
     },
     guard: async () => {},
-    secrets: async () => ({}),
+    secrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }),
+    keyProxy: fakeProxies().keyProxy,
     tools: { overnight: '/opt/x/bin/overnight', read: [], deny: () => [], searchPath: '/usr/bin' },
     now: () => now.value,
     timers: fakeTimers(),
@@ -343,4 +384,97 @@ test('recovery waits for a leftover process group to exit, with SIGKILL after th
   assert.deepEqual(kills, [[-leftover, 'SIGTERM'], [-leftover, 'SIGKILL']], 'it ignored SIGTERM, so it got SIGKILL');
   assert.equal(runs.length, 1);
   assert.equal(runs[0].aliveAtSpawn, false, 'the next experiment starts only after the group is gone');
+});
+
+test('the key proxy closes when the run ends', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, proxies } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+  });
+  await dreamer.tick();
+  assert.equal(proxies.opened[0].closed, false, 'open while the run is');
+  await exit(runs[0]);
+  assert.equal(proxies.opened[0].closed, true);
+});
+
+test('with no key stored nothing runs and nothing is spent: login mode is not supported', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, claims, proxies, warnings } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    secrets: {},
+  });
+  await dreamer.tick();
+  await dreamer.tick();
+  assert.equal(runs.length, 0);
+  assert.equal(proxies.opened.length, 0);
+  assert.deepEqual(claims.night('ava', '2026-10-23'), []);
+  assert.equal(warnings.length, 1, 'said once');
+  assert.match(warnings[0], /stratus channel set dreams --agent ava anthropicApiKey/);
+});
+
+test('a leader that exits leaving its group alive: the group is stopped before the run ends', async () => {
+  const exp = experimentDir();
+  const alive = new Set();
+  const { dreamer, runs, kills, claims, proxies } = fixture({
+    agents: { ava: { window: '23:00-07:00', maxPerNight: 1, experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    alive,
+  });
+  await dreamer.tick();
+  const pid = runs[0].child.pid;
+  alive.add(pid);
+  // evaluate.sh left something in the background; the leader exits.
+  await exit(runs[0], 0);
+  assert.deepEqual(kills, [[-pid, 'SIGTERM'], [-pid, 'SIGKILL']], 'TERM, the grace, then KILL');
+  assert.equal(alive.has(pid), false);
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result.status, 'finished');
+  assert.equal(entry.result.strays, 'stopped');
+  assert.equal(proxies.opened[0].closed, true, 'the proxy outlives every member of the group');
+});
+
+test('a group that survives SIGKILL after its leader exits blocks that agent until it is gone', async () => {
+  const [a, b] = [experimentDir(), experimentDir()];
+  const alive = new Set();
+  const stubborn = new Set();
+  const { dreamer, runs, claims } = fixture({
+    agents: { ava: { window: '23:00-07:00', maxPerNight: 2, experiments: [{ path: a, budget: '1h' }, { path: b, budget: '1h' }] } },
+    now: night(23, 0),
+    alive,
+    stubborn,
+  });
+  await dreamer.tick();
+  const pid = runs[0].child.pid;
+  // A member SIGKILL cannot end yet (say, stuck in uninterruptible I/O).
+  alive.add(pid);
+  stubborn.add(pid);
+  await exit(runs[0], 0);
+  assert.equal(claims.night('ava', '2026-10-23')[0].result.strays, 'survived');
+  await dreamer.tick();
+  assert.equal(runs.length, 1, 'nothing new starts while the group lives');
+  stubborn.clear();
+  alive.delete(pid);
+  await dreamer.tick();
+  assert.equal(runs.length, 2, 'and the next one starts once it is gone');
+});
+
+test('two agents never run the same experiment directory at once, even through a symlink', async () => {
+  const exp = experimentDir();
+  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
+  symlinkSync(exp, link);
+  const { dreamer, runs } = fixture({
+    agents: {
+      ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
+      bo: { window: '23:00-07:00', experiments: [{ path: link, budget: '1h' }] },
+    },
+    now: night(23, 0),
+    secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
+  });
+  await dreamer.tick();
+  await dreamer.tick();
+  assert.equal(runs.length, 1, 'the second agent waits for the path');
+  await exit(runs[0]);
+  assert.equal(runs.length, 2, 'and runs once it is free');
 });

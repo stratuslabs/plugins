@@ -25,7 +25,7 @@ const context = ({ workspaces = [], protectedPaths = [] } = {}) => {
     registered,
     state,
     tools: { register: (entry) => registered.tools.push(entry) },
-    channels: { register: (entry) => registered.channels.push(entry), transportSecrets: async () => ({}) },
+    channels: { register: (entry) => registered.channels.push(entry), transportSecrets: async () => ({ ava: { anthropicApiKey: 'sk-test' } }) },
     stateDirectory: { prepare: () => state },
     workspaces: { all: async () => workspaces },
     protectedPaths: { all: async () => protectedPaths },
@@ -35,7 +35,18 @@ const context = ({ workspaces = [], protectedPaths = [] } = {}) => {
 };
 
 const children = new Map();
-const killFake = (pid, signal) => setImmediate(() => children.get(-pid)?.emit('exit', null, signal));
+// A group is gone once its leader has exited: kill(-pid, 0) says so.
+const exited = new Set();
+const killFake = (pid, signal) => {
+  if (signal === 0) {
+    if (exited.has(-pid) || !children.has(-pid)) {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    }
+    return;
+  }
+  exited.add(-pid);
+  setImmediate(() => children.get(-pid)?.emit('exit', null, signal));
+};
 
 const fakeSpawn = (calls, { sandbox = true } = {}) => (command, args, options) => {
   const child = new EventEmitter();

@@ -104,6 +104,8 @@ export const parseDreamsConfig = (config, { home } = {}) => {
     fail('"agents" maps an agent id to its dream window and experiments.');
   }
   const agents = new Map();
+  // Two runs in one directory would share workspace/ and experiments.jsonl.
+  const owner = new Map();
   for (const [agentId, block] of Object.entries(agentsRaw)) {
     const where = `agents.${agentId}`;
     if (!AGENT_ID.test(agentId)) {
@@ -122,11 +124,17 @@ export const parseDreamsConfig = (config, { home } = {}) => {
     if (block.prompts !== undefined || block.dreams !== undefined) {
       fail(`${where}: prompt dreams are not in this version; only "experiments" run.`);
     }
-    agents.set(agentId, {
-      window: parseWindow(block.window, `${where}.window`),
-      maxPerNight,
-      experiments: block.experiments.map((experiment, index) => parseExperiment(experiment, `${where}.experiments[${index}]`)),
-    });
+    const experiments = block.experiments.map((experiment, index) => parseExperiment(experiment, `${where}.experiments[${index}]`));
+    for (const { path: dir } of experiments) {
+      const other = owner.get(dir);
+      if (other !== undefined) {
+        fail(other === agentId
+          ? `${dir} is listed twice for ${agentId}.`
+          : `${dir} is listed for both ${other} and ${agentId}: an experiment directory belongs to one agent.`);
+      }
+      owner.set(dir, agentId);
+    }
+    agents.set(agentId, { window: parseWindow(block.window, `${where}.window`), maxPerNight, experiments });
   }
   const expand = (value) => (home && (value === '~' || value.startsWith('~/')) ? path.join(home, value.slice(1)) : value);
   const readPaths = (Array.isArray(raw.readPaths) ? raw.readPaths : raw.readPaths === undefined ? [] : fail('"readPaths" is a list of paths.'))

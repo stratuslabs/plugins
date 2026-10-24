@@ -2,14 +2,16 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { startKeyProxy } from './keyproxy.js';
 import { clampBudget, nightAt } from './window.js';
 import { SANDBOX_EXEC, experimentProfile, real } from './sandbox.js';
 import { summarizeFile } from './summary.js';
 
 /**
  * Runs each agent's experiment dreams in its window: at most `maxPerNight`
- * a night, in config order, one at a time per agent, each claimed durably
- * before its process starts and stopped at the window's end.
+ * a night, in config order, one at a time per agent and per experiment
+ * directory, each claimed durably before its process starts and stopped,
+ * with its whole process group, at the window's end.
  */
 
 export const TICK_MS = 60_000;
@@ -39,6 +41,7 @@ export const createDreamer = ({
   timers = { setTimeout, clearTimeout, setInterval, clearInterval },
   kill = (pid, signal) => process.kill(pid, signal),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  keyProxy = startKeyProxy,
   // Is this pid still the experimenter we started on this path?
   owns = (pid, experimentPath) => {
     const ps = spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
@@ -68,9 +71,22 @@ export const createDreamer = ({
     }
     return !groupAlive(pid);
   };
-  // Leftover groups from a previous daemon that would not die: the agent
-  // starts nothing while one is alive, so two runs never share a path.
+  // SIGTERM, the grace, SIGKILL, the grace: true once the group is gone.
+  const stopGroup = async (pid) => {
+    killGroup(pid, 'SIGTERM');
+    if (await waitGone(pid, KILL_GRACE_MS)) {
+      return true;
+    }
+    killGroup(pid, 'SIGKILL');
+    return waitGone(pid, KILL_GRACE_MS);
+  };
+  // Groups that would not die, from a previous daemon or left behind by a
+  // leader that exited: the agent starts nothing while one is alive, and
+  // its experiment directory stays busy.
   const lingering = new Map();
+  // Experiment directories (real paths) with a run in them, across agents:
+  // two runs in one directory would share workspace/ and experiments.jsonl.
+  const busy = new Set();
   let recovering = Promise.resolve();
   const running = new Map();
   const said = new Set();
@@ -94,14 +110,16 @@ export const createDreamer = ({
     return dirs;
   };
 
-  const childEnv = (dirs, apiKey) => ({
+  // ANTHROPIC_API_KEY here is the run's proxy token, never the real key.
+  const childEnv = (dirs, proxy) => ({
     PATH: tools.searchPath,
     HOME: dirs.home,
     TMPDIR: dirs.tmp,
     CLAUDE_CONFIG_DIR: path.join(dirs.home, '.claude'),
     LANG: process.env.LANG ?? 'en_US.UTF-8',
     ...(tools.pythonUserBase ? { PYTHONUSERBASE: tools.pythonUserBase } : {}),
-    ...(apiKey ? { ANTHROPIC_API_KEY: apiKey } : {}),
+    ANTHROPIC_BASE_URL: proxy.baseUrl,
+    ANTHROPIC_API_KEY: proxy.token,
   });
 
   const sandboxed = (experimentDir, dirs, argv) => [
@@ -143,22 +161,47 @@ export const createDreamer = ({
       return;
     }
     const experimentDir = real(experiment.path);
+    if (busy.has(experimentDir)) {
+      // Another agent is running it, or left a group behind in it: wait.
+      return;
+    }
+    busy.add(experimentDir);
+    let handedOff = false;
+    try {
+      handedOff = await launch(agentId, window, index, experiment, experimentDir, budget);
+    } finally {
+      if (!handedOff) {
+        busy.delete(experimentDir);
+      }
+    }
+  };
+
+  /** True once a process is running and owns the directory's busy mark. */
+  const launch = async (agentId, window, index, experiment, experimentDir, budget) => {
+    const apiKey = (await secrets())?.[agentId]?.anthropicApiKey;
+    if (!apiKey) {
+      // Login mode is refused: a login in the run's config directory is as
+      // readable to evaluate.sh as a key in its environment.
+      once(`${agentId}:nokey`, warn, `dreams: ${agentId}: no Anthropic key is stored for this agent's dreams, so none run. Store one with: stratus channel set dreams --agent ${agentId} anthropicApiKey`);
+      return false;
+    }
     const entry = { index, path: experimentDir, offset: sizeOf(path.join(experimentDir, 'experiments.jsonl')), budgetSeconds: budget, claimedAt: now().toISOString() };
     try {
       await guard(experimentDir);
     } catch (error) {
       claims.claim(agentId, window.night, { ...entry, result: { status: 'refused', reason: error.message } });
       warn(`dreams: ${agentId} night ${window.night}: experiment ${index + 1} refused: ${error.message}`);
-      return;
+      return false;
     }
-    const apiKey = (await secrets())?.[agentId]?.anthropicApiKey;
+    const proxy = await keyProxy({ apiKey });
     // The last await before the claim: a stop that came in while this start
     // was checking its path spends nothing and spawns nothing.
     if (stopping) {
-      return;
+      await proxy.close();
+      return false;
     }
     const dirs = dirsFor(agentId, experimentDir);
-    const env = childEnv(dirs, apiKey);
+    const env = childEnv(dirs, proxy);
     const argv = ['run', experimentDir, '--budget', `${budget}s`, '--agent', 'claude', '--direction', experiment.direction,
       ...(experiment.maxExperiments ? ['--max-experiments', String(experiment.maxExperiments)] : [])];
     const [command, args] = sandboxed(experimentDir, dirs, argv);
@@ -172,6 +215,10 @@ export const createDreamer = ({
     let child;
     try {
       child = spawn(command, args, { cwd: experimentDir, env, detached: true, stdio: ['ignore', out, out] });
+    } catch (error) {
+      await proxy.close();
+      claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
+      throw error;
     } finally {
       closeSync(out);
     }
@@ -200,6 +247,20 @@ export const createDreamer = ({
         if (run.killTimer) {
           timers.clearTimeout(run.killTimer);
         }
+        // The leader is gone, but code evaluate.sh started may not be: the
+        // run, and its proxy token, end only when the whole group has.
+        let strays;
+        if (!error && groupAlive(child.pid)) {
+          strays = await stopGroup(child.pid) ? 'stopped' : 'survived';
+          if (strays === 'survived') {
+            lingering.set(agentId, { pid: child.pid, path: experimentDir });
+            warn(`dreams: ${agentId}: process group ${child.pid} outlived its experimenter and survived SIGKILL; nothing starts for this agent or in ${experimentDir} until it is gone.`);
+          }
+        }
+        await proxy.close();
+        if (strays !== 'survived') {
+          busy.delete(experimentDir);
+        }
         const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
         const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
         claims.finish(agentId, window.night, index, {
@@ -207,6 +268,7 @@ export const createDreamer = ({
           ...(exitCode !== null && exitCode !== undefined ? { exitCode } : {}),
           ...(signal ? { signal } : {}),
           ...(error ? { error: error.message } : {}),
+          ...(strays ? { strays } : {}),
           endedAt: now().toISOString(),
           log: logFile,
           ...(reportPath ? { report: reportPath } : {}),
@@ -222,6 +284,7 @@ export const createDreamer = ({
       child.once('error', (error) => void finish(null, null, error));
       child.once('exit', (code, signal) => void finish(code, signal));
     });
+    return true;
   };
 
   const tick = async () => {
@@ -235,10 +298,11 @@ export const createDreamer = ({
       }
       const leftover = lingering.get(agentId);
       if (leftover !== undefined) {
-        if (groupAlive(leftover)) {
+        if (groupAlive(leftover.pid)) {
           continue;
         }
         lingering.delete(agentId);
+        busy.delete(leftover.path);
       }
       if (stopping) {
         return;
@@ -269,15 +333,10 @@ export const createDreamer = ({
         for (const entry of entries.filter((candidate) => !candidate.result)) {
           // The same stop as at the window's end: SIGTERM, the grace, then
           // SIGKILL, and wait for the group to be gone.
-          if (entry.pid && owns(entry.pid, entry.path)) {
-            killGroup(entry.pid, 'SIGTERM');
-            if (!await waitGone(entry.pid, KILL_GRACE_MS)) {
-              killGroup(entry.pid, 'SIGKILL');
-              if (!await waitGone(entry.pid, KILL_GRACE_MS)) {
-                lingering.set(agentId, entry.pid);
-                warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent until it is gone.`);
-              }
-            }
+          if (entry.pid && owns(entry.pid, entry.path) && !await stopGroup(entry.pid)) {
+            lingering.set(agentId, { pid: entry.pid, path: entry.path });
+            busy.add(entry.path);
+            warn(`dreams: ${agentId}: process group ${entry.pid} from a previous daemon survived SIGKILL; nothing starts for this agent or in ${entry.path} until it is gone.`);
           }
           claims.finish(agentId, night, entry.index, {
             status: 'interrupted',

@@ -130,3 +130,15 @@ test('claudePath must be named claude: the experimenter runs the literal command
   assert.throws(() => parseDreamsConfig({ claudePath: '/opt/wrap/claude-wrapper' }), /claudePath must name an executable called "claude"/);
   assert.equal(parseDreamsConfig({ claudePath: '/opt/homebrew/bin/claude' }).claudePath, '/opt/homebrew/bin/claude');
 });
+
+test('config: one experiment directory belongs to one agent, once', () => {
+  const one = { window: '23:00-07:00', experiments: [{ path: '/x/exp' }] };
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: one, bo: { window: '01:00-05:00', experiments: [{ path: '/x/other/../exp/' }] } } }),
+    /\/x\/exp is listed for both ava and bo/,
+  );
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: '/x/exp' }, { path: '/x/exp' }] } } }),
+    /\/x\/exp is listed twice for ava/,
+  );
+});

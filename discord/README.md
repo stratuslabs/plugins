@@ -77,4 +77,4 @@ Attachments. The package stays private until then.
 
 If the daemon stops while Discord is unreachable, `@discordjs/ws` 2.0.4
 keeps retrying the connection after `destroy()`, which can keep the process
-from exiting on its own. Being looked at.
+from exiting on its own. Tracked in stratuslabs/plugins#20.

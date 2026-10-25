@@ -1,4 +1,22 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
+
+// The real path of the longest part of `target` that exists, with the rest
+// as written: a directory not made yet, under a linked parent, still keys
+// to where it will be.
+const realAsFarAsExists = (target) => {
+  const rest = [];
+  for (let head = path.resolve(target); ; head = path.dirname(head)) {
+    try {
+      return path.join(realpathSync(head), ...rest);
+    } catch {
+      if (path.dirname(head) === head) {
+        return path.resolve(target);
+      }
+      rest.unshift(path.basename(head));
+    }
+  }
+};
 
 /**
  * The plugin's config block, checked once at load. Everything here is
@@ -125,12 +143,16 @@ export const parseDreamsConfig = (config, { home } = {}) => {
       fail(`${where}: prompt dreams are not in this version; only "experiments" run.`);
     }
     const experiments = block.experiments.map((experiment, index) => parseExperiment(experiment, `${where}.experiments[${index}]`));
-    for (const { path: dir } of experiments) {
+    // Keyed by real path, as the runs are: two links to one directory are
+    // one directory.
+    for (const { path: configured } of experiments) {
+      const dir = realAsFarAsExists(configured);
+      const named = dir === configured ? dir : `${dir} (as ${configured})`;
       const other = owner.get(dir);
       if (other !== undefined) {
         fail(other === agentId
-          ? `${dir} is listed twice for ${agentId}.`
-          : `${dir} is listed for both ${other} and ${agentId}: an experiment directory belongs to one agent.`);
+          ? `${named} is listed twice for ${agentId}.`
+          : `${named} is listed for both ${other} and ${agentId}: an experiment directory belongs to one agent.`);
       }
       owner.set(dir, agentId);
     }

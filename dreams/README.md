@@ -50,7 +50,7 @@ killed, the pipe closes and the tether stops the run's whole process group
 `evaluate.sh` started is still running in its group, the tether stops that
 too before the run is recorded as ended. Code that leaves its process group
 on purpose (`setsid`) escapes this; the sandbox still applies to it. One experiment directory belongs
-to one agent: config that lists it twice is refused at load, and two agents
+to one agent: config that lists it twice, even by two paths through a symlink, is refused at load, and two agents
 never run in the same directory at once, even through a symlink. That comes with running agent-written code. Running the daemon
 as a dedicated low-privilege user would narrow it further, but that's host
 setup, not something this plugin can do.

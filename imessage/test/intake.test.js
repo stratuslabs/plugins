@@ -394,6 +394,23 @@ test('pending lists what was handed over and not yet settled, and settling clear
   assert.equal(store.load('ava').record.watermark, b.rowid);
 });
 
+test('a carried message older than the replay cap is still handed over: it was read before the replacement', async (t) => {
+  const { fixture, store, make } = setup(t);
+  // Unanswered when chat.db was replaced, and the daemon then stayed down
+  // for longer than the 24 h cap.
+  const sent = new Date(Date.now() - 30 * 3_600_000);
+  const carried = fixture.received(PHONE, { date: sent });
+  const stale = fixture.received(PHONE, { date: new Date(sent.getTime() + 1000) });
+  store.save('ava', { ...store.load('ava').record, historyThrough: sent.getTime() - 1, carry: [carried.guid] });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [carried.rowid], 'the carried one is answered; a never-read one that old is still capped');
+  assert.ok(stale.rowid > carried.rowid);
+  assert.deepEqual(store.load('ava').record.carry, []);
+});
+
 test('a carried message dated before the history date is still handed over, then leaves the carry', async (t) => {
   const { fixture, store, make } = setup(t);
   const historyThrough = Date.now() - 60_000;

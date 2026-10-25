@@ -24,7 +24,8 @@ import { advance, isSettled, markSettled, observe, replacementOf } from './water
  * handed over. A row first read more than `replayCapMs` after it was sent
  * is skipped, counted, not answered: after a daemon was off for days, or
  * Apple's push service replayed a backlog. A row a running channel already
- * read is never capped, however long it was held.
+ * read, or one carried over from a replaced chat.db, is never capped,
+ * however long it was held.
  *
  * A row that is poison (its body can't be decoded) or incomplete (nothing
  * in it yet) holds the rows behind it and is read again on each scan, up to
@@ -176,12 +177,15 @@ export const createIntake = ({
           continue;
         }
         stalled = null;
-        if (history !== null && result.date.getTime() <= history && !(record.carry ?? []).includes(result.guid)) {
+        // Carried from a replaced chat.db: read there and never answered,
+        // so neither history nor a first read, however old it is now.
+        const carried = (record.carry ?? []).includes(result.guid);
+        if (history !== null && result.date.getTime() <= history && !carried) {
           skippedHistory += 1;
           settle(entry, 'settled');
           continue;
         }
-        if (capped(result, row.rowid > observedBefore)) {
+        if (capped(result, row.rowid > observedBefore && !carried)) {
           skippedOld += 1;
           settle(entry, 'settled');
           continue;

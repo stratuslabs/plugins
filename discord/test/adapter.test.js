@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createPlugin } from '../index.js';
 import { connectBot } from '../lib/gateway.js';
+import { png } from './png.js';
 import { BOT, fakeDiscord } from './fake-discord.js';
 
 const until = async (check, what) => {
@@ -107,7 +108,7 @@ const config = {
 const setUp = async (t, { pluginConfig = config, secrets = { ava: { botToken: TOKEN } }, refuse, options = {}, warns = [] } = {}) => {
   const discord = await fakeDiscord(refuse ? { closeOnIdentify: refuse } : {});
   const registered = [];
-  const plugin = createPlugin(pluginConfig, { api: discord.api, drainTimeoutMs: 200, ...options });
+  const plugin = createPlugin(pluginConfig, { api: discord.api, cdnHosts: [discord.cdn], drainTimeoutMs: 200, ...options });
   await plugin.setup({
     bus: undefined,
     tools: undefined,
@@ -454,4 +455,76 @@ test('an attempt that hangs is given up after the connect timeout and tried agai
   assert.equal(signals[1].aborted, true, 'stop abandons the attempt underway');
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(signals.length, 2, 'and nothing is tried after stop');
+});
+
+const file = (discord, name, bytes, fields = {}) => {
+  discord.state.files[name] = bytes;
+  return { id: `9${name.length}`, filename: name, size: bytes.length, url: `${discord.cdn}/cdn/${name}`, ...fields };
+};
+
+test('an image and a text file in a DM reach the turn: the image on the dispatch, the text in the message', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const image = png(2, 2);
+  discord.dispatch('MESSAGE_CREATE', message({
+    channel_id: DM,
+    content: 'what do you make of these?',
+    attachments: [
+      file(discord, 'shot.png', image, { content_type: 'image/png', width: 2, height: 2 }),
+      file(discord, 'notes.txt', Buffer.from('line one\n'), { content_type: 'text/plain; charset=utf-8' }),
+      file(discord, 'report.pdf', Buffer.from('%PDF'), { content_type: 'application/pdf' }),
+    ],
+  }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  const { input } = gateway.turns[0];
+  assert.deepEqual(input.images, [{ mediaType: 'image/png', data: image.toString('base64'), name: 'shot.png' }]);
+  assert.equal(input.userMessage, 'what do you make of these?\n[Attached: notes.txt. Its contents follow.]\nline one\n[End of notes.txt]\n[Attached, name only: report.pdf (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]');
+  assert.deepEqual(discord.state.downloads.map((d) => d.name).sort(), ['notes.txt', 'shot.png']);
+  assert.ok(discord.state.downloads.every((d) => d.authorization === undefined), 'the bot token never goes to the CDN');
+});
+
+test('an image with nothing said is still a question; a file nothing here opens, with nothing said, is not', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000010', channel_id: DM, content: '', attachments: [file(discord, 'x.zip', Buffer.from('PK'), { content_type: 'application/zip' })] }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000011', channel_id: DM, content: '', attachments: [file(discord, 'y.png', png(1, 1), { content_type: 'image/png' })] }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(gateway.turns.length, 1);
+  assert.equal(gateway.turns[0].input.idempotencyKey, 'discord:600000000000000011');
+  assert.equal(gateway.turns[0].input.userMessage, '');
+  assert.equal(gateway.turns[0].input.images.length, 1);
+});
+
+test('in a guild channel an image-only message says who sent it', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({
+    guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}>`, mentions: [{ id: BOT }],
+    attachments: [file(discord, 'z.png', png(1, 1), { content_type: 'image/png' })],
+  }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  assert.equal(gateway.turns[0].input.userMessage, 'Dylan:');
+});
+
+test('a message admission refuses has its attachments left undownloaded', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, author: { id: STRANGER, username: 'sam' }, attachments: [file(discord, 's.png', png(1, 1), { content_type: 'image/png' })] }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000012', channel_id: DM, content: 'after' }));
+  await until(() => gateway.turns.length === 1, 'the later message');
+  assert.deepEqual(discord.state.downloads, []);
+});
+
+test('stopping while a message\'s attachments download leaves it unanswered, for the next start', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  const adapter = registered[0].adapter;
+  await adapter.start(gateway);
+  discord.state.fileDelayMs = 3000;
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, content: 'look', attachments: [file(discord, 'slow.png', png(1, 1), { content_type: 'image/png' })] }));
+  await until(() => discord.state.downloads.length === 1, 'the download to start');
+  const started = Date.now();
+  await adapter.stop();
+  assert.ok(Date.now() - started < 1000, 'stop does not wait out the download');
+  assert.equal(gateway.turns.length, 0, 'not answered with the image missing');
 });

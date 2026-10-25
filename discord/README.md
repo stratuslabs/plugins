@@ -69,9 +69,19 @@ either place fails the load with its name.
   kept. Only conversations the agent has answered in are read, back at most
   a day and 200 messages each.
 
+- Attachments sent to the agent: an image the model can take (PNG, JPEG,
+  GIF, WebP, within core's size, pixel and count limits) goes with the
+  turn as an image, and a small UTF-8 text file (100 KB each, 200 KB a
+  message) is read into it. Anything else is named, with why it wasn't
+  read, so the agent says it has only the name. Files are fetched only once
+  a message is admitted, only from Discord's CDN over https, without the
+  bot token, within 30s a message.
+
 ## Not built yet
 
-Attachments. The package stays private until then.
+Files the agent sends (uploads), and saving a large text file to the
+agent's workspace instead of naming it. The package stays private until
+uploads are in.
 
 ## Connecting
 

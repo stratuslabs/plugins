@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { admit } from './admission.js';
 import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId } from './approvals.js';
+import { CDN_HOSTS, readAttachments, textBlocks, unreadNote } from './attachments.js';
 import { connectBot, isRetryable } from './gateway.js';
 import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
@@ -45,7 +46,7 @@ export const BACKFILL_LIMIT = 200;
 export const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000, 300_000];
 export const CONNECT_TIMEOUT_MS = 60_000;
 
-export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, stateDirectory, positionsWriteDelayMs }) => {
+export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, cdnHosts = CDN_HOSTS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
   const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
@@ -312,8 +313,16 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
 
   const answer = async (agentId, agent, bot, message, raw, verdict) => {
     const text = withoutMention(message.content, bot.botId);
-    if (text.length === 0) {
-      // Attachments aren't read yet, and a bare mention asks nothing.
+    // Read only once admitted: nothing is downloaded for a message the
+    // agent won't answer.
+    const { images, texts, unread } = await readAttachments(raw.attachments, { cdnHosts, signal: stopController.signal, warn });
+    if (stopping) {
+      // Stopped mid-download: held, so the next start answers it whole.
+      return 'kept';
+    }
+    if (text.length === 0 && images.length === 0 && texts.length === 0) {
+      // A bare mention asks nothing, and nor does a file nothing here can
+      // open with nothing said. An image or a text file alone is a question.
       return;
     }
     const route = routeFor(message);
@@ -351,7 +360,8 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       // overwrites, and a wrong description is worse than none.
       ...(direct ? { conversation: { kind: 'direct', ...(senderTrust === 'user' ? { with: author } : {}) } } : {}),
     };
-    const userMessage = direct ? text : `${author}: ${text}`;
+    const spoken = direct ? text : (text.length > 0 ? `${author}: ${text}` : `${author}:`);
+    const userMessage = `${spoken}${textBlocks(texts)}${unreadNote(unread)}`;
     const idempotencyKey = `discord:${message.id}`;
 
     let first = true;
@@ -382,6 +392,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         sessionId,
         agentId,
         userMessage,
+        ...(images.length > 0 ? { images } : {}),
         metadata,
         turnId: entry.turnId,
         signal: entry.controller.signal,

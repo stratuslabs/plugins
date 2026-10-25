@@ -14,7 +14,7 @@ export const BOT = '111111111111111111';
 export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gatewayUrl, port: listenPort = 0 } = {}) => {
   // `channels` (id -> channel object) and `history` (channel id -> its
   // messages, any order) are the test's to fill; GETs read them.
-  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], gets: [], channels: {}, history: {}, seq: 0 };
+  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], gets: [], channels: {}, history: {}, files: {}, downloads: [], seq: 0 };
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
@@ -28,6 +28,19 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(value));
       };
+      // The CDN: `files` (name -> Buffer) is the test's to fill.
+      if (req.method === 'GET' && req.url.startsWith('/cdn/')) {
+        const name = req.url.slice('/cdn/'.length);
+        state.downloads.push({ name, authorization: req.headers.authorization });
+        const file = state.files[name];
+        if (!file) {
+          res.writeHead(404);
+          return res.end();
+        }
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        // `fileDelayMs` holds the body back, for a slow download.
+        return state.fileDelayMs ? void setTimeout(() => res.end(file), state.fileDelayMs).unref() : res.end(file);
+      }
       const url = req.url.replace(/^\/api\/v10/, '');
       if (req.method === 'GET' && url === '/gateway/bot') {
         const answer = () => send(200, { url: gatewayUrl ?? `ws://127.0.0.1:${port}/gw`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 } });
@@ -128,6 +141,8 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
   const port = server.address().port;
   return {
     api: `http://127.0.0.1:${port}/api`,
+    /** Its CDN's origin, for `cdnHosts`; files are at `${cdn}/cdn/<name>`. */
+    cdn: `http://127.0.0.1:${port}`,
     state,
     dispatch(t, d) {
       state.seq += 1;

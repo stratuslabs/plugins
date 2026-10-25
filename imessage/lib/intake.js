@@ -2,7 +2,7 @@ import { watch as watchDirectory } from 'node:fs';
 import path from 'node:path';
 
 import { classifyRow } from './chatdb.js';
-import { advance, observe, replacementOf } from './watermark.js';
+import { advance, isSettled, markSettled, observe, replacementOf } from './watermark.js';
 
 /**
  * Reads new rows from chat.db for one agent and hands each received
@@ -17,7 +17,8 @@ import { advance, observe, replacementOf } from './watermark.js';
  * The watermark moves only through the longest run of settled rows from
  * where it stands: a message still being answered holds it, so a restart
  * in the middle of a turn reads that message again. A repeat is then the
- * gateway's to tell apart by the dispatch's idempotency key.
+ * gateway's to tell apart by the dispatch's idempotency key. Messages
+ * settled behind it are listed in the record and not handed over again.
  *
  * Rows are recorded as observed (`observedThrough`) before any of them is
  * handed over. A row first read more than `replayCapMs` after it was sent
@@ -81,6 +82,9 @@ export const createIntake = ({
     while (open.length > 0 && open[0].outcome === 'settled') {
       next = advance(next, open.shift());
     }
+    if (outcome === 'settled' && open.includes(entry)) {
+      next = markSettled(next, entry.rowid);
+    }
     if (next !== record) {
       persist(next);
     }
@@ -126,7 +130,7 @@ export const createIntake = ({
         const entry = { rowid: row.rowid, guid: row.guid, outcome: undefined };
         open.push(entry);
         readThrough = row.rowid;
-        if (result.kind !== 'message') {
+        if (result.kind !== 'message' || isSettled(record, row.rowid)) {
           settle(entry, 'settled');
           continue;
         }

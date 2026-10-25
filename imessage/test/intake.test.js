@@ -85,7 +85,7 @@ test('the watermark stays below a message still being answered, and catches up o
   assert.equal(store.load('ava').record.watermark, b.rowid);
 });
 
-test('a kept message (daemon stopping) holds the watermark, and the next start reads it again', async (t) => {
+test('a kept message (daemon stopping) holds the watermark, and the next start reads it again, not what was answered behind it', async (t) => {
   const { fixture, store, make } = setup(t);
   const a = fixture.received(PHONE);
   const b = fixture.received(PHONE);
@@ -99,7 +99,7 @@ test('a kept message (daemon stopping) holds the watermark, and the next start r
   const second = make(async (message) => { seen.push(message.rowid); return 'settled'; });
   await second.scan();
   await second.idle();
-  assert.deepEqual(seen, [a.rowid, b.rowid]);
+  assert.deepEqual(seen, [a.rowid]);
   assert.equal(store.load('ava').record.watermark, b.rowid);
 });
 
@@ -264,4 +264,27 @@ test('a change to chat.db wakes the scan before the interval would', async (t) =
   const row = fixture.received(PHONE);
   const timeout = new Promise((resolve) => setTimeout(() => resolve('timeout'), 5000));
   assert.equal(await Promise.race([seen.promise, timeout]), row.rowid);
+});
+
+test('a message answered while an earlier one was still running is not answered again after a restart', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const a = fixture.received(PHONE);
+  const b = fixture.received('friend@icloud.com');
+  const hung = deferred();
+  const first = make(async (message) => (message.rowid === a.rowid ? hung.promise : 'settled'));
+  await first.scan();
+  await new Promise((resolve) => setImmediate(resolve));
+  // The daemon dies here: a is unanswered, b was answered.
+  assert.ok(store.load('ava').record.watermark < a.rowid);
+  assert.deepEqual(store.load('ava').record.settled, [b.rowid]);
+
+  const seen = [];
+  const second = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await second.scan();
+  await second.idle();
+  assert.deepEqual(seen, [a.rowid]);
+  assert.equal(store.load('ava').record.watermark, b.rowid);
+  assert.deepEqual(store.load('ava').record.settled, []);
+  // The first process's turn ends as a dead process's would: nothing more written.
+  hung.resolve('kept');
 });

@@ -175,3 +175,25 @@ test('observe records rows read before they are dispatched, never moving back', 
   assert.equal(observe(observe(record, 7), 3).observedThrough, 7);
   assert.equal(observe(record, 7).watermark, record.watermark);
 });
+
+test('settled rows above the watermark are stored, and a damaged list is refused', (t) => {
+  const { fixture, db, store } = setup(t);
+  const record = seedRecord(db, HANDLE);
+  assert.deepEqual(record.settled, []);
+  fixture.received(PHONE);
+  const b = fixture.received(PHONE);
+  const withSettled = { ...observe(record, b.rowid), settled: [b.rowid] };
+  store.save('ava', withSettled);
+  assert.deepEqual(store.load('ava').record.settled, [b.rowid]);
+  assert.throws(() => store.save('ava', { ...withSettled, settled: [record.watermark] }), /invalid watermark/);
+  assert.throws(() => store.save('ava', { ...withSettled, settled: [b.rowid + 1] }), /invalid watermark/);
+});
+
+test('advance drops settled rows it moves past', (t) => {
+  const { fixture, db } = setup(t);
+  const record = seedRecord(db, HANDLE);
+  const a = fixture.received(PHONE);
+  const b = fixture.received(PHONE);
+  const next = advance({ ...observe(record, b.rowid), settled: [a.rowid, b.rowid] }, a);
+  assert.deepEqual(next.settled, [b.rowid]);
+});

@@ -10,6 +10,11 @@ import path from 'node:path';
  * `fingerprint` is the guid of the row at the watermark, which catches a
  * database rebuilt or restored in place under the same inode.
  *
+ * `settled` lists rows above the watermark that are done while an earlier
+ * one is still being answered, so a restart answers only what is not:
+ * without it, every message answered behind a long turn would be answered
+ * again.
+ *
  * `initialized` is stored on its own so a fresh Apple ID with no messages
  * at all keeps a watermark of 0 instead of looking unseeded forever.
  * `observedThrough` is the highest ROWID a live scan has read, written
@@ -27,6 +32,7 @@ import path from 'node:path';
 const FILE = 'watermarks.json';
 
 const isRowid = (value) => Number.isSafeInteger(value) && value >= 0;
+const SETTLED_LIMIT = 10_000;
 
 const validRecord = (record) => record
   && typeof record === 'object'
@@ -38,7 +44,24 @@ const validRecord = (record) => record
   && isRowid(record.observedThrough)
   && record.observedThrough >= record.watermark
   && (record.fingerprint === null || typeof record.fingerprint === 'string')
-  && (record.watermark === 0 || typeof record.fingerprint === 'string');
+  && (record.watermark === 0 || typeof record.fingerprint === 'string')
+  && validSettled(record);
+
+/** Rows settled above the watermark: increasing, above it, and already observed. */
+const validSettled = (record) => {
+  const settled = record.settled ?? [];
+  if (!Array.isArray(settled) || settled.length > SETTLED_LIMIT) {
+    return false;
+  }
+  let previous = record.watermark;
+  for (const rowid of settled) {
+    if (!isRowid(rowid) || rowid <= previous || rowid > record.observedThrough) {
+      return false;
+    }
+    previous = rowid;
+  }
+  return true;
+};
 
 /** Writes `text` to `file` so a crash leaves the old file or the new one, on disk. */
 const writeDurably = (file, text) => {
@@ -132,6 +155,7 @@ export const seedRecord = (db, handle) => {
     watermark: max,
     observedThrough: max,
     fingerprint: max === 0 ? null : db.guidAt(max) ?? null,
+    settled: [],
   };
 };
 
@@ -192,8 +216,21 @@ export const advance = (record, { rowid, guid }) => {
     watermark: rowid,
     fingerprint: guid,
     observedThrough: Math.max(record.observedThrough, rowid),
+    settled: (record.settled ?? []).filter((settled) => settled > rowid),
   };
 };
+
+/** The record with `rowid`, above the watermark, listed as settled. */
+export const markSettled = (record, rowid) => {
+  const settled = record.settled ?? [];
+  if (rowid <= record.watermark || settled.includes(rowid)) {
+    return record;
+  }
+  return { ...record, settled: [...settled, rowid].sort((a, b) => a - b) };
+};
+
+/** Whether `rowid` is done: at or below the watermark, or listed as settled. */
+export const isSettled = (record, rowid) => rowid <= record.watermark || (record.settled ?? []).includes(rowid);
 
 /** The record after a scan read through `rowid`, before it dispatches anything. */
 export const observe = (record, rowid) => (rowid > record.observedThrough

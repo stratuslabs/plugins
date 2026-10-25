@@ -4,6 +4,7 @@
   "private": true,
   "description": "iMessage channel for Stratus: text an agent from your phone through Messages.app on its own Mac.",
   "type": "module",
+  "exports": "./index.js",
   "license": "MIT",
   "engines": {
     "node": ">=22.13"
@@ -12,6 +13,64 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@parseaple/typedstream": "2.0.2"
+    "@parseaple/typedstream": "2.0.2",
+    "@stratusagent/core": "^0.13.5"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [
+        {
+          "name": "imessage"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "delivery": {
+          "type": "string",
+          "enum": [
+            "local",
+            "photon-local",
+            "photon",
+            "sendblue"
+          ]
+        },
+        "handle": {
+          "type": "string",
+          "minLength": 3
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "principals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "admit": {
+          "type": "string",
+          "enum": [
+            "principals",
+            "anyone"
+          ]
+        },
+        "replayCapHours": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "groups": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
   }
 }

@@ -40,9 +40,19 @@ What is here so far is the part that reads `~/Library/Messages/chat.db`:
   one agent per macOS login can use local delivery, and off macOS it is
   refused with the reason.
 
-Sending, approvals by text, the plugin entry point, `stratus doctor`
-checks and the setup guide (the Apple ID, Full Disk Access and Automation
-permissions) come next.
+- `lib/adapter.js` and `index.js` are the channel. Each admitted message
+  becomes a turn in that person's session, keyed so a repeat never runs
+  twice, and the answer goes back as plain text through `osascript`
+  (`lib/send.applescript`, with the handle and text passed as arguments,
+  never as script). Long answers go as several messages. Turn failures and
+  refusals are told to the person. A daemon on its way down says so and
+  answers after it restarts. `resolveOutbound` (for `message.send` and
+  schedules) only texts the agent's principals and approvers.
+
+Approvals by text, attachments, `stratus doctor` checks, recovery after
+chat.db is replaced, and the setup guide (the Apple ID, Full Disk Access
+and Automation permissions) come next. Until approvals land, a tool call
+that needs approval waits for one that can't be given over iMessage.
 
 ## Tests
 

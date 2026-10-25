@@ -65,16 +65,18 @@ export const readRunInput = (raw) => {
   if (!threadId || !runId || !/^[A-Za-z0-9._:-]{1,128}$/.test(threadId)) {
     throw Object.assign(new Error('threadId and runId are required; threadId is letters, digits, and ._:- (at most 128)'), { status: 400 });
   }
+  const all = Array.isArray(input.messages) ? input.messages : [];
+  // Kept as the client sent them, for a snapshot that has to list them.
+  const messages = all.filter((message) => typeof message?.id === 'string');
   if (input.resume !== undefined) {
-    return { threadId, runId, resume: readResume(input.resume) };
+    return { threadId, runId, messages, resume: readResume(input.resume) };
   }
-  const messages = Array.isArray(input.messages) ? input.messages : [];
-  const lastUser = [...messages].reverse().find((message) => message?.role === 'user');
+  const lastUser = [...all].reverse().find((message) => message?.role === 'user');
   const text = lastUser ? textOf(lastUser.content).trim() : '';
   if (!text) {
     throw Object.assign(new Error('messages must end with a user message that has text'), { status: 400 });
   }
-  return { threadId, runId, text };
+  return { threadId, runId, messages, text };
 };
 
 const ANSWERS = new Set(['once', 'always', 'deny']);
@@ -132,7 +134,11 @@ export const interruptFor = (event) => ({
  */
 export const streamSession = (bus, sessionId, emit, hooks = {}) => {
   let open; // the id of the text message being streamed, if any
+  let openText = '';
   let streamedThisResponse = false;
+  // What this run has added to the thread, in AG-UI form, the way
+  // @ag-ui/client builds it from the events: what a snapshot must keep.
+  let added = [];
   // Calls already shown: a gated call is shown when it is asked about,
   // because Stratus emits `tool.called` only after the answer.
   const shown = new Set();
@@ -144,16 +150,48 @@ export const streamSession = (bus, sessionId, emit, hooks = {}) => {
     emit({ type: 'TOOL_CALL_START', toolCallId: call.id, toolCallName: call.toolName });
     emit({ type: 'TOOL_CALL_ARGS', toolCallId: call.id, delta: JSON.stringify(call.input ?? {}) });
     emit({ type: 'TOOL_CALL_END', toolCallId: call.id });
+    // With no parentMessageId, the client carries the call in an assistant
+    // message of its own whose id is the call's.
+    added.push({ id: call.id, role: 'assistant', toolCalls: [{ id: call.id, type: 'function', function: { name: call.toolName, arguments: JSON.stringify(call.input ?? {}) } }] });
+  };
+  const showResult = (toolCallId, content) => {
+    const messageId = randomUUID();
+    emit({ type: 'TOOL_CALL_RESULT', messageId, toolCallId, role: 'tool', content });
+    added.push({ id: messageId, role: 'tool', toolCallId, content });
   };
   const startText = () => {
     open = randomUUID();
+    openText = '';
     emit({ type: 'TEXT_MESSAGE_START', messageId: open, role: 'assistant' });
+  };
+  const addText = (text) => {
+    openText += text;
+    emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: open, delta: text });
   };
   const endText = () => {
     if (open) {
       emit({ type: 'TEXT_MESSAGE_END', messageId: open });
+      added.push({ id: open, role: 'assistant', content: openText });
       open = undefined;
     }
+  };
+  /**
+   * The provider abandoned this response (a fallback took over, or it is
+   * starting again). The client keeps what it was sent, so the partial is
+   * closed and then retracted: a MESSAGES_SNAPSHOT drops every message
+   * whose id it does not list. The snapshot is the run's input messages
+   * plus what this run has completed, without the partial.
+   */
+  const retract = () => {
+    streamedThisResponse = false;
+    if (!open) {
+      return;
+    }
+    emit({ type: 'TEXT_MESSAGE_END', messageId: open });
+    open = undefined;
+    const base = hooks.snapshotBase?.() ?? [];
+    const ids = new Set(base.map((message) => message.id));
+    emit({ type: 'MESSAGES_SNAPSHOT', messages: [...base, ...added.filter((message) => !ids.has(message.id))] });
   };
   const unsubscribe = bus.subscribe((event) => {
     if (event.sessionId !== sessionId) {
@@ -164,7 +202,11 @@ export const streamSession = (bus, sessionId, emit, hooks = {}) => {
         startText();
       }
       streamedThisResponse = true;
-      emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: open, delta: event.delta.text });
+      addText(event.delta.text);
+      return;
+    }
+    if (event.type === 'provider.delta' && event.delta?.type === 'reset') {
+      retract();
       return;
     }
     if (event.type === 'provider.response') {
@@ -175,7 +217,7 @@ export const streamSession = (bus, sessionId, emit, hooks = {}) => {
           if (part.type === 'text' && part.text) {
             endText();
             startText();
-            emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: open, delta: part.text });
+            addText(part.text);
           }
         }
       }
@@ -199,27 +241,22 @@ export const streamSession = (bus, sessionId, emit, hooks = {}) => {
       return;
     }
     if (event.type === 'tool.denied' && shown.has(event.call.id)) {
-      emit({
-        type: 'TOOL_CALL_RESULT',
-        messageId: randomUUID(),
-        toolCallId: event.call.id,
-        role: 'tool',
-        content: JSON.stringify({ error: 'denied' }),
-      });
+      showResult(event.call.id, JSON.stringify({ error: 'denied' }));
       return;
     }
     if (event.type === 'tool.completed') {
       const result = event.result;
-      emit({
-        type: 'TOOL_CALL_RESULT',
-        messageId: randomUUID(),
-        toolCallId: result.callId,
-        role: 'tool',
-        content: result.ok ? JSON.stringify(result.output ?? null) : JSON.stringify({ error: result.error ?? 'failed' }),
-      });
+      showResult(result.callId, result.ok ? JSON.stringify(result.output ?? null) : JSON.stringify({ error: result.error ?? 'failed' }));
     }
   });
-  return { unsubscribe, finish: endText };
+  return {
+    unsubscribe,
+    finish: endText,
+    /** A new run is attached: what earlier runs added is in its input. */
+    newRun() {
+      added = [];
+    },
+  };
 };
 
 export const createAguiAdapter = (config) => {
@@ -237,9 +274,12 @@ export const createAguiAdapter = (config) => {
   const json = (res, status, body) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
 
   /** Points a live turn's events at a new run's response. */
-  const attach = (turn, res, runId) => {
+  const attach = (turn, res, run) => {
+    const { runId } = run;
     turn.res = res;
     turn.runId = runId;
+    turn.inputMessages = run.messages;
+    turn.stream.newRun();
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
     // A client that hangs up mid-run cancels the turn, as Stop does
     // elsewhere. One whose run ended in an interrupt has not hung up.
@@ -274,6 +314,7 @@ export const createAguiAdapter = (config) => {
     };
     let flush;
     turn.stream = streamSession(gateway.bus, sessionId, emit, {
+      snapshotBase: () => turn.inputMessages,
       onApprovalRequested(event) {
         turn.waiting.set(event.requestId, interruptFor(event));
         // Gathered for a tick, so calls asked about together end the run
@@ -291,7 +332,7 @@ export const createAguiAdapter = (config) => {
         turn.waiting.delete(event.requestId);
       },
     });
-    attach(turn, res, run.runId);
+    attach(turn, res, run);
     void (async () => {
       let final;
       try {
@@ -328,7 +369,7 @@ export const createAguiAdapter = (config) => {
       json(res, 409, { error: 'not pending (answered elsewhere, expired, or never asked here)', interruptIds: stale });
       return;
     }
-    attach(turn, res, run.runId);
+    attach(turn, res, run);
     for (const entry of run.resume) {
       // The gateway owns the request; a false here is one that settled
       // between the check above and now, and the turn goes on either way.

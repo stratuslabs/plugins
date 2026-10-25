@@ -31,7 +31,7 @@ test('a RunAgentInput is read for its thread, run, and newest user text', () => 
     tools: [],
     context: [],
   }));
-  assert.deepEqual(run, { threadId: 't-1', runId: 'r-1', text: 'new\nquestion' });
+  assert.deepEqual({ ...run, messages: run.messages.map((message) => message.id) }, { threadId: 't-1', runId: 'r-1', messages: ['m1', 'm2', 'm3'], text: 'new\nquestion' });
   assert.throws(() => readRunInput('{'), /not JSON/);
   assert.throws(() => readRunInput(JSON.stringify({ runId: 'r', messages: [] })), /threadId and runId/);
   assert.throws(() => readRunInput(JSON.stringify({ threadId: '../x', runId: 'r', messages: [{ role: 'user', content: 'a' }] })), /threadId/);
@@ -191,4 +191,51 @@ test('a resume entry is read strictly: no answer is never a yes', () => {
   assert.throws(() => readRunInput(JSON.stringify({ ...base, resume: [{ interruptId: 'i', status: 'resolved', payload: { answer: 'yes' } }] })), /payload.answer/);
   assert.throws(() => readRunInput(JSON.stringify({ ...base, resume: [] })), /non-empty/);
   assert.throws(() => readRunInput(JSON.stringify({ ...base, resume: [{ status: 'cancelled' }] })), /interruptId/);
+});
+
+test('a reset retracts the abandoned partial with a snapshot of the thread without it', () => {
+  const bus = fakeBus();
+  const events = [];
+  const base = [{ id: 'u1', role: 'user', content: 'hi' }];
+  const stream = streamSession(bus, 's-1', (event) => events.push(event), { snapshotBase: () => base });
+  bus.emit({ type: 'provider.delta', sessionId: 's-1', delta: { type: 'text', text: 'Checking.' } });
+  bus.emit({ type: 'provider.response', sessionId: 's-1', parts: [{ type: 'text', text: 'Checking.' }] });
+  bus.emit({ type: 'tool.called', sessionId: 's-1', call: { id: 'c1', toolName: 'web.fetch', input: { url: 'u' } } });
+  bus.emit({ type: 'tool.completed', sessionId: 's-1', result: { callId: 'c1', ok: true, output: 'page' } });
+  bus.emit({ type: 'provider.delta', sessionId: 's-1', delta: { type: 'text', text: 'abandoned half' } });
+  bus.emit({ type: 'provider.delta', sessionId: 's-1', delta: { type: 'reset', reason: 'fallback' } });
+  // The fallback does not stream: its words arrive with the response.
+  bus.emit({ type: 'provider.response', sessionId: 's-1', parts: [{ type: 'text', text: 'Fallback answer.' }] });
+  stream.finish();
+  stream.unsubscribe();
+
+  const kinds = events.map((event) => event.type);
+  assert.deepEqual(kinds, [
+    'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END',
+    'TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_END', 'TOOL_CALL_RESULT',
+    'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END',
+    'MESSAGES_SNAPSHOT',
+    'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END',
+  ]);
+  const partialId = events[7].messageId;
+  const snapshot = events[10].messages;
+  assert.deepEqual(snapshot, [
+    { id: 'u1', role: 'user', content: 'hi' },
+    { id: events[0].messageId, role: 'assistant', content: 'Checking.' },
+    { id: 'c1', role: 'assistant', toolCalls: [{ id: 'c1', type: 'function', function: { name: 'web.fetch', arguments: '{"url":"u"}' } }] },
+    { id: events[6].messageId, role: 'tool', toolCallId: 'c1', content: '"page"' },
+  ]);
+  assert.ok(!snapshot.some((message) => message.id === partialId));
+  assert.equal(events[12].delta, 'Fallback answer.');
+});
+
+test('a reset with nothing streamed sends no snapshot', () => {
+  const bus = fakeBus();
+  const events = [];
+  const stream = streamSession(bus, 's-1', (event) => events.push(event), { snapshotBase: () => [] });
+  bus.emit({ type: 'provider.delta', sessionId: 's-1', delta: { type: 'reset', reason: 'retry' } });
+  bus.emit({ type: 'provider.delta', sessionId: 's-1', delta: { type: 'text', text: 'ok' } });
+  bus.emit({ type: 'provider.response', sessionId: 's-1', parts: [{ type: 'text', text: 'ok' }] });
+  stream.unsubscribe();
+  assert.deepEqual(events.map((event) => event.type), ['TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TEXT_MESSAGE_END']);
 });

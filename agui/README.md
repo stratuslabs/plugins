@@ -68,6 +68,19 @@ Whoever holds the token is an approver here. Slack checks its approver
 list; this spike has no equivalent, which is the main thing a real version
 would need.
 
+## A provider that starts over
+
+When a provider abandons a response partway (a fallback provider takes
+over mid-stream, or the same provider retries), Stratus sends a `reset`
+delta. AG-UI has no event that deletes a message, but `@ag-ui/client`
+1.0.3 applies a `MESSAGES_SNAPSHOT` by dropping every text and tool
+message whose id the snapshot doesn't list. So on a reset the emitter
+ends the partial text message, then sends a snapshot of the thread
+without it: the run's `input.messages` as the client sent them, plus the
+messages this run has completed (text, tool calls, tool results), built
+the way the client builds them from the events. A reset before any text
+was streamed sends nothing.
+
 ## Not in the spike
 
 - Events while no run is attached are dropped: if an approval times out
@@ -76,18 +89,24 @@ would need.
 - Client-supplied `tools` and `state` (ignored), reasoning events, usage,
   `editedArgs` on resume.
 - Authentication beyond a static token on a loopback-only port.
-- A `reset` delta (a fallback provider took over mid-stream) is not
-  handled, so the client keeps the abandoned partial next to the new
-  answer. AG-UI can retract it: `@ag-ui/client` 1.0.3 applies a
-  `MESSAGES_SNAPSHOT` by dropping every text and tool message whose id is
-  not in the snapshot (checked with an `AbstractAgent` emitting a partial,
-  a snapshot of `input.messages`, then the answer: the partial was gone).
-  A real version would end the partial, then send a
-  snapshot of the thread without it (the run's `input.messages` plus what
-  this run has completed). That means tracking this run's messages in
-  AG-UI form, which the spike doesn't do.
 
 ## Verified
+
+- Reset, not committed (`scratch/agui-client/smoke-reset.mjs`): a real
+  `HttpAgent` (`@ag-ui/client` 1.0.3, verifier on) against a real gateway
+  (agent 0.13.5) whose primary provider, a plugin, streams "abandoned half"
+  and then throws, with a non-streaming plugin provider as the configured
+  fallback. The client ends with the user message and "Fallback answer."
+  only, and every event passes `EventSchemas`. On the previous head the
+  same run left the client with "abandoned half" and no answer at all: the
+  fallback's one-piece reply was skipped because the abandoned attempt had
+  streamed.
+- Reset after earlier messages in the same run, not committed
+  (`scratch/agui-client/reset-client.mjs`): the emitter fed into a real
+  `AbstractAgent` with three prior messages, a text message, a tool call
+  and its result, then a reset mid-text. The client keeps all of those in
+  order and ends with the fallback answer; on the previous head it ended
+  with the partial.
 
 - Real AG-UI client, not committed: `HttpAgent` from `@ag-ui/client`
   1.0.3 (its event verifier on) against a real gateway (agent main
@@ -100,8 +119,9 @@ would need.
   UI such as CopilotKit, and interrupts through `HttpAgent`.
 
 - Unit: input validation; delta, tool call and result mapping; per-session
-  filtering; interrupt then resume (approved and cancelled) over real HTTP
-  against a fake gateway, including the 409s; strict resume parsing.
+  filtering; reset retraction by snapshot; interrupt then resume (approved
+  and cancelled) over real HTTP against a fake gateway, including the
+  409s; strict resume parsing.
 - Interrupt end to end, not committed: a real gateway (agent main 8c5ebb6)
   with `approvals.mode: remote`, this adapter, and a fake OpenAI endpoint
   that calls `schedule.every`. Run 1 ended with the interrupt while the

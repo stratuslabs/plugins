@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -140,6 +140,14 @@ const experimentDir = () => {
   const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-exp-')));
   mkdirSync(path.join(dir, 'workspace'));
   return dir;
+};
+
+// The config refuses two paths to one directory, so an alias can only
+// appear after load: a link that pointed elsewhere and now points at exp.
+const aliasAfterLoad = (exp) => {
+  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
+  symlinkSync(experimentDir(), link);
+  return { link, repoint: () => { unlinkSync(link); symlinkSync(exp, link); } };
 };
 
 const exit = async (run, code = 0, signal = null) => {
@@ -431,10 +439,9 @@ test('with no key stored nothing runs and nothing is spent: login mode is not su
   assert.match(warnings[0], /stratus channel set dreams --agent ava anthropicApiKey/);
 });
 
-test('two agents never run the same experiment directory at once, even through a symlink', async () => {
+test('two agents never run the same experiment directory at once, even through a symlink made after load', async () => {
   const exp = experimentDir();
-  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
-  symlinkSync(exp, link);
+  const { link, repoint } = aliasAfterLoad(exp);
   const { dreamer, runs } = fixture({
     agents: {
       ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
@@ -443,6 +450,7 @@ test('two agents never run the same experiment directory at once, even through a
     now: night(23, 0),
     secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
   });
+  repoint();
   await dreamer.tick();
   await dreamer.tick();
   assert.equal(runs.length, 1, 'the second agent waits for the path');
@@ -487,8 +495,7 @@ test('a daemon stop after the tether has exited signals nothing', async () => {
 
 test('the experiment directory stays busy until its report and summary are done', async () => {
   const exp = experimentDir();
-  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
-  symlinkSync(exp, link);
+  const { link, repoint } = aliasAfterLoad(exp);
   const { dreamer, runs, reports } = fixture({
     agents: {
       ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
@@ -498,6 +505,7 @@ test('the experiment directory stays busy until its report and summary are done'
     secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
     holdReports: true,
   });
+  repoint();
   await dreamer.tick();
   runs[0].child.emit('exit', 0, null);
   await new Promise((resolve) => setTimeout(resolve, 20));

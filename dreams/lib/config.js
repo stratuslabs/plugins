@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { real } from './sandbox.js';
 
 /**
  * The plugin's config block, checked once at load. Everything here is
@@ -125,12 +126,16 @@ export const parseDreamsConfig = (config, { home } = {}) => {
       fail(`${where}: prompt dreams are not in this version; only "experiments" run.`);
     }
     const experiments = block.experiments.map((experiment, index) => parseExperiment(experiment, `${where}.experiments[${index}]`));
-    for (const { path: dir } of experiments) {
+    // Keyed by real path, as the runs are: two links to one directory are
+    // one directory. One that doesn't exist yet is keyed as written.
+    for (const { path: configured } of experiments) {
+      const dir = real(configured);
+      const named = dir === configured ? dir : `${dir} (as ${configured})`;
       const other = owner.get(dir);
       if (other !== undefined) {
         fail(other === agentId
-          ? `${dir} is listed twice for ${agentId}.`
-          : `${dir} is listed for both ${other} and ${agentId}: an experiment directory belongs to one agent.`);
+          ? `${named} is listed twice for ${agentId}.`
+          : `${named} is listed for both ${other} and ${agentId}: an experiment directory belongs to one agent.`);
       }
       owner.set(dir, agentId);
     }

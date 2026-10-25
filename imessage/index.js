@@ -8,8 +8,9 @@ import { parseImessageConfig } from './lib/config.js';
  * The config (lib/config.js) binds each agent to the Apple ID it sends as
  * and says whom it answers. Local delivery has no secret to store.
  *
- * `options.chatDb`, `openDb`, `sender`, `intervalMs`, `watch` and
- * `sendRetryMs` point the channel at a stand-in Messages for tests.
+ * `options.chatDb`, `openDb`, `sender`, `intervalMs`, `watch`,
+ * `sendRetryMs` and `attachments` point the channel at a stand-in
+ * Messages for tests.
  */
 export const createPlugin = (config = {}, options = {}) => ({
   name: 'imessage',
@@ -37,6 +38,7 @@ export const createPlugin = (config = {}, options = {}) => ({
       ...(options.intervalMs !== undefined ? { intervalMs: options.intervalMs } : {}),
       ...(options.watch !== undefined ? { watch: options.watch } : {}),
       ...(options.sendRetryMs ? { sendRetryMs: options.sendRetryMs } : {}),
+      ...(options.attachments ? { attachments: options.attachments } : {}),
     });
     context.channels.register({ adapter, agents: [...parsed.agents.keys()] });
   },

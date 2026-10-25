@@ -70,6 +70,18 @@ local delivery has no secret.
     as a guess. Three guesses deny the request and tell the approvers.
 - **Stop.** An approver who texts `stop` ends the turn running in their
   conversation.
+- **Photos and files.** A photo sent to the agent reaches the turn as an
+  image. An iPhone's HEIC, and any image too large to send as it is, is
+  converted to JPEG with `sips` and scaled down to 2048 pixels on its longer
+  side. A small UTF-8 text file (up to 100 KB) is read into the message.
+  Anything else, such as a voice memo or a video, reaches the agent by name,
+  with a note that it couldn't be opened.
+  - Only files inside `~/Library/Messages/Attachments` are read.
+  - Messages downloads a file after its message appears, so the channel
+    waits up to 30 seconds for it. Later messages in that conversation wait
+    behind it, so the agent still reads them in order.
+  - Images go to the model with whatever metadata the phone wrote, as they
+    do from Slack and Discord. A photo's location is part of that.
 - **Reaching out first.** `message.send` and schedules can text the agent's
   principals and approvers, and nobody else.
 - **Restarts.** A message that arrives while the daemon is down is answered
@@ -92,8 +104,6 @@ local delivery has no secret.
 
 ## Not built yet
 
-- Images and files sent to the agent: the text arrives, and the agent is
-  told an attachment came with it (stratuslabs/plugins#24).
 - Files the agent sends.
 - Group chats.
 - The other delivery methods (`photon-local`, `photon`, `sendblue`).

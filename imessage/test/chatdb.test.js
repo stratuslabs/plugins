@@ -160,6 +160,24 @@ test('classifyRow: an attachment with no text is a message, not incomplete', (t)
   assert.equal(result.attachments, 1);
 });
 
+test('attachmentsOf: a message\'s files, as Messages recorded them, in the order they were added', (t) => {
+  const file = path.join(scratch(t), 'chat.db');
+  const fixture = createChatDb(file);
+  const { rowid } = fixture.received(PHONE, { text: '\ufffc\ufffc', body: null, files: [
+    { filename: '~/Library/Messages/Attachments/ab/01/X/IMG_1.HEIC', mimeType: 'image/heic', uti: 'public.heic', transferName: 'IMG_1.HEIC', totalBytes: 1234 },
+    { filename: null, mimeType: 'audio/x-caf', transferName: 'Audio Message.caf' },
+  ] });
+  const other = fixture.received(PHONE, { text: 'plain', body: null });
+  const db = openChatDb(file);
+  t.after(() => { db.close(); fixture.close(); });
+  assert.deepEqual(db.attachmentsOf(rowid).map(({ filename, mimeType, uti, transferName, totalBytes }) => ({ filename, mimeType, uti, transferName, totalBytes })), [
+    { filename: '~/Library/Messages/Attachments/ab/01/X/IMG_1.HEIC', mimeType: 'image/heic', uti: 'public.heic', transferName: 'IMG_1.HEIC', totalBytes: 1234 },
+    { filename: null, mimeType: 'audio/x-caf', uti: null, transferName: 'Audio Message.caf', totalBytes: 0 },
+  ]);
+  assert.deepEqual(db.attachmentsOf(other.rowid), []);
+  assert.equal(classifyRow(db.rowsAfter(0, 10)[0]).attachments, 2);
+});
+
 test('classifyRow: a group message carries the group chat and its sender', (t) => {
   const file = path.join(scratch(t), 'chat.db');
   const fixture = createChatDb(file);

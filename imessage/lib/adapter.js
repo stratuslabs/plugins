@@ -4,6 +4,7 @@ import path from 'node:path';
 import { latestTurnReply, turnFailureFor, turnReplyFor } from '@stratusagent/core';
 
 import { admit, idempotencyKeyFor, sessionIdFor } from './admission.js';
+import { readAttachments, textBlocks, unreadNote } from './attachments.js';
 import { newCode, outcomeText, parseAnswer, promptText, WRONG_ANSWER_LIMIT } from './approvals.js';
 import { MESSAGES_DB, openChatDb } from './chatdb.js';
 import { maskHandle, normalizeHandle } from './handles.js';
@@ -16,14 +17,13 @@ const SEND_RETRY_MS = [2000, 10_000, 30_000];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The text, with a note for attachments, which aren't passed on yet (stratuslabs/plugins#24). */
-const withAttachmentNote = ({ text, attachments }) => {
-  if (!attachments) {
-    return text;
-  }
-  const note = `[${attachments === 1 ? 'An attachment was' : `${attachments} attachments were`} sent with this message; this channel can't pass attachments on yet.]`;
-  return text.trim().length > 0 ? `${text}\n\n${note}` : note;
+/** What the person typed, then the text files read for it, then the files named only. */
+const userMessageFor = (text, { texts, unread }) => {
+  const message = `${text}${textBlocks(texts)}${unreadNote(unread)}`;
+  return text.trim().length > 0 ? message : message.replace(/^\s+/, '');
 };
+
+const NO_ATTACHMENTS = Object.freeze({ images: [], texts: [], unread: [] });
 
 /**
  * The iMessage channel adapter, local delivery: the agent's own Apple ID
@@ -49,6 +49,7 @@ export const createImessageAdapter = ({
   intervalMs = 3000,
   watch = true,
   sendRetryMs = SEND_RETRY_MS,
+  attachments: attachmentOptions = {},
   random,
 }) => {
   const running = new Map();
@@ -59,6 +60,14 @@ export const createImessageAdapter = ({
   let host;
   let unsubscribe;
   let stopping = false;
+  const stopController = new AbortController();
+  // sessionId -> settles once the latest message handed to that session has
+  // called gateway.dispatch, or ended without one. A message whose files
+  // are still being read holds the ones behind it in its conversation, so
+  // the gateway still sees them in the order they were sent.
+  const handing = new Map();
+  // The stops already answered with "Stopped.".
+  const toldStopped = new WeakSet();
 
   const deliver = async (agentId, to, text, { markdown = true } = {}) => {
     const pieces = splitMessages(markdown ? toPlainText(text) : text);
@@ -238,8 +247,10 @@ export const createImessageAdapter = ({
     const sessionId = sessionIdFor(agentId, agent.handle, from);
     const reason = `Stopped from iMessage by ${maskHandle(from)}`;
     const mine = turns.get(sessionId) ?? new Set();
+    // One reason for every turn this stop ends, so the person is told once.
+    const stop = new Error(reason);
     for (const controller of mine) {
-      controller.abort(new Error(reason));
+      controller.abort(stop);
     }
     const onSession = host.abortTurns?.(sessionId, reason) ?? 0;
     if (mine.size === 0 && onSession === 0) {
@@ -249,8 +260,22 @@ export const createImessageAdapter = ({
     return true;
   };
 
+  /** chat.db's attachment rows for a message; on a failed read, as many unnamed files. */
+  const attachmentRowsFor = (agentId, message) => {
+    try {
+      const rows = running.get(agentId)?.db.attachmentsOf(message.rowid);
+      if (Array.isArray(rows) && rows.length > 0) {
+        return rows;
+      }
+    } catch (error) {
+      warn(`imessage: ${agentId} could not read the attachments of row ${message.rowid}: ${error.message}`);
+    }
+    return Array.from({ length: message.attachments }, () => ({ filename: null }));
+  };
+
   // Everything up to gateway.dispatch runs synchronously, so messages reach
-  // the gateway in the order intake hands them over.
+  // the gateway in the order intake hands them over. The one wait is for a
+  // message's files, and later messages in its conversation wait behind it.
   const answer = async (gateway, agentId, agent, message) => {
     const approval = answerApproval(agentId, agent, message);
     if (approval) {
@@ -282,33 +307,81 @@ export const createImessageAdapter = ({
     const running = turns.get(sessionId) ?? new Set();
     running.add(controller);
     turns.set(sessionId, running);
-    try {
-      session = await gateway.dispatch({
-        sessionId,
-        agentId,
-        userMessage: withAttachmentNote(message),
-        metadata,
-        turnId: randomUUID(),
-        signal: controller.signal,
-        idempotencyKey,
-        onRepeat: (kind) => {
-          repeat = kind;
-        },
-        onAbsorbed: () => {
-          absorbed = true;
-        },
+    // Read now, while chat.db is surely open; the files are read after.
+    const listed = message.attachments > 0 ? attachmentRowsFor(agentId, message) : [];
+    const prior = handing.get(sessionId);
+    let handed = () => {};
+    if (prior || listed.length > 0) {
+      let resolve;
+      const mine = new Promise((done) => {
+        resolve = done;
       });
+      handing.set(sessionId, mine);
+      handed = () => {
+        resolve();
+        if (handing.get(sessionId) === mine) {
+          handing.delete(sessionId);
+        }
+      };
+    }
+    const waits = prior !== undefined || listed.length > 0;
+    let prepared = NO_ATTACHMENTS;
+    try {
+      // With nothing to wait for, nothing here awaits before dispatch.
+      if (prior) {
+        await prior;
+      }
+      if (listed.length > 0) {
+        prepared = await readAttachments(listed, {
+          ...attachmentOptions,
+          signal: AbortSignal.any([controller.signal, stopController.signal]),
+          warn,
+          label: `row ${message.rowid}`,
+        });
+      }
+      if (waits && (controller.signal.aborted || stopping)) {
+        failure = { name: 'NotDispatched' };
+      } else {
+        const dispatching = gateway.dispatch({
+          sessionId,
+          agentId,
+          userMessage: userMessageFor(message.text, prepared),
+          ...(prepared.images.length > 0 ? { images: prepared.images } : {}),
+          metadata,
+          turnId: randomUUID(),
+          signal: controller.signal,
+          idempotencyKey,
+          onRepeat: (kind) => {
+            repeat = kind;
+          },
+          onAbsorbed: () => {
+            absorbed = true;
+          },
+        });
+        handed();
+        session = await dispatching;
+      }
     } catch (error) {
       failure = error;
     } finally {
+      handed();
       running.delete(controller);
       if (running.size === 0 && turns.get(sessionId) === running) {
         turns.delete(sessionId);
       }
     }
     if (controller.signal.aborted) {
-      await tell(agentId, verdict.from, 'Stopped.');
+      const stop = controller.signal.reason;
+      if (!toldStopped.has(stop)) {
+        toldStopped.add(stop);
+        await tell(agentId, verdict.from, 'Stopped.');
+      }
       return 'settled';
+    }
+    if (failure?.name === 'NotDispatched') {
+      // The channel stopped while this message's files were read: read
+      // again, and answered, at the next start.
+      return 'kept';
     }
     if (repeat === 'live' || absorbed) {
       // Another delivery of this message, or the turn it was merged into,
@@ -442,6 +515,7 @@ export const createImessageAdapter = ({
     },
     async stop() {
       stopping = true;
+      stopController.abort();
       // Intake first, so nothing new starts; the bus last, so a request
       // the shutdown settles is still reported.
       await Promise.all([...running.values(), ...[...retired].map((intake) => ({ intake }))].map(({ intake }) => intake.stop()));

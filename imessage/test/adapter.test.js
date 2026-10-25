@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -9,6 +9,7 @@ import { createImessageAdapter } from '../lib/adapter.js';
 import { parseImessageConfig } from '../lib/config.js';
 import { createWatermarkStore } from '../lib/watermark.js';
 import { BODIES, createChatDb } from './chatdb-fixture.js';
+import { png, writeHeic } from './images.js';
 
 const HANDLE = 'ava.agent@icloud.com';
 const PHONE = '+15551234821';
@@ -56,8 +57,8 @@ const fakeSender = ({ fail = () => false } = {}) => {
   };
 };
 
-const setup = async (t, { config = {}, gateway = fakeGateway(), sender = fakeSender(), seed = true } = {}) => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'imessage-adapter-'));
+const setup = async (t, { config = {}, gateway = fakeGateway(), sender = fakeSender(), seed = true, attachments = {} } = {}) => {
+  const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'imessage-adapter-')));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const chatDb = path.join(directory, 'chat.db');
   const fixture = createChatDb(chatDb);
@@ -74,6 +75,7 @@ const setup = async (t, { config = {}, gateway = fakeGateway(), sender = fakeSen
     intervalMs: 10,
     watch: false,
     sendRetryMs: [1, 1],
+    attachments: { directory: path.join(directory, 'Attachments'), pollMs: 10, ...attachments },
   });
   t.after(async () => {
     await adapter.stop();
@@ -311,13 +313,115 @@ test('"stop" over SMS, or from someone who is not an approver, stops nothing', a
   assert.equal(gateway.dispatched[0].userMessage, 'stop');
 });
 
-test('an attachment the channel cannot pass on is named in the turn, not silently dropped', async (t) => {
-  const { fixture, gateway, sender } = await setup(t);
-  fixture.received(PHONE, { text: '￼', body: null, attachments: 1 });
-  fixture.received(PHONE, { text: 'look', body: null, attachments: 2 });
+/** Where Messages would keep a file, in the test's own attachments folder. */
+const fileIn = (directory, name) => {
+  const folder = path.join(directory, 'Attachments', 'ab', '01', name.replace(/\W/g, '_'));
+  mkdirSync(folder, { recursive: true });
+  return path.join(folder, name);
+};
+
+test('a photo reaches the turn as an image, an iPhone HEIC as a JPEG; other files are named', { skip: process.platform !== 'darwin' && 'needs sips' }, async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t);
+  const heic = fileIn(directory, 'IMG_0001.HEIC');
+  writeHeic(heic, 320, 240);
+  const screenshot = fileIn(directory, 'shot.png');
+  writeFileSync(screenshot, png(20, 10));
+  const memo = fileIn(directory, 'Audio Message.caf');
+  writeFileSync(memo, 'audio');
+  fixture.received(PHONE, { text: '￼', body: null, files: [{ filename: heic, mimeType: 'image/heic', uti: 'public.heic', transferName: 'IMG_0001.HEIC' }] });
+  fixture.received(PHONE, { text: 'look￼￼', body: null, files: [
+    { filename: screenshot, mimeType: 'image/png', transferName: 'shot.png' },
+    { filename: memo, mimeType: 'audio/x-caf', transferName: 'Audio Message.caf' },
+  ] });
   await waitFor(() => sender.sent.length === 2);
-  assert.match(gateway.dispatched[0].userMessage, /^\[An attachment was sent with this message; this channel can't pass attachments on yet\.\]$/);
-  assert.match(gateway.dispatched[1].userMessage, /^look\n\n\[2 attachments were sent/);
+  const [photo, mixed] = gateway.dispatched;
+  assert.equal(photo.userMessage, '');
+  assert.deepEqual(photo.images.map(({ mediaType, name }) => [mediaType, name]), [['image/jpeg', 'IMG_0001.HEIC']]);
+  assert.equal(mixed.userMessage, 'look\n[Attached, name only: Audio Message.caf (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]');
+  assert.deepEqual(mixed.images.map(({ mediaType, name }) => [mediaType, name]), [['image/png', 'shot.png']]);
+});
+
+test('a file nobody can read still reaches the turn by name, and the log names only the row', async (t) => {
+  const { fixture, gateway, sender, logs } = await setup(t, { attachments: { timeoutMs: 40 } });
+  const { rowid } = fixture.received(PHONE, { text: '￼', body: null, files: [{ filename: '/etc/hosts', mimeType: 'text/plain', transferName: 'hosts' }] });
+  await waitFor(() => sender.sent.length === 1);
+  assert.match(gateway.dispatched[0].userMessage, /^\[Attached, name only: hosts \(could not be read\)/);
+  assert.equal(gateway.dispatched[0].images, undefined);
+  const line = logs.find((entry) => entry.includes('attachment'));
+  assert.match(line, new RegExp(`row ${rowid}`));
+  assert.doesNotMatch(line, /hosts/);
+});
+
+test('a message waiting for its file holds later ones in its conversation, not other conversations', async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t, { config: { principals: [PHONE, STRANGER] }, attachments: { timeoutMs: 5000 } });
+  const late = fileIn(directory, 'late.png');
+  fixture.received(PHONE, { text: 'first', body: null, files: [{ filename: late, mimeType: 'image/png', transferName: 'late.png' }] });
+  fixture.received(PHONE, { text: 'second', body: null });
+  fixture.received(STRANGER, { text: 'elsewhere', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  await settle();
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['elsewhere']);
+  writeFileSync(late, png(8, 8));
+  await waitFor(() => sender.sent.length === 3);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['elsewhere', 'first', 'second']);
+  assert.equal(gateway.dispatched[1].images.length, 1);
+});
+
+test('once a message with a file is handed over, the next one goes too, without waiting for its answer', async (t) => {
+  let release;
+  const gateway = fakeGateway((input) => (input.userMessage === 'first'
+    ? new Promise((resolve) => { release = () => resolve({ text: 'one' }); })
+    : { text: 'two' }));
+  const { directory, fixture, sender } = await setup(t, { gateway });
+  const ready = fileIn(directory, 'ready.png');
+  writeFileSync(ready, png(8, 8));
+  fixture.received(PHONE, { text: 'first', body: null, files: [{ filename: ready, mimeType: 'image/png' }] });
+  fixture.received(PHONE, { text: 'second', body: null });
+  await waitFor(() => gateway.dispatched.length === 2);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['first', 'second']);
+  release();
+  await waitFor(() => sender.sent.length === 2);
+});
+
+test('"stop" while a message waits for its file ends it and the one behind it before any turn, said once', async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t, { attachments: { timeoutMs: 10_000 } });
+  fixture.received(PHONE, { text: 'what is this', body: null, files: [{ filename: fileIn(directory, 'never.png'), mimeType: 'image/png' }] });
+  fixture.received(PHONE, { text: 'and this', body: null });
+  await settle();
+  fixture.received(PHONE, { text: 'stop', body: null });
+  await waitFor(() => sender.sent.length === 1, 2000);
+  await settle();
+  await settle();
+  assert.deepEqual(sender.sent, [[PHONE, 'Stopped.']]);
+  assert.equal(gateway.dispatched.length, 0);
+});
+
+test('a channel stopping while a message waits for its file keeps it, and the next start answers it whole', async (t) => {
+  const { directory, chatDb, fixture, adapter, gateway, stateDirectory } = await setup(t, { attachments: { timeoutMs: 10_000 } });
+  const late = fileIn(directory, 'late.png');
+  fixture.received(PHONE, { text: 'see this', body: null, files: [{ filename: late, mimeType: 'image/png', transferName: 'late.png' }] });
+  await settle();
+  const started = Date.now();
+  await adapter.stop();
+  assert.ok(Date.now() - started < 1000, `stop took ${Date.now() - started}ms`);
+  assert.equal(gateway.dispatched.length, 0);
+  writeFileSync(late, png(8, 8));
+  const next = fakeGateway();
+  const sender = fakeSender();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender,
+    intervalMs: 10,
+    watch: false,
+    attachments: { directory: path.join(directory, 'Attachments'), pollMs: 10 },
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(next.dispatched[0].userMessage, 'see this');
+  assert.equal(next.dispatched[0].images.length, 1);
 });
 
 // chat.db replaced (stratuslabs/plugins#23).

@@ -137,6 +137,31 @@ test('chunk: every piece fits Discord, splits at lines, and code fences stay clo
   assert.equal(chunk(word).join(''), word);
 });
 
+test('chunk: a long line inside a fence still fits once the fence reopens', () => {
+  for (const lang of ['', 'x', 'js', 'typescript', 'a-very-long-language-tag-somebody-wrote']) {
+    for (const length of [DISCORD_LIMIT - 9, DISCORD_LIMIT - 8, DISCORD_LIMIT, 5000]) {
+      const body = 'a'.repeat(length);
+      const text = '```' + lang + '\n' + body + '\n```';
+      const pieces = chunk(text);
+      for (const piece of pieces) {
+        assert.ok(piece.length <= DISCORD_LIMIT, `lang ${JSON.stringify(lang)}, line ${length}: a piece is ${piece.length}`);
+        assert.equal((piece.match(/```/g) ?? []).length % 2, 0, 'each piece opens and closes its fences');
+      }
+      const kept = pieces.map((piece) => piece.split('\n').filter((line) => !line.startsWith('```')).join('')).join('');
+      assert.equal(kept, body, `lang ${JSON.stringify(lang)}, line ${length}: nothing lost`);
+    }
+  }
+});
+
+test('chunk: a fence opened at the end of a piece leaves room to close it', () => {
+  const text = 'b'.repeat(DISCORD_LIMIT - 8) + '\n```js\n' + 'c'.repeat(100) + '\n```';
+  const pieces = chunk(text);
+  for (const piece of pieces) {
+    assert.ok(piece.length <= DISCORD_LIMIT, `a piece is ${piece.length}`);
+    assert.equal((piece.match(/```/g) ?? []).length % 2, 0, 'each piece opens and closes its fences');
+  }
+});
+
 test('stop: only the word, with this bot mentioned or nobody', async () => {
   const { isStopRequest } = await import('../lib/stop.js');
   for (const yes of ['stop', 'Stop.', `<@${BOT}> stop!`, `stop <@!${BOT}>`]) {

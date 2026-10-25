@@ -1,5 +1,5 @@
 import { REST } from '@discordjs/rest';
-import { WebSocketManager, WebSocketShardEvents } from '@discordjs/ws';
+import { SimpleShardingStrategy, WebSocketManager, WebSocketShardEvents } from '@discordjs/ws';
 import { normalizeMessage, trackThreads } from './normalize.js';
 
 /** Guilds, GuildMessages, DirectMessages and MessageContent. No member intent: allowlists are by id. */
@@ -14,6 +14,19 @@ const FATAL = new Map([
   [4013, 'Discord refused the requested intents as invalid.'],
   [4014, 'Discord refused the Message Content intent. Turn on "Message Content Intent" under Bot > Privileged Gateway Intents in the Developer Portal for this application, then restart.'],
 ]);
+
+/**
+ * Whether a failed connect is worth trying again: not when Discord refused
+ * the bot (a fatal close code, or a 4xx other than 429 from REST), since
+ * the same token and intents get the same answer.
+ */
+export const isRetryable = (error) => {
+  if (FATAL.has(error?.code)) {
+    return false;
+  }
+  const status = error?.status;
+  return !(typeof status === 'number' && status >= 400 && status < 500 && status !== 429);
+};
 
 /**
  * `manager.destroy()` alone doesn't always stop `@discordjs/ws` 2.0.4
@@ -54,11 +67,26 @@ export const stopManager = async (manager, options) => {
  * adapter's form, and `onInteraction(raw)` every INTERACTION_CREATE (a button
  * click); admission is the caller's.
  *
+ * `signal` gives up connecting: the attempt rejects with its reason and the
+ * library stops retrying. Once connected, `close()` is the way out.
+ *
  * `api` points both at another Discord, for tests.
  */
-export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onReconnect, log = () => {}, api }) => {
+export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onReconnect, log = () => {}, api, signal }) => {
+  signal?.throwIfAborted();
   const rest = new REST({ version: '10', ...(api ? { api } : {}) }).setToken(token);
-  const manager = new WebSocketManager({ token, intents: INTENTS, rest, compression: null });
+  // Given up while REST was still answering, the manager would go on to
+  // start its shards anyway; they don't start once the signal has fired.
+  const buildStrategy = (owner) => {
+    const strategy = new SimpleShardingStrategy(owner);
+    const connectShards = strategy.connect.bind(strategy);
+    strategy.connect = async () => {
+      signal?.throwIfAborted();
+      return connectShards();
+    };
+    return strategy;
+  };
+  const manager = new WebSocketManager({ token, intents: INTENTS, rest, compression: null, buildStrategy });
   const threads = new Map();
   let botId;
   let fatalError;
@@ -104,14 +132,27 @@ export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onR
     }
   });
 
+  let onAbort;
+  const aborted = new Promise((resolve, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  aborted.catch(() => {});
   try {
-    await manager.connect();
-    await readyOnce;
+    await Promise.race([
+      (async () => {
+        await manager.connect();
+        await readyOnce;
+      })(),
+      aborted,
+    ]);
   } catch (error) {
     await stopManager(manager).catch(() => {});
     // The library's own message for a fatal close ("Used disallowed
     // intents") doesn't say what to change; ours does.
     throw fatalError ?? error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
   return {
     get botId() {

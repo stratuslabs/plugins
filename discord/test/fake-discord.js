@@ -7,9 +7,11 @@ export const BOT = '111111111111111111';
  * Just enough of Discord for the adapter's own tests: `GET /gateway/bot`,
  * message (post, edit, delete), typing and thread routes over REST, and a gateway that says
  * hello, answers heartbeats, identifies and resumes. Records what it was
- * sent. `closeOnIdentify` makes it refuse the identify with a close code.
+ * sent. `closeOnIdentify` makes it refuse the identify with a close code;
+ * `gatewayDelayMs` slows `GET /gateway/bot` and `gatewayUrl` replaces the
+ * gateway it names; `port` picks where it listens.
  */
-export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
+export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gatewayUrl, port: listenPort = 0 } = {}) => {
   // `channels` (id -> channel object) and `history` (channel id -> its
   // messages, any order) are the test's to fill; GETs read them.
   const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], gets: [], channels: {}, history: {}, seq: 0 };
@@ -28,7 +30,8 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
       };
       const url = req.url.replace(/^\/api\/v10/, '');
       if (req.method === 'GET' && url === '/gateway/bot') {
-        return send(200, { url: `ws://127.0.0.1:${port}/gw`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 } });
+        const answer = () => send(200, { url: gatewayUrl ?? `ws://127.0.0.1:${port}/gw`, shards: 1, session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 } });
+        return gatewayDelayMs ? void setTimeout(answer, gatewayDelayMs) : answer();
       }
       let match;
       if (req.method === 'GET') {
@@ -121,7 +124,7 @@ export const fakeDiscord = async ({ closeOnIdentify } = {}) => {
       }
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => server.listen(listenPort, '127.0.0.1', resolve));
   const port = server.address().port;
   return {
     api: `http://127.0.0.1:${port}/api`,

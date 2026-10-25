@@ -9,8 +9,9 @@ import { parseDiscordConfig } from './lib/config.js';
  * `stratus channel set discord --agent <id> botToken`, never an agent
  * credential. An agent is registered on Discord only when it has both.
  *
- * `options.api` points the bots at another Discord and `options.drainTimeoutMs`
- * shortens the stop drain, both for tests.
+ * `options.api` points the bots at another Discord; `options.drainTimeoutMs`,
+ * `reconnectDelaysMs` and `connectTimeoutMs` shorten waits, and
+ * `options.connect` replaces the bot connection. All for tests.
  */
 export const createPlugin = (config = {}, options = {}) => ({
   name: 'discord',
@@ -38,6 +39,9 @@ export const createPlugin = (config = {}, options = {}) => ({
       ...(context.stateDirectory ? { stateDirectory: context.stateDirectory } : {}),
       ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
       ...(options.positionsWriteDelayMs !== undefined ? { positionsWriteDelayMs: options.positionsWriteDelayMs } : {}),
+      ...(options.connect ? { connect: options.connect } : {}),
+      ...(options.reconnectDelaysMs ? { reconnectDelaysMs: options.reconnectDelaysMs } : {}),
+      ...(options.connectTimeoutMs !== undefined ? { connectTimeoutMs: options.connectTimeoutMs } : {}),
     });
     context.channels.register({ adapter, agents });
   },

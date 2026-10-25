@@ -73,10 +73,13 @@ either place fails the load with its name.
 
 Attachments. The package stays private until then.
 
-## Known issue
+## Connecting
 
-If Discord can't be reached when the daemon starts, that agent's bot gives
-up at once and stays offline until the daemon restarts.
+Each bot connects on its own when the daemon starts. One that can't reach
+Discord, or gets no answer in a minute, tries again after 5s, 15s, 1m, then
+every 5m, until it connects or the daemon stops; the warning log says when.
+A refused token or intent isn't retried, since it would be refused again.
+Once connected, `@discordjs/ws` resumes or reconnects after a drop.
 
 `@discordjs/ws` is pinned to 2.0.4: stopping works around a reconnect loop
 in it (stratuslabs/plugins#20) using library internals, and the "closing

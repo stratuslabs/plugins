@@ -69,8 +69,8 @@ test('a dropped connection resumes the same session from the last sequence, and 
 // attempts, must still stop it, or the daemon never exits.
 test('closing while Discord is unreachable stops reconnecting, so the process can exit', async () => {
   const fixture = new URL('./fixtures/stop-unreachable.mjs', import.meta.url).pathname;
-  const run = (delay) => new Promise((resolve) => {
-    const child = spawn(process.execPath, [fixture, String(delay)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const run = (delay, mode = 'connected') => new Promise((resolve) => {
+    const child = spawn(process.execPath, [fixture, String(delay), mode], { stdio: ['ignore', 'pipe', 'inherit'] });
     let out = '';
     child.stdout.on('data', (part) => {
       out += part;
@@ -91,6 +91,27 @@ test('closing while Discord is unreachable stops reconnecting, so the process ca
     assert.equal(result.exited, true, `the process exited on its own after close() (delay ${result.delay}ms)`);
     assert.equal(result.code, 0);
   }
+  // Giving up a connect whose gateway refuses, at the same kinds of moment.
+  const abandoned = await Promise.all([0, 100, 520, 700].map((delay) => run(delay, 'connecting')));
+  for (const result of abandoned) {
+    assert.equal(result.out, 'given up\n', `connect() rejected with the signal's reason (delay ${result.delay}ms)`);
+    assert.equal(result.exited, true, `the process exited on its own after giving up (delay ${result.delay}ms)`);
+  }
+});
+
+test('a connect given up while REST is still answering never opens the gateway', async (t) => {
+  const discord = await fakeDiscord({ gatewayDelayMs: 150 });
+  t.after(() => discord.close());
+  const controller = new AbortController();
+  const attempt = connectBot({ token: 'bot-token-a', api: discord.api, onMessage: () => {}, signal: controller.signal });
+  setTimeout(() => controller.abort(new Error('given up')), 30);
+  await assert.rejects(attempt, /given up/);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(discord.state.sockets, [], 'no gateway connection after the answer came');
+});
+
+test('an already-fired signal fails at once', async () => {
+  await assert.rejects(connectBot({ token: 't', api: 'http://127.0.0.1:9/api', onMessage: () => {}, signal: AbortSignal.abort(new Error('too late')) }), /too late/);
 });
 
 test('an attempt already underway when the manager is destroyed is destroyed as well', async () => {

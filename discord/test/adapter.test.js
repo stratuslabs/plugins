@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { createPlugin } from '../index.js';
+import { connectBot } from '../lib/gateway.js';
 import { BOT, fakeDiscord } from './fake-discord.js';
 
 const until = async (check, what) => {
@@ -103,15 +104,15 @@ const config = {
   },
 };
 
-const setUp = async (t, { pluginConfig = config, secrets = { ava: { botToken: TOKEN } }, refuse } = {}) => {
+const setUp = async (t, { pluginConfig = config, secrets = { ava: { botToken: TOKEN } }, refuse, options = {}, warns = [] } = {}) => {
   const discord = await fakeDiscord(refuse ? { closeOnIdentify: refuse } : {});
   const registered = [];
-  const plugin = createPlugin(pluginConfig, { api: discord.api, drainTimeoutMs: 200 });
+  const plugin = createPlugin(pluginConfig, { api: discord.api, drainTimeoutMs: 200, ...options });
   await plugin.setup({
     bus: undefined,
     tools: undefined,
     log: () => {},
-    warn: () => {},
+    warn: (line) => warns.push(line),
     channels: {
       transportSecrets: async (kind) => {
         assert.equal(kind, 'discord');
@@ -375,4 +376,82 @@ test('stopping with a turn still running stops its typing too', async (t) => {
   const typed = discord.state.typing.length;
   await new Promise((resolve) => setTimeout(resolve, 8500));
   assert.equal(discord.state.typing.length, typed, 'no typing after stop');
+});
+
+// What Discord being down looks like from fetch: no status, a network cause.
+const unreachable = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) });
+
+test('a bot that cannot reach Discord at start keeps trying, and answers once it connects', async (t) => {
+  let calls = 0;
+  const warns = [];
+  const connect = (options) => {
+    calls += 1;
+    return calls === 1 ? Promise.reject(unreachable()) : connectBot(options);
+  };
+  const { discord, registered, gateway } = await setUp(t, { warns, options: { connect, reconnectDelaysMs: [30] } });
+  await registered[0].adapter.start(gateway);
+  assert.match(warns.join('\n'), /ava could not connect: fetch failed\. Trying again in/);
+  await until(() => discord.state.identifies.length === 1, 'the second attempt');
+  assert.equal(calls, 2);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'a dispatch after the retry');
+});
+
+test('attempts back off along the delays, repeating the last', async (t) => {
+  const at = [];
+  const connect = () => {
+    at.push(Date.now());
+    return Promise.reject(unreachable());
+  };
+  const { registered, gateway } = await setUp(t, { options: { connect, reconnectDelaysMs: [20, 120] } });
+  await registered[0].adapter.start(gateway);
+  await until(() => at.length === 4, 'four attempts');
+  const gaps = at.slice(1).map((time, i) => time - at[i]);
+  assert.ok(gaps[0] < 100, `first wait is short (${gaps[0]}ms)`);
+  assert.ok(gaps[1] >= 110 && gaps[2] >= 110, `then the last delay, again (${gaps})`);
+});
+
+test('a refused token is not retried', async (t) => {
+  const warns = [];
+  const { discord, registered, gateway } = await setUp(t, { refuse: 4004, warns, options: { reconnectDelaysMs: [20] } });
+  await registered[0].adapter.start(gateway);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(discord.state.identifies.length, 1);
+  assert.doesNotMatch(warns.join('\n'), /Trying again/);
+});
+
+test('stop cancels a wait for the next attempt, so it holds nothing open', async (t) => {
+  let calls = 0;
+  const connect = () => {
+    calls += 1;
+    return Promise.reject(unreachable());
+  };
+  const timers = () => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
+  const { registered, gateway } = await setUp(t, { options: { connect, reconnectDelaysMs: [60_000] } });
+  const before = timers();
+  await registered[0].adapter.start(gateway);
+  assert.equal(timers(), before + 1, 'one wait for the next attempt');
+  await registered[0].adapter.stop();
+  assert.equal(timers(), before, 'a stopped daemon is not kept up for the wait');
+  assert.equal(calls, 1);
+});
+
+test('an attempt that hangs is given up after the connect timeout and tried again; stop abandons one underway', async (t) => {
+  const signals = [];
+  const connect = ({ signal }) => {
+    signals.push(signal);
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  };
+  const warns = [];
+  const { registered, gateway } = await setUp(t, { warns, options: { connect, connectTimeoutMs: 40, reconnectDelaysMs: [10] } });
+  await registered[0].adapter.start(gateway);
+  assert.equal(signals[0].aborted, true, 'the first attempt was given up');
+  assert.match(warns.join('\n'), /ava could not connect: no answer from Discord in 40ms\. Trying again in/);
+  await until(() => signals.length === 2, 'a second attempt');
+  await registered[0].adapter.stop();
+  assert.equal(signals[1].aborted, true, 'stop abandons the attempt underway');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(signals.length, 2, 'and nothing is tried after stop');
 });

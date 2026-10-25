@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { admit } from './admission.js';
 import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId } from './approvals.js';
-import { connectBot } from './gateway.js';
+import { connectBot, isRetryable } from './gateway.js';
 import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
 import { createPositions } from './positions.js';
@@ -36,7 +36,16 @@ export const DRAIN_TIMEOUT_MS = 10_000;
 export const BACKFILL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const BACKFILL_LIMIT = 200;
 
-export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, stateDirectory, positionsWriteDelayMs }) => {
+/**
+ * A bot that can't reach Discord when the daemon starts tries again after
+ * each of these waits in turn, then every last one, until it connects or
+ * the channel stops. An attempt with no answer in CONNECT_TIMEOUT_MS
+ * counts as failed. After the first connection the library reconnects.
+ */
+export const RECONNECT_DELAYS_MS = [5_000, 15_000, 60_000, 300_000];
+export const CONNECT_TIMEOUT_MS = 60_000;
+
+export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
   const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
@@ -47,6 +56,9 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   let gateway;
   let unsubscribe;
   let stopping = false;
+  // Fired by stop(): gives up attempts underway and waits for the next.
+  let stopController = new AbortController();
+  const retryTimers = new Set();
   const positions = createPositions({ stateDirectory, warn, ...(positionsWriteDelayMs !== undefined ? { writeDelayMs: positionsWriteDelayMs } : {}) });
 
   const track = (promise) => {
@@ -479,6 +491,79 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     }
   };
 
+  const errorText = (error) => (error instanceof Error ? error.message : String(error));
+
+  /**
+   * One attempt to connect an agent's bot. A failure Discord may get over
+   * (it's unreachable, or slow to answer) schedules the next attempt; one it
+   * won't (a refused token) is only reported.
+   */
+  const connectAgent = async (agentId, agent, token, attempt) => {
+    // Messages can arrive between READY and connect() returning; they
+    // wait for the connection rather than being dropped.
+    let resolveBot;
+    const ready = new Promise((resolve) => {
+      resolveBot = resolve;
+    });
+    const timeout = AbortSignal.timeout(connectTimeoutMs);
+    let bot;
+    try {
+      bot = await connect({
+        token,
+        api,
+        log,
+        signal: AbortSignal.any([stopController.signal, timeout]),
+        onMessage: (normalized, raw) => {
+          if (!stopping) {
+            track(ready.then((connected) => handle(agentId, agent, connected, normalized, raw)));
+          }
+        },
+        onInteraction: (interaction) => {
+          if (!stopping) {
+            track(ready.then((connected) => onInteraction(connected, interaction)));
+          }
+        },
+        onFatal: (error) => warn(`discord: ${agentId}: ${error.message}`),
+        // A new session (not a resume) means Discord won't replay what
+        // was missed while disconnected; read it instead.
+        onReconnect: () => {
+          if (!stopping) {
+            track(ready.then((connected) => backfill(agentId, agent, connected)));
+          }
+        },
+      });
+    } catch (error) {
+      if (stopping) {
+        return;
+      }
+      const reason = timeout.aborted ? `no answer from Discord in ${connectTimeoutMs}ms` : errorText(error);
+      if (!timeout.aborted && !isRetryable(error)) {
+        warn(`discord: ${agentId} could not connect: ${reason}`);
+        return;
+      }
+      const delay = reconnectDelaysMs[Math.min(attempt, reconnectDelaysMs.length - 1)];
+      warn(`discord: ${agentId} could not connect: ${reason}. Trying again in ${delay < 1000 ? `${delay}ms` : `${Math.round(delay / 1000)}s`}.`);
+      const timer = setTimeout(() => {
+        retryTimers.delete(timer);
+        if (!stopping) {
+          track(connectAgent(agentId, agent, token, attempt + 1));
+        }
+      }, delay);
+      retryTimers.add(timer);
+      return;
+    }
+    if (stopping) {
+      await bot.close().catch(() => {});
+      return;
+    }
+    bots.set(agentId, bot);
+    resolveBot(bot);
+    log(`discord: ${agentId} connected as bot ${bot.botId}${attempt > 0 ? ` after ${attempt + 1} attempts` : ''}`);
+    if (stateDirectory) {
+      track(backfill(agentId, agent, bot));
+    }
+  };
+
   return {
     name: 'discord',
     resolveOutbound: addressing.resolveOutbound,
@@ -488,6 +573,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     async start(host) {
       gateway = host;
       stopping = false;
+      stopController = new AbortController();
       unsubscribe = host.bus.subscribe(onBusEvent);
       if (stateDirectory) {
         positions.load();
@@ -495,6 +581,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down will not be answered when it is back.');
       }
       const roster = new Set(host.agents().map((agent) => agent.id));
+      const attempts = [];
       for (const [agentId, agent] of config.agents) {
         if (!roster.has(agentId)) {
           warn(`discord: no roster agent with id ${agentId}; skipping its Discord bot`);
@@ -505,50 +592,17 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
           warn(`discord: ${agentId} has no bot token. Store one with \`stratus channel set discord --agent ${agentId} botToken\`.`);
           continue;
         }
-        // Messages can arrive between READY and connect() returning; they
-        // wait for the connection rather than being dropped.
-        let resolveBot;
-        const ready = new Promise((resolve) => {
-          resolveBot = resolve;
-        });
-        try {
-          const bot = await connect({
-            token,
-            api,
-            log,
-            onMessage: (normalized, raw) => {
-              if (!stopping) {
-                track(ready.then((connected) => handle(agentId, agent, connected, normalized, raw)));
-              }
-            },
-            onInteraction: (interaction) => {
-              if (!stopping) {
-                track(ready.then((connected) => onInteraction(connected, interaction)));
-              }
-            },
-            onFatal: (error) => warn(`discord: ${agentId}: ${error.message}`),
-            // A new session (not a resume) means Discord won't replay what
-            // was missed while disconnected; read it instead.
-            onReconnect: () => {
-              if (!stopping) {
-                track(ready.then((connected) => backfill(agentId, agent, connected)));
-              }
-            },
-          });
-          bots.set(agentId, bot);
-          resolveBot(bot);
-          log(`discord: ${agentId} connected as bot ${bot.botId}`);
-          if (stateDirectory) {
-            track(backfill(agentId, agent, bot));
-          }
-        } catch (error) {
-          warn(`discord: ${agentId} could not connect: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        attempts.push(connectAgent(agentId, agent, token, 0));
       }
+      // Each bot connects on its own; one Discord can't reach doesn't hold up the rest.
+      await Promise.all(attempts);
     },
 
     async stop() {
       stopping = true;
+      stopController.abort(new Error('the Discord channel is stopping'));
+      for (const timer of retryTimers) clearTimeout(timer);
+      retryTimers.clear();
       // Nothing new comes in; what is being answered finishes over REST.
       await Promise.all([...bots.values()].map((bot) => bot.close().catch(() => {})));
       bots.clear();

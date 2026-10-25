@@ -49,10 +49,18 @@ What is here so far is the part that reads `~/Library/Messages/chat.db`:
   answers after it restarts. `resolveOutbound` (for `message.send` and
   schedules) only texts the agent's principals and approvers.
 
-Approvals by text, attachments, `stratus doctor` checks, recovery after
-chat.db is replaced, and the setup guide (the Apple ID, Full Disk Access
-and Automation permissions) come next. Until approvals land, a tool call
-that needs approval waits for one that can't be given over iMessage.
+- `lib/approvals.js`: a tool call that needs approval is put to the
+  agent's approvers by text, with a 6-character code: `Reply Y K7QM2X to
+  allow once, ALWAYS K7QM2X to always allow, or N K7QM2X to deny.` The
+  code is single use and dies with the request. An answer is taken only
+  from an approver, over iMessage. A wrong code, a code sent over SMS, or a
+  code from anyone else counts as a guess, and three guesses deny the
+  request and tell the approvers. A bare "yes" gets a reminder to include
+  the code. Codes are never logged.
+
+Attachments, `stratus doctor` checks, recovery after chat.db is replaced,
+and the setup guide (the Apple ID, Full Disk Access and Automation
+permissions) come next.
 
 ## Tests
 

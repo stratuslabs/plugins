@@ -4,6 +4,7 @@ import path from 'node:path';
 import { latestTurnReply, turnFailureFor, turnReplyFor } from '@stratusagent/core';
 
 import { admit, idempotencyKeyFor, sessionIdFor } from './admission.js';
+import { newCode, outcomeText, parseAnswer, promptText, WRONG_ANSWER_LIMIT } from './approvals.js';
 import { MESSAGES_DB, openChatDb } from './chatdb.js';
 import { maskHandle, normalizeHandle } from './handles.js';
 import { createIntake } from './intake.js';
@@ -39,12 +40,17 @@ export const createImessageAdapter = ({
   intervalMs = 3000,
   watch = true,
   sendRetryMs = SEND_RETRY_MS,
+  random,
 }) => {
   const running = new Map();
+  // requestId -> an approval request put to approvers by text, while it is pending.
+  const asks = new Map();
+  let host;
+  let unsubscribe;
   let stopping = false;
 
-  const deliver = async (agentId, to, text) => {
-    const pieces = splitMessages(toPlainText(text));
+  const deliver = async (agentId, to, text, { markdown = true } = {}) => {
+    const pieces = splitMessages(markdown ? toPlainText(text) : text);
     for (const piece of pieces) {
       for (let attempt = 0; ; attempt += 1) {
         try {
@@ -61,7 +67,154 @@ export const createImessageAdapter = ({
     }
   };
 
+  /** Sends without failing the caller: for notes whose loss costs nothing but the note. */
+  const tell = async (agentId, to, text) => {
+    try {
+      await deliver(agentId, to, text, { markdown: false });
+    } catch (error) {
+      warn(`imessage: ${agentId} could not send a note to ${maskHandle(to)}: ${error.message}`);
+    }
+  };
+
+  const nameOf = (agentId) => host?.agents?.().find((agent) => agent.id === agentId)?.name ?? agentId;
+
+  /**
+   * A gated call from an iMessage conversation: put it to the agent's
+   * approvers by text. The person in the conversation is asked when they
+   * are an approver; otherwise every approver is. A request from another
+   * surface is that surface's to ask, so this neither sends nor denies it.
+   */
+  const askApproval = async (event) => {
+    const origin = event.delegatedFrom;
+    const viaOrigin = origin?.metadata?.channel === 'imessage' && running.has(origin.agentId) ? origin : undefined;
+    const metadata = (viaOrigin ? origin.metadata : event.metadata) ?? {};
+    const scheduled = event.scheduleDestination?.channel?.trim().toLowerCase() === 'imessage' ? event.scheduleDestination : undefined;
+    const here = metadata.channel === 'imessage' && typeof metadata.imessageTo === 'string' ? metadata.imessageTo : undefined;
+    if (here === undefined && scheduled?.to === undefined) {
+      return;
+    }
+    const askingAgent = viaOrigin?.agentId ?? event.agentId;
+    const decline = (why) => {
+      warn(`imessage: ${why}; denying ${event.call?.toolName} for ${event.agentId}`);
+      host.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
+    };
+    const entry = running.get(askingAgent);
+    if (!entry) {
+      decline(`${askingAgent} is not on iMessage here`);
+      return;
+    }
+    const person = normalizeHandle(here ?? scheduled.to);
+    const recipients = person !== null && entry.agent.approvers.has(person) ? [person] : [...entry.agent.approvers];
+    let code;
+    do {
+      code = newCode(random);
+    } while ([...asks.values()].some((ask) => ask.code === code));
+    const agentName = viaOrigin && origin.agentId !== event.agentId ? `${nameOf(event.agentId)} (for ${nameOf(origin.agentId)})` : nameOf(event.agentId);
+    const ask = {
+      requestId: event.requestId,
+      agentId: askingAgent,
+      code,
+      askedTo: recipients,
+      wrong: 0,
+      spent: false,
+      oneShot: event.oneShot === true,
+      toolName: event.call?.toolName ?? 'a tool',
+      agentName,
+    };
+    asks.set(event.requestId, ask);
+    let delivered = 0;
+    for (const to of recipients) {
+      try {
+        await deliver(askingAgent, to, promptText({
+          agentName,
+          toolName: ask.toolName,
+          risk: event.risk,
+          input: event.call?.input,
+          origin: event.origin,
+          oneShot: ask.oneShot,
+          always: event.always,
+          code,
+          ...(person !== null && person !== to ? { about: maskHandle(person) } : {}),
+        }), { markdown: false });
+        delivered += 1;
+      } catch (error) {
+        warn(`imessage: ${askingAgent} could not send an approval request to ${maskHandle(to)}: ${error.message}`);
+      }
+    }
+    if (delivered === 0 && asks.get(event.requestId) === ask) {
+      asks.delete(event.requestId);
+      decline('no approver could be texted');
+    }
+  };
+
+  const settleApproval = async (event) => {
+    const ask = asks.get(event.requestId);
+    if (!ask) {
+      return;
+    }
+    asks.delete(event.requestId);
+    const text = ask.guessed
+      ? `${ask.agentName}: ${ask.toolName} was denied after ${WRONG_ANSWER_LIMIT} wrong answers to its code. Someone may be guessing.`
+      : outcomeText(ask, event);
+    for (const to of ask.askedTo) {
+      await tell(ask.agentId, to, text);
+    }
+  };
+
+  /**
+   * A text that reads as an approval answer, while this agent has a request
+   * pending. Settled here, never dispatched: true when it was one.
+   */
+  const answerApproval = async (agentId, agent, message) => {
+    const parsed = parseAnswer(message.text);
+    if (!parsed) {
+      return false;
+    }
+    const pending = [...asks.values()].filter((ask) => ask.agentId === agentId && !ask.spent);
+    if (pending.length === 0) {
+      return false;
+    }
+    const from = normalizeHandle(message.from);
+    const overIMessage = message.service === 'iMessage';
+    const approver = from !== null && agent.approvers.has(from);
+    if (parsed.code === undefined) {
+      if (approver && overIMessage && pending.some((ask) => ask.askedTo.includes(from))) {
+        await tell(agentId, from, 'To answer the approval request, reply with its code too, like Y K7QM2X.');
+        return true;
+      }
+      return false;
+    }
+    const ask = pending.find((candidate) => candidate.code === parsed.code);
+    if (ask && approver && overIMessage) {
+      ask.spent = true;
+      if (!host.resolveApproval({ requestId: ask.requestId, answer: parsed.answer, actor: from })) {
+        asks.delete(ask.requestId);
+        await tell(agentId, from, 'That request is no longer pending.');
+      }
+      return true;
+    }
+    // A wrong code, a code over SMS, or a code from someone who is not an
+    // approver: all count as guesses against every request pending.
+    log(`imessage: ${agentId} counted a wrong approval answer from ${maskHandle(from ?? message.from)} over ${message.service}.`);
+    for (const candidate of pending) {
+      candidate.wrong += 1;
+      if (candidate.wrong >= WRONG_ANSWER_LIMIT) {
+        candidate.spent = true;
+        candidate.guessed = true;
+        warn(`imessage: ${agentId} denied ${candidate.toolName} after ${WRONG_ANSWER_LIMIT} wrong answers to its approval code.`);
+        host.resolveApproval({ requestId: candidate.requestId, answer: 'deny', reason: 'undeliverable' });
+      }
+    }
+    if (approver && overIMessage) {
+      await tell(agentId, from, "That code doesn't match a pending request.");
+    }
+    return true;
+  };
+
   const answer = async (gateway, agentId, agent, message) => {
+    if (await answerApproval(agentId, agent, message)) {
+      return 'settled';
+    }
     const verdict = admit(message, agent);
     if (!verdict.admit) {
       log(`imessage: ${agentId} refused row ${message.rowid} from ${maskHandle(message.from)}: ${verdict.reason}.`);
@@ -139,6 +292,14 @@ export const createImessageAdapter = ({
   return {
     name: 'imessage',
     async start(gateway) {
+      host = gateway;
+      unsubscribe = gateway.bus.subscribe((event) => {
+        if (event?.type === 'tool.approval-requested') {
+          void askApproval(event).catch((error) => warn(`imessage: could not ask for approval: ${error.message}`));
+        } else if (event?.type === 'tool.approval-resolved') {
+          void settleApproval(event).catch((error) => warn(`imessage: could not report an approval: ${error.message}`));
+        }
+      });
       const store = createWatermarkStore({ directory: stateDirectory });
       for (const [agentId, agent] of config.agents) {
         let db;
@@ -180,7 +341,11 @@ export const createImessageAdapter = ({
     },
     async stop() {
       stopping = true;
+      // Intake first, so nothing new starts; the bus last, so a request
+      // the shutdown settles is still reported.
       await Promise.all([...running.values()].map(({ intake }) => intake.stop()));
+      unsubscribe?.();
+      unsubscribe = undefined;
       for (const { db } of running.values()) {
         db.close();
       }

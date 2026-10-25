@@ -75,6 +75,9 @@ Attachments. The package stays private until then.
 
 ## Known issue
 
-If the daemon stops while Discord is unreachable, `@discordjs/ws` 2.0.4
-keeps retrying the connection after `destroy()`, which can keep the process
-from exiting on its own. Tracked in stratuslabs/plugins#20.
+If Discord can't be reached when the daemon starts, that agent's bot gives
+up at once and stays offline until the daemon restarts.
+
+`@discordjs/ws` is pinned to 2.0.4: stopping works around a reconnect loop
+in it (stratuslabs/plugins#20) using library internals, and the "closing
+while Discord is unreachable" test checks that still holds after a bump.

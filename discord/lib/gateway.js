@@ -16,6 +16,38 @@ const FATAL = new Map([
 ]);
 
 /**
+ * `manager.destroy()` alone doesn't always stop `@discordjs/ws` 2.0.4
+ * (plugins#20). After a failed attempt a shard goes idle, waits 500ms and
+ * connects again; a destroy that lands in that wait is a no-op ("Tried to
+ * destroy a shard that was idle"), so it keeps retrying an unreachable
+ * Discord and the process never exits. So each shard's next connect is made
+ * a no-op first, then the manager is destroyed, then any attempt that was
+ * already underway is destroyed too.
+ *
+ * This reaches into the library (`strategy.shards`, `internalConnect`,
+ * `status`), which is why the dependency is pinned; the "closing while
+ * Discord is unreachable" test fails if a new version moves them.
+ */
+const IDLE = 0;
+export const stopManager = async (manager, options) => {
+  const shards = [...(manager.strategy?.shards?.values() ?? [])];
+  for (const shard of shards) {
+    shard.internalConnect = async () => {};
+  }
+  await manager.destroy(options);
+  // An attempt already past internalConnect's first line only gets as far
+  // as Connecting, within microtasks; a turn of the event loop shows it.
+  for (let pass = 0; pass < 10; pass += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    const live = shards.filter((shard) => shard.status !== IDLE);
+    if (live.length === 0) {
+      return;
+    }
+    await Promise.all(live.map((shard) => shard.destroy(options).catch(() => {})));
+  }
+};
+
+/**
  * One agent's bot connection: the gateway for what comes in, REST for what
  * goes out. `@discordjs/ws` does heartbeats, identify throttling, resume and
  * reconnect. `onMessage(message, raw)` gets every MESSAGE_CREATE in the
@@ -76,7 +108,7 @@ export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onR
     await manager.connect();
     await readyOnce;
   } catch (error) {
-    await manager.destroy().catch(() => {});
+    await stopManager(manager).catch(() => {});
     // The library's own message for a fatal close ("Used disallowed
     // intents") doesn't say what to change; ours does.
     throw fatalError ?? error;
@@ -87,6 +119,6 @@ export const connectBot = async ({ token, onMessage, onInteraction, onFatal, onR
     },
     rest,
     threads,
-    close: () => manager.destroy({ code: 1000, reason: 'stratus stopping' }),
+    close: () => stopManager(manager, { code: 1000, reason: 'stratus stopping' }),
   };
 };

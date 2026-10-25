@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
-import { connectBot, INTENTS } from '../lib/gateway.js';
+import { connectBot, INTENTS, stopManager } from '../lib/gateway.js';
 import { postText, editText, threadFrom, typing } from '../lib/send.js';
 import { BOT, fakeDiscord } from './fake-discord.js';
 
@@ -61,6 +62,61 @@ test('a dropped connection resumes the same session from the last sequence, and 
   assert.match(discord.state.sockets.at(-1), /^\/resume/, 'at the resume URL Discord gave');
   discord.dispatch('MESSAGE_CREATE', { id: '600000000000000004', channel_id: CHANNEL, guild_id: GUILD, content: 'two', author: { id: USER }, mentions: [] });
   await until(() => seen.length === 2, 'a message after the resume');
+});
+
+// plugins#20: a close that lands while the shard is reconnecting to an
+// unreachable Discord, including in the library's 500ms wait between
+// attempts, must still stop it, or the daemon never exits.
+test('closing while Discord is unreachable stops reconnecting, so the process can exit', async () => {
+  const fixture = new URL('./fixtures/stop-unreachable.mjs', import.meta.url).pathname;
+  const run = (delay) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [fixture, String(delay)], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let out = '';
+    child.stdout.on('data', (part) => {
+      out += part;
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ delay, exited: false, out });
+    }, 6000);
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      resolve({ delay, exited: true, code, out });
+    });
+  });
+  // Before the first retry, inside the 500ms wait, and a few attempts in.
+  const results = await Promise.all([0, 100, 300, 520, 700, 1300].map(run));
+  for (const result of results) {
+    assert.equal(result.out, 'closed\n', `close() resolved (delay ${result.delay}ms)`);
+    assert.equal(result.exited, true, `the process exited on its own after close() (delay ${result.delay}ms)`);
+    assert.equal(result.code, 0);
+  }
+});
+
+test('an attempt already underway when the manager is destroyed is destroyed as well', async () => {
+  // A shard that had just started connecting: idle when destroy() looked,
+  // Connecting a moment later.
+  const destroyed = [];
+  const shard = {
+    status: 0,
+    async destroy(options) {
+      destroyed.push(options);
+      this.status = 0;
+    },
+  };
+  const manager = {
+    strategy: { shards: new Map([[0, shard]]) },
+    async destroy() {
+      queueMicrotask(() => {
+        shard.status = 1;
+      });
+    },
+  };
+  await stopManager(manager, { code: 1000 });
+  assert.equal(shard.status, 0);
+  assert.deepEqual(destroyed, [{ code: 1000 }]);
+  await shard.internalConnect();
+  assert.equal(shard.status, 0, 'a scheduled reconnect is a no-op');
 });
 
 test('a refused Message Content intent fails the connection with the Developer Portal toggle to flip', async () => {

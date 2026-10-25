@@ -522,24 +522,36 @@ const checkTree = (compiled, tree, { surfaceId, complete }) => {
   const DONE = 2;
   const ACTIVE = 1;
   const state = new Map();
-  const visit = (id) => {
-    state.set(id, ACTIVE);
-    for (const reference of edges.get(id) ?? []) {
+  // Depth first with an explicit stack: a flat list within the byte limit
+  // can chain thousands of components, too deep for recursion.
+  const visit = (start) => {
+    state.set(start, ACTIVE);
+    const stack = [{ id: start, next: 0 }];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const references = edges.get(frame.id) ?? [];
+      if (frame.next === references.length) {
+        state.set(frame.id, DONE);
+        stack.pop();
+        continue;
+      }
+      const reference = references[frame.next];
+      frame.next += 1;
       if (!tree.has(reference.id)) {
         continue;
       }
       if (state.get(reference.id) === ACTIVE) {
         throw new A2uiValidationError({
           surfaceId,
-          path: `${tree.get(id).at}${reference.at}`,
-          message: `"${id}" refers to "${reference.id}", which contains "${id}": the tree has a cycle.`,
+          path: `${tree.get(frame.id).at}${reference.at}`,
+          message: `"${frame.id}" refers to "${reference.id}", which contains "${frame.id}": the tree has a cycle.`,
         });
       }
       if (state.get(reference.id) !== DONE) {
-        visit(reference.id);
+        state.set(reference.id, ACTIVE);
+        stack.push({ id: reference.id, next: 0 });
       }
     }
-    state.set(id, DONE);
   };
   for (const id of tree.keys()) {
     if (!state.has(id)) {

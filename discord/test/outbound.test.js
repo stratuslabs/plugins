@@ -78,6 +78,23 @@ test('a guild channel in a configured guild is a destination: posts there, pingi
   assert.deepEqual(discord.state.patches.map((p) => [p.channelId, p.messageId, p.body.content]), [[CHANNEL, ref.ts, 'edited']]);
 });
 
+test('editing a long post rewrites all of it: a shorter text takes down the overflow, a longer one adds none twice', async (t) => {
+  const { discord, adapter } = await setUp(t);
+  const connection = await adapter.resolveOutbound({ agentId: 'ava', to: CHANNEL });
+  const ref = await connection.post('a'.repeat(2500));
+  assert.equal(discord.state.posts.length, 2);
+  await connection.edit(ref, 'b'.repeat(2500));
+  await connection.edit(ref, 'c'.repeat(2500));
+  assert.equal(discord.state.posts.length, 2, 'the overflow message is edited, not posted again');
+  assert.equal(discord.state.patches.length, 4, 'each edit rewrites both messages');
+  await connection.edit(ref, 'short');
+  assert.equal(discord.state.posts.length, 2);
+  assert.equal(discord.state.deletes.length, 1, 'the continuation the text no longer needs comes down');
+  assert.notEqual(discord.state.deletes[0].messageId, ref.ts);
+  assert.deepEqual(discord.state.patches.at(-1).body.content, 'short');
+  assert.equal(discord.state.patches.at(-1).messageId, ref.ts);
+});
+
 test('an empty post still says something', async (t) => {
   const { discord, adapter } = await setUp(t);
   await (await adapter.resolveOutbound({ agentId: 'ava', to: CHANNEL })).post('   ');

@@ -1,5 +1,5 @@
 import { chunk } from './chunk.js';
-import { editText, postText, typing, uploadFile } from './send.js';
+import { editText, postText, removeMessage, typing, uploadFile } from './send.js';
 
 /**
  * Discord as an addressable channel: `discord:` destinations for
@@ -31,6 +31,8 @@ const POSTABLE = new Set([0, 2, 5, 13, 10, 11, 12]);
 const SPOKEN = new Set([0, 19, 20, 23]);
 
 const KIND_CACHE_LIMIT = 1000;
+/** Posts per connection whose messages an edit can still rewrite. */
+const POSTS_KEPT = 100;
 const PAGE = 100;
 /** Pages one read may fetch, so a history of notices can't make it walk forever. */
 const MAX_PAGES = 10;
@@ -181,17 +183,44 @@ export const createAddressing = ({ bots, config }) => {
       }
     }
 
+    // A post over 2000 characters is several messages. An edit rewrites all
+    // of them, so the ids of each post are kept, by its first id.
+    const posts = new Map();
+    const remember = (first, ids) => {
+      posts.delete(first);
+      posts.set(first, ids);
+      if (posts.size > POSTS_KEPT) {
+        posts.delete(posts.keys().next().value);
+      }
+    };
+
     return {
       async post(text) {
         const ids = await postText(bot.rest, target, text.trim().length > 0 ? text : '(empty message)', replyTo ? { replyTo } : {});
+        if (ids.length > 0) {
+          remember(ids[0], ids);
+        }
         return { channel: target, ts: ids[0] ?? '' };
       },
       async edit(ref, text) {
-        // One message holds 2000 characters; the rest follows it.
-        const [first, ...rest] = chunk(text.trim().length > 0 ? text : '(empty message)');
-        await editText(bot.rest, ref.channel, ref.ts, first);
-        for (const piece of rest) {
-          await postText(bot.rest, ref.channel, piece);
+        const pieces = chunk(text.trim().length > 0 ? text : '(empty message)');
+        const ids = [...(posts.get(ref.ts) ?? [ref.ts])];
+        try {
+          for (const [index, piece] of pieces.entries()) {
+            if (index < ids.length) {
+              await editText(bot.rest, ref.channel, ids[index], piece);
+            } else {
+              ids.push(...await postText(bot.rest, ref.channel, piece));
+            }
+          }
+          // A shorter text takes down the continuations it no longer needs.
+          while (ids.length > pieces.length) {
+            await removeMessage(bot.rest, ref.channel, ids.at(-1));
+            ids.pop();
+          }
+        } finally {
+          // What got posted or is still up stays known, even if a call failed.
+          remember(ref.ts, ids);
         }
       },
       async upload(filePath, title) {

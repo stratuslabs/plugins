@@ -14,6 +14,7 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
   const calls = [];
   const messages = new Map();
   let nextId = 1;
+  let editsFail = failEdits;
   const ops = {
     async post(text) {
       const id = `m${nextId++}`;
@@ -22,7 +23,7 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
       return id;
     },
     async edit(id, text) {
-      if (failEdits) throw new Error('edit refused');
+      if (editsFail) throw new Error('edit refused');
       messages.set(id, text);
       calls.push(['edit', id, text]);
     },
@@ -72,7 +73,10 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
   const warnings = [];
   const renderer = createRenderer({ ops, intervalMs, typingEveryMs: 8000, timers: fakeTimers, now: () => clock, warn: (line) => warnings.push(line) });
   const visible = () => [...messages.values()];
-  return { renderer, calls, visible, advance, settle, warnings };
+  const setFailEdits = (value) => {
+    editsFail = value;
+  };
+  return { renderer, calls, visible, advance, settle, warnings, setFailEdits };
 };
 
 const text = (value) => ({ type: 'provider.delta', sessionId: 's', delta: { type: 'text', text: value } });
@@ -272,4 +276,16 @@ test('a failed upload is logged and the turn goes on', async () => {
   await renderer.finalize('Done.');
   assert.deepEqual(visible(), ['Done.']);
   assert.match(warnings.join('\n'), /could not upload shot\.png: upload refused/);
+});
+
+test('an edit Discord refused is tried again, so the reply that lands is the whole one', async () => {
+  const { renderer, visible, advance, settle, setFailEdits } = harness();
+  renderer.onEvent(text('a'));
+  await settle();
+  setFailEdits(true);
+  renderer.onEvent(text('b'));
+  await advance(1000);
+  setFailEdits(false);
+  await renderer.finalize('ab');
+  assert.deepEqual(visible(), ['ab'], 'the failed edit is not counted as shown');
 });

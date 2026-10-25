@@ -80,8 +80,15 @@ export const createRenderer = ({
         if (index < segment.ids.length) {
           if (segment.shown[index] !== piece) {
             const id = segment.ids[index];
-            await call('edit a message', () => ops.edit(id, piece));
-            segment.shown[index] = piece;
+            // Counted as shown only once Discord took it, so a refused
+            // edit is tried again by the next sync.
+            const edited = await call('edit a message', async () => {
+              await ops.edit(id, piece);
+              return true;
+            });
+            if (edited) {
+              segment.shown[index] = piece;
+            }
           }
         } else {
           const id = await call('post a message', () => ops.post(piece));

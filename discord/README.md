@@ -24,6 +24,12 @@ the private plans repo (roadmap/20, V1 section).
 }
 ```
 
+4. Invite each bot to its guilds with View Channels, Send Messages, Send
+   Messages in Threads, Create Public Threads, Read Message History and
+   Attach Files. Without Create Public Threads it answers a mention in the
+   channel, as a reply, and each mention there starts a new conversation
+   (stratuslabs/plugins#21).
+
 Every agent with a stored token is on Discord; one with no approvers in
 either place fails the load with its name.
 

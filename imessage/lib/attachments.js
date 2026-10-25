@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -120,6 +120,25 @@ const sleep = (ms, signal) => new Promise((resolve) => {
 
 const run = promisify(execFile);
 
+/** At most `limit` bytes of `file`; `over` says it held more, which a file still growing can. */
+const readAtMost = async (file, limit) => {
+  const handle = await open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) {
+        break;
+      }
+      length += bytesRead;
+    }
+    return { body: buffer.subarray(0, Math.min(length, limit)), over: length > limit };
+  } finally {
+    await handle.close();
+  }
+};
+
 /**
  * sips, the image tool every Mac has. `dimensions` reads an image's size
  * (undefined when sips can't read it as one) and `toJpeg` writes it as a
@@ -171,8 +190,14 @@ export const readAttachments = async (attachments, {
     root ??= await realpath(directory).catch(() => null);
     return root;
   };
-  /** The file's real path once it exists inside the folder; a reason when it won't be read. */
+  /**
+   * The file's real path and size once it is inside the folder and fully
+   * written: not empty, and as large as chat.db says when it says. A reason
+   * when it won't be read.
+   */
   const locate = async (attachment) => {
+    const expected = Number(attachment.totalBytes ?? 0);
+    let partial = false;
     for (;;) {
       const file = expand(attachment.filename);
       if (file !== undefined) {
@@ -185,11 +210,20 @@ export const readAttachments = async (attachments, {
           if (inside === null || !within(real, inside)) {
             return { reason: 'failed', why: "is not in Messages' attachments folder, so it was not read" };
           }
-          return { file: real };
+          let size;
+          try {
+            size = (await stat(real)).size;
+          } catch (error) {
+            return { reason: 'failed', why: `could not be opened (${error.code ?? error.message})` };
+          }
+          if (size > 0 && !(expected > 0 && size < expected)) {
+            return { file: real, size };
+          }
+          partial = true;
         }
       }
       if (both.aborted) {
-        return { reason: 'missing', why: deadline.aborted ? `had not downloaded after ${timeoutMs}ms` : undefined };
+        return { reason: 'missing', why: deadline.aborted ? `had not ${partial ? 'finished downloading' : 'downloaded'} after ${timeoutMs}ms` : undefined };
       }
       await sleep(pollMs, both);
     }
@@ -214,13 +248,7 @@ export const readAttachments = async (attachments, {
         skip(attachment, found.reason, found.why);
         continue;
       }
-      let size;
-      try {
-        size = (await stat(found.file)).size;
-      } catch (error) {
-        skip(attachment, 'failed', `could not be opened (${error.code ?? error.message})`);
-        continue;
-      }
+      const { size } = found;
       if (text) {
         const limit = Math.min(TEXT_ATTACHMENT_MAX_BYTES, TEXT_ATTACHMENTS_MAX_TOTAL_BYTES - textBytes);
         if (size > limit) {
@@ -229,12 +257,17 @@ export const readAttachments = async (attachments, {
         }
         let decoded;
         try {
-          decoded = new TextDecoder('utf-8', { fatal: true }).decode(await readFile(found.file));
+          const read = await readAtMost(found.file, limit);
+          if (read.over) {
+            skip(attachment, 'too-large', `grew past the ${limit} bytes this message could still take`);
+            continue;
+          }
+          decoded = new TextDecoder('utf-8', { fatal: true }).decode(read.body);
         } catch (error) {
           skip(attachment, error instanceof TypeError ? 'unreadable' : 'failed', error instanceof TypeError ? 'is not UTF-8 text' : `could not be read (${error.code ?? error.message})`);
           continue;
         }
-        textBytes += size;
+        textBytes += Buffer.byteLength(decoded);
         texts.push({ name: nameOf(attachment), text: decoded });
         continue;
       }
@@ -244,12 +277,14 @@ export const readAttachments = async (attachments, {
       let mediaType;
       if (isImageAttachmentMediaType(type) && size <= limit) {
         try {
-          body = await readFile(found.file);
+          const read = await readAtMost(found.file, limit);
+          // A file that grew past the limit is converted like any large image.
+          body = read.over ? undefined : read.body;
         } catch (error) {
           skip(attachment, 'failed', `could not be read (${error.code ?? error.message})`);
           continue;
         }
-        const dimensions = imageDimensions(body, type);
+        const dimensions = body && imageDimensions(body, type);
         if (dimensions !== undefined && dimensions.width <= IMAGE_ATTACHMENT_MAX_DIMENSION && dimensions.height <= IMAGE_ATTACHMENT_MAX_DIMENSION) {
           mediaType = type;
         } else {

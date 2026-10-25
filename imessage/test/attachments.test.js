@@ -251,3 +251,27 @@ test('~ in chat.db\'s path is the home folder', async () => {
   const { unread } = await readAttachments([{ filename: '~/Library/Messages/Attachments/zz/none.png', mimeType: 'image/png', transferName: 'none.png' }], { timeoutMs: 30, pollMs: 10 });
   assert.deepEqual(unread, [{ name: 'none.png', reason: 'missing' }]);
 });
+
+test('a file still being written is waited for until it reaches the size Messages recorded', async (t) => {
+  const { directory, at } = folders(t);
+  const text = 'the whole note\n'.repeat(20);
+  writeFileSync(at('partial.txt'), text.slice(0, 10));
+  setTimeout(() => writeFileSync(at('partial.txt'), text), 60);
+  const { texts, unread } = await readAttachments([
+    { filename: at('partial.txt'), mimeType: 'text/plain', transferName: 'partial.txt', totalBytes: Buffer.byteLength(text) },
+  ], { directory, pollMs: 10 });
+  assert.deepEqual(unread, []);
+  assert.deepEqual(texts, [{ name: 'partial.txt', text }]);
+});
+
+test('an empty file, or one that never reaches its recorded size, is named as not downloaded', async (t) => {
+  const { directory, at } = folders(t);
+  writeFileSync(at('empty.png'), '');
+  writeFileSync(at('short.png'), png(4, 4));
+  const { images, unread } = await readAttachments([
+    { filename: at('empty.png'), mimeType: 'image/png', transferName: 'empty.png' },
+    { filename: at('short.png'), mimeType: 'image/png', transferName: 'short.png', totalBytes: 10_000 },
+  ], { directory, timeoutMs: 60, pollMs: 10 });
+  assert.deepEqual(images, []);
+  assert.deepEqual(unread, [{ name: 'empty.png', reason: 'missing' }, { name: 'short.png', reason: 'missing' }]);
+});

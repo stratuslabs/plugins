@@ -33,13 +33,14 @@ import { advance, isSettled, markSettled, observe, replacementOf } from './water
  * The periodic scan is the guarantee; a change to chat.db or its WAL only
  * makes delivery sooner. Before each scan the stored record is checked
  * against the file. A chat.db that was replaced is never read with the old
- * cursor: intake retires (it reads nothing more, and what it handed over
- * settles without writing the record) and calls `onReplaced(reason)`, so
- * the channel can open the new file and recover from it. Without
- * `onReplaced`, intake just stops.
+ * cursor: intake reads nothing more, lets what it handed over settle (and
+ * stores that), and only then calls `onReplaced(reason)`, so the channel
+ * opens the new file and recovers from a record nothing else will write.
+ * Without `onReplaced`, intake just stops.
  *
  * After a recovery, a message dated at or before `record.historyThrough`
- * was in the old database and is skipped, counted, not answered.
+ * was in the old database and is skipped, counted, not answered, unless
+ * the old database left it unsettled (`record.carry`).
  *
  * The log names rows by ROWID and never carries message text or numbers.
  */
@@ -70,8 +71,6 @@ export const createIntake = ({
   let stalled = null;
   let stopped = null;
   let closing = false;
-  // Set once chat.db was replaced: nothing this intake settles is stored.
-  let retired = false;
   let scanning;
   let again = false;
   let timer;
@@ -88,16 +87,13 @@ export const createIntake = ({
   let saveWarned = false;
 
   const settle = (entry, outcome) => {
-    if (retired) {
-      return;
-    }
     entry.outcome = outcome;
     let next = record;
     while (open.length > 0 && open[0].outcome === 'settled') {
       next = advance(next, open.shift());
     }
     if (outcome === 'settled' && open.includes(entry)) {
-      next = markSettled(next, entry.rowid);
+      next = markSettled(next, entry.rowid, entry.guid);
     }
     if (next === record) {
       return;
@@ -126,10 +122,13 @@ export const createIntake = ({
     const replaced = replacementOf(record, db);
     if (replaced) {
       stopped = replaced;
-      retired = true;
       close();
       if (onReplaced) {
-        onReplaced(replaced);
+        void (async () => {
+          while (inflight.size > 0) {
+            await Promise.all([...inflight]);
+          }
+        })().then(() => onReplaced(replaced));
       } else {
         warn(`imessage: ${agentId} stopped reading: ${replaced}. Messages that arrive now are not answered until the channel is set up on this database again.`);
       }
@@ -142,7 +141,8 @@ export const createIntake = ({
       }
       const observedBefore = record.observedThrough;
       const newest = Math.max(...rows.map((row) => appleDate(row.date).getTime()).filter(Number.isSafeInteger));
-      persist(observe(record, rows.at(-1).rowid, Number.isSafeInteger(newest) && newest >= 0 ? newest : undefined));
+      const unsettled = rows.filter((row) => !isSettled(record, row.rowid)).map((row) => row.guid);
+      persist(observe(record, rows.at(-1).rowid, Number.isSafeInteger(newest) && newest >= 0 ? newest : undefined, unsettled));
       let skippedOld = 0;
       let skippedHistory = 0;
       const history = Number.isSafeInteger(record.historyThrough) ? record.historyThrough : null;
@@ -176,7 +176,7 @@ export const createIntake = ({
           continue;
         }
         stalled = null;
-        if (history !== null && result.date.getTime() <= history) {
+        if (history !== null && result.date.getTime() <= history && !(record.carry ?? []).includes(result.guid)) {
           skippedHistory += 1;
           settle(entry, 'settled');
           continue;

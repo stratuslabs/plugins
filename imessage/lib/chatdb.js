@@ -69,6 +69,8 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
   const maxDate = db.prepare('SELECT CAST(MAX(date) AS TEXT) AS max FROM message');
   const firstAfter = db.prepare('SELECT MIN(ROWID) AS rowid FROM message WHERE date >= ?');
   const lastBefore = db.prepare('SELECT MAX(ROWID) AS rowid FROM message WHERE ROWID < ?');
+  const rowidOf = db.prepare('SELECT ROWID AS rowid FROM message WHERE guid = ?');
+  const maxDateThrough = db.prepare('SELECT CAST(MAX(date) AS TEXT) AS max FROM message WHERE ROWID <= ?');
   return {
     file,
     raw: db,
@@ -88,6 +90,13 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
     },
     /** The lowest ROWID dated after `ms` (to the millisecond), undefined when there is none. */
     firstRowidAfter: (ms) => firstAfter.get(nanosAfter(ms))?.rowid ?? undefined,
+    /** The newest date among rows at or below `rowid`, as epoch milliseconds; null when there are none. */
+    maxDateThrough: (rowid) => {
+      const max = maxDateThrough.get(rowid)?.max;
+      return max === null || max === undefined ? null : appleDate(max).getTime();
+    },
+    /** The ROWID of the message with `guid`, undefined when there is none. */
+    rowidOf: (guid) => rowidOf.get(guid)?.rowid ?? undefined,
     /** The highest ROWID below `rowid`, 0 when there is none. */
     lastRowidBefore: (rowid) => Number(lastBefore.get(rowid)?.rowid ?? 0),
     /** Up to `limit` rows with ROWID above `rowid`, in ROWID order. */

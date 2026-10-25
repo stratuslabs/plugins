@@ -349,25 +349,62 @@ test('each scan records the newest message date it read', async (t) => {
   assert.equal(store.load('ava').record.observedDate, newest.getTime());
 });
 
-test('a replaced chat.db hands recovery to the channel: intake retires, and its late answers write nothing', async (t) => {
+test('a replaced chat.db hands recovery to the channel only once what intake handed over has settled, and those settles are stored', async (t) => {
   const { directory, file, fixture, store, make } = setup(t);
-  fixture.received(PHONE);
+  const { guid } = fixture.received(PHONE);
   const slow = deferred();
   const replaced = [];
   const seen = [];
   const intake = make(async (message) => { seen.push(message.rowid); return slow.promise; }, { onReplaced: (reason) => replaced.push(reason) });
   await intake.scan();
   assert.equal(seen.length, 1);
+  assert.deepEqual(store.load('ava').record.pending, [guid]);
   fixture.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   copyFileSync(file, path.join(directory, 'copy.db'));
   renameSync(path.join(directory, 'copy.db'), file);
-  const before = readStore(store);
+  fixture.received(PHONE);
   await intake.scan();
   await intake.scan();
+  assert.deepEqual(replaced, [], 'not while a message is still being answered');
+  assert.match(intake.status().stopped, /different file/);
+  slow.resolve('kept');
+  await intake.idle();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(replaced.length, 1);
   assert.match(replaced[0], /different file/);
-  assert.match(intake.status().stopped, /different file/);
-  slow.resolve('settled');
+  assert.equal(seen.length, 1, 'nothing more was read from either file');
+  // Kept, so still pending for the recovery to carry.
+  assert.deepEqual(store.load('ava').record.pending, [guid]);
+});
+
+test('pending lists what was handed over and not yet settled, and settling clears it', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const a = fixture.received(PHONE);
+  const b = fixture.received(PHONE);
+  const gates = new Map([[a.rowid, deferred()], [b.rowid, deferred()]]);
+  const intake = make(async (message) => gates.get(message.rowid).promise);
+  await intake.scan();
+  assert.deepEqual(store.load('ava').record.pending, [a.guid, b.guid]);
+  gates.get(b.rowid).resolve('settled');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(store.load('ava').record.pending, [a.guid]);
+  gates.get(a.rowid).resolve('settled');
   await intake.idle();
-  assert.deepEqual(readStore(store), before);
+  assert.deepEqual(store.load('ava').record.pending, []);
+  assert.equal(store.load('ava').record.watermark, b.rowid);
+});
+
+test('a carried message dated before the history date is still handed over, then leaves the carry', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const historyThrough = Date.now() - 60_000;
+  const carried = fixture.received(PHONE, { date: new Date(historyThrough - 5000) });
+  const other = fixture.received(PHONE, { date: new Date(historyThrough - 4000) });
+  store.save('ava', { ...store.load('ava').record, historyThrough, carry: [carried.guid] });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [carried.rowid]);
+  assert.ok(other.rowid > carried.rowid);
+  assert.deepEqual(store.load('ava').record.carry, []);
 });

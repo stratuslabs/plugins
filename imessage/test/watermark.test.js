@@ -322,3 +322,51 @@ test('a second replacement takes the newest date read since the first one', (t) 
   t.after(() => { nextDb.close(); next.close(); });
   assert.equal(recoveredRecord(old, nextDb).historyThrough, at('2026-10-20T12:00:00Z').getTime());
 });
+
+test('recovery carries what the old database left unsettled, from just before it in the new one', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  const kept = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = { ...seedRecord(db, HANDLE), pending: [kept.guid, 'GONE-FROM-THE-NEW-ONE'], carry: [] };
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  next.received(PHONE, { date: at('2026-10-19T09:00:00Z') });
+  const again = next.received(PHONE, { date: at('2026-10-20T11:00:00Z'), guid: kept.guid });
+  next.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const fresh = next.received(PHONE, { date: at('2026-10-20T12:05:00Z') });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.deepEqual(recovered.carry, [kept.guid]);
+  assert.equal(recovered.watermark, again.rowid - 1);
+  assert.ok(recovered.watermark < fresh.rowid);
+  assert.deepEqual(recovered.pending, []);
+});
+
+test('a resumed record from before dates were kept gets its date from the rows it already read', (t) => {
+  const { fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  const read = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const { observedDate, ...old } = { ...seedRecord(db, HANDLE), watermark: read.rowid, observedThrough: read.rowid, fingerprint: read.guid };
+  const start = startFrom({ loaded: { status: 'ok', record: old }, db, handle: HANDLE });
+  assert.equal(start.action, 'resume');
+  assert.equal(start.record.observedDate, at('2026-10-20T11:00:00Z').getTime());
+  assert.equal(start.changed, true);
+});
+
+test('a second replacement still carries what the first carried and has not been answered', (t) => {
+  const { directory, fixture, db } = setup(t);
+  const carried = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = { ...seedRecord(db, HANDLE), historyThrough: at('2026-10-20T12:00:00Z').getTime(), pending: [], carry: [carried.guid] };
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  const again = next.received(PHONE, { date: at('2026-10-20T11:00:00Z'), guid: carried.guid });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.deepEqual(recovered.carry, [carried.guid]);
+  assert.equal(recovered.watermark, again.rowid - 1);
+});

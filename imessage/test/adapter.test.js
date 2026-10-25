@@ -527,3 +527,101 @@ test('a replaced chat.db with no date to recover from still stops the agent and 
   assert.equal(next.dispatched.length, 0);
   assert.ok(logs.some((line) => /is not on iMessage: .*Remove .*watermarks\.json/.test(line)), logs.join('\n'));
 });
+
+/** Another adapter on the same state and chat.db, as the next daemon start. */
+const startAgain = async (t, { stateDirectory, chatDb, logs }) => {
+  const gateway = fakeGateway();
+  const sender = fakeSender();
+  const adapter = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => adapter.stop());
+  await adapter.start(gateway);
+  return { gateway, sender, adapter };
+};
+
+test('an answer that could not be sent when chat.db was replaced is sent from the new one, after the old answers finish', async (t) => {
+  // Messages refuses the first answer's three tries, then sends.
+  let tries = 0;
+  const sender = fakeSender({ fail: () => (tries += 1) <= 3 });
+  let release;
+  let calls = 0;
+  const gateway = fakeGateway((input) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Promise((resolve) => { release = () => resolve({ text: 'the answer' }); });
+    }
+    return input.userMessage === 'slow one' ? { text: 'the answer', repeat: 'finished' } : { text: `echo: ${input.userMessage}` };
+  });
+  const { chatDb, fixture, logs } = await setup(t, { gateway, sender });
+  const read = new Date(Date.now() - 60_000);
+  const slow = fixture.received(PHONE, { text: 'slow one', body: null, date: read });
+  await waitFor(() => gateway.dispatched.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'slow one', body: null, date: read, guid: slow.guid });
+    next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) });
+  });
+  await settle();
+  await settle();
+  assert.equal(gateway.dispatched.length, 1, 'the new file waits while an answer from the old one is out');
+  release();
+  await waitFor(() => sender.sent.length === 2);
+  assert.ok(logs.some((line) => /could not send its answer to row 1/.test(line)));
+  assert.deepEqual(sender.sent.map(([, text]) => text), ['the answer', 'echo: sent around the swap']);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['slow one', 'slow one', 'sent around the swap']);
+});
+
+test('a message kept at shutdown is answered after chat.db is replaced while the daemon is down', async (t) => {
+  const stopping = Object.assign(new Error('stopping'), { name: 'GatewayStoppingError', restarting: true });
+  const { chatDb, fixture, adapter, sender, stateDirectory, logs } = await setup(t, { gateway: fakeGateway(() => ({ throw: stopping })) });
+  const read = new Date(Date.now() - 60_000);
+  const kept = fixture.received(PHONE, { text: 'answer me later', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) });
+    next.received(PHONE, { text: 'answer me later', body: null, date: read, guid: kept.guid });
+  });
+  const again = await startAgain(t, { stateDirectory, chatDb, logs });
+  await waitFor(() => again.sender.sent.length === 1);
+  await settle();
+  assert.deepEqual(again.gateway.dispatched.map((input) => input.userMessage), ['answer me later']);
+  assert.deepEqual(createWatermarkStore({ directory: stateDirectory }).load('ava').record.carry, []);
+});
+
+test('a record from before dates were kept gets its date stored at the next start', async (t) => {
+  const { fixture, adapter, sender, stateDirectory, chatDb, logs } = await setup(t);
+  fixture.received(PHONE, { text: 'hello', body: null, date: new Date(Date.now() - 5000) });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  const store = createWatermarkStore({ directory: stateDirectory });
+  const { observedDate, ...old } = store.load('ava').record;
+  assert.ok(observedDate > 0);
+  store.save('ava', old);
+  await startAgain(t, { stateDirectory, chatDb, logs });
+  assert.equal(store.load('ava').record.observedDate, observedDate);
+});
+
+test('a stop while a replaced chat.db waits on an answer starts nothing on the new file', async (t) => {
+  let release;
+  const gateway = fakeGateway(() => new Promise((resolve) => { release = () => resolve({ text: 'late' }); }));
+  const { chatDb, fixture, adapter } = await setup(t, { gateway });
+  fixture.received(PHONE, { text: 'slow one', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => next.received(PHONE, { text: 'on the new file', body: null }));
+  await settle();
+  const stopped = adapter.stop();
+  release();
+  await stopped;
+  await settle();
+  await settle();
+  assert.deepEqual(adapter.status(), {});
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['slow one']);
+});

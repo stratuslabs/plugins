@@ -29,6 +29,12 @@ import path from 'node:path';
  * the first one dated after it. Messages carry their dates across a
  * restore or a rebuild; ROWIDs don't.
  *
+ * `pending` lists the guids of rows read and not yet settled: handed over
+ * and still being answered, or kept for the next start. A recovery carries
+ * them (`carry`), so a message the old database left unanswered is
+ * answered from the new one even though its date is history. Guids, like
+ * dates, survive the swap.
+ *
  * A missing record is never read as 0, which would replay the account's
  * whole history as fresh instructions. A record that cannot be read is
  * never replaced by a fresh seed either, which would drop whatever arrived
@@ -39,9 +45,12 @@ import path from 'node:path';
 const FILE = 'watermarks.json';
 
 const isRowid = (value) => Number.isSafeInteger(value) && value >= 0;
+const SETTLED_LIMIT = 10_000;
 const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const optionalTime = (value) => value === undefined || value === null || isTime(value);
-const SETTLED_LIMIT = 10_000;
+const optionalGuids = (value) => value === undefined
+  || (Array.isArray(value) && value.length <= SETTLED_LIMIT && value.every((guid) => typeof guid === 'string' && guid.length > 0));
+const without = (list, guid) => (Array.isArray(list) && list.includes(guid) ? list.filter((entry) => entry !== guid) : list);
 
 const validRecord = (record) => record
   && typeof record === 'object'
@@ -56,6 +65,8 @@ const validRecord = (record) => record
   && (record.watermark === 0 || typeof record.fingerprint === 'string')
   && optionalTime(record.observedDate)
   && optionalTime(record.historyThrough)
+  && optionalGuids(record.pending)
+  && optionalGuids(record.carry)
   && validSettled(record);
 
 /** Rows settled above the watermark: increasing, above it, and already observed. */
@@ -185,7 +196,17 @@ export const recoveredRecord = (old, db) => {
     return null;
   }
   const first = db.firstRowidAfter(historyThrough);
-  const watermark = first === undefined ? db.maxRowid() : db.lastRowidBefore(first);
+  let start = first ?? db.maxRowid() + 1;
+  // What the old one left unsettled, where it is in the new one.
+  const carry = [];
+  for (const guid of new Set([...(old.pending ?? []), ...(old.carry ?? [])])) {
+    const rowid = db.rowidOf(guid);
+    if (rowid !== undefined) {
+      carry.push(guid);
+      start = Math.min(start, rowid);
+    }
+  }
+  const watermark = db.lastRowidBefore(start);
   return {
     initialized: true,
     identity: db.identity(),
@@ -196,6 +217,8 @@ export const recoveredRecord = (old, db) => {
     settled: [],
     observedDate: historyThrough,
     historyThrough,
+    pending: [],
+    carry,
   };
 };
 
@@ -240,6 +263,14 @@ export const startFrom = ({ loaded, db, handle }) => {
   if (reason) {
     return { action: 'replaced', reason, record: loaded.record };
   }
+  if (!isTime(loaded.record.observedDate)) {
+    // Written before dates were kept: the database it describes is still
+    // here, so the date comes from the rows it already read.
+    const observedDate = db.maxDateThrough(loaded.record.observedThrough);
+    if (observedDate !== null) {
+      return { action: 'resume', record: { ...loaded.record, observedDate }, changed: true };
+    }
+  }
   return { action: 'resume', record: loaded.record };
 };
 
@@ -251,36 +282,56 @@ export const advance = (record, { rowid, guid }) => {
   if (typeof guid !== 'string' || guid.length === 0) {
     throw new Error(`row ${rowid} has no guid to fingerprint`);
   }
-  return {
+  const next = {
     ...record,
     watermark: rowid,
     fingerprint: guid,
     observedThrough: Math.max(record.observedThrough, rowid),
     settled: (record.settled ?? []).filter((settled) => settled > rowid),
   };
+  return withoutGuid(next, guid);
 };
 
-/** The record with `rowid`, above the watermark, listed as settled. */
-export const markSettled = (record, rowid) => {
-  const settled = record.settled ?? [];
-  if (rowid <= record.watermark || settled.includes(rowid)) {
-    return record;
+/** The record with `guid` no longer pending or carried. */
+const withoutGuid = (record, guid) => {
+  const pending = without(record.pending, guid);
+  const carry = without(record.carry, guid);
+  return pending === record.pending && carry === record.carry ? record : {
+    ...record,
+    ...(pending !== undefined ? { pending } : {}),
+    ...(carry !== undefined ? { carry } : {}),
+  };
+};
+
+/** The record with `rowid`, above the watermark, listed as settled, and its `guid` no longer pending. */
+export const markSettled = (record, rowid, guid) => {
+  const cleared = guid === undefined ? record : withoutGuid(record, guid);
+  const settled = cleared.settled ?? [];
+  if (rowid <= cleared.watermark || settled.includes(rowid)) {
+    return cleared;
   }
-  return { ...record, settled: [...settled, rowid].sort((a, b) => a - b) };
+  return { ...cleared, settled: [...settled, rowid].sort((a, b) => a - b) };
 };
 
 /** Whether `rowid` is done: at or below the watermark, or listed as settled. */
 export const isSettled = (record, rowid) => rowid <= record.watermark || (record.settled ?? []).includes(rowid);
 
-/** The record after a scan read through `rowid`, the newest of its rows dated `date` (ms), before it dispatches anything. */
-export const observe = (record, rowid, date) => {
+/**
+ * The record after a scan read through `rowid`, the newest of its rows
+ * dated `date` (ms), with `guids` (the rows it is about to hand over or
+ * settle) pending. Stored before anything in the scan is dispatched.
+ */
+export const observe = (record, rowid, date, guids = []) => {
   const later = isTime(date) && !(isTime(record.observedDate) && record.observedDate >= date);
-  if (rowid <= record.observedThrough && !later) {
+  const pending = record.pending ?? [];
+  const added = guids.filter((guid) => typeof guid === 'string' && guid.length > 0 && !pending.includes(guid));
+  if (rowid <= record.observedThrough && !later && added.length === 0) {
     return record;
   }
   return {
     ...record,
     observedThrough: Math.max(record.observedThrough, rowid),
     ...(later ? { observedDate: date } : {}),
+    ...(added.length > 0 ? { pending: [...pending, ...new Set(added)] } : {}),
   };
 };

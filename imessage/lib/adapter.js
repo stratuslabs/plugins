@@ -422,8 +422,6 @@ export const createImessageAdapter = ({
   };
 
   let store;
-  // Intakes retired by a replaced chat.db, still finishing what they handed over.
-  const retired = new Set();
 
   /**
    * Opens chat.db for one agent and starts its intake, from where it left
@@ -463,6 +461,13 @@ export const createImessageAdapter = ({
       }
       warn(`imessage: ${agentId} found chat.db replaced (${start.reason}). Reading it from row ${record.watermark}; messages dated up to ${new Date(record.historyThrough).toISOString()}, the newest already read, are treated as history.`);
     }
+    if (start.changed) {
+      try {
+        store.save(agentId, record);
+      } catch (error) {
+        warn(`imessage: ${agentId} could not save how far it has read (${error.message}).`);
+      }
+    }
     if (start.action === 'seed') {
       store.save(agentId, record);
       log(`imessage: ${agentId} starts reading Messages from row ${record.watermark}; earlier messages are history.`);
@@ -477,17 +482,15 @@ export const createImessageAdapter = ({
       warn,
       replayCapMs: agent.replayCapMs,
       onReplaced: () => {
-        // The old intake is retired; this handle may be on the old file.
-        if (running.get(agentId)?.intake !== intake) {
+        // Called once what this intake handed over has settled. Its handle
+        // may still be on the old file, so the new one is opened afresh. A
+        // stop under way closes the handle itself.
+        if (stopping || running.get(agentId)?.intake !== intake) {
           return;
         }
         running.delete(agentId);
         db.close();
-        retired.add(intake);
-        void intake.idle().then(() => retired.delete(intake));
-        if (!stopping) {
-          startAgent(gateway, agentId, agent);
-        }
+        startAgent(gateway, agentId, agent);
       },
     });
     running.set(agentId, { db, intake, agent });
@@ -518,7 +521,7 @@ export const createImessageAdapter = ({
       stopController.abort();
       // Intake first, so nothing new starts; the bus last, so a request
       // the shutdown settles is still reported.
-      await Promise.all([...running.values(), ...[...retired].map((intake) => ({ intake }))].map(({ intake }) => intake.stop()));
+      await Promise.all([...running.values()].map(({ intake }) => intake.stop()));
       unsubscribe?.();
       unsubscribe = undefined;
       for (const { db } of running.values()) {

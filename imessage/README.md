@@ -96,9 +96,12 @@ local delivery has no secret.
   - When `chat.db` is replaced (restored from a backup, or rebuilt by
     Messages), the channel opens the new file and carries on. Anything in
     it dated at or before the newest message already read is history and
-    is not answered; what came after is. The log says when this happens.
-    A message delivered late with an older date than one already read is
-    treated as history too.
+    is not answered; what came after is. A message that was still being
+    answered, or was kept for the next start, is answered from the new file
+    too. On a running channel the new file is read once the answers already
+    under way have finished. The log says when this happens. A message
+    delivered late with an older date than one already read is treated as
+    history too.
 - **Logs.** The log names rows by number and masks handles
   (`+1•••••4567`). It never contains message text or approval codes.
 

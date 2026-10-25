@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { openChatDb } from '../lib/chatdb.js';
-import { advance, createWatermarkStore, observe, replacementOf, seedRecord, startFrom } from '../lib/watermark.js';
+import { advance, createWatermarkStore, observe, recoveredRecord, replacementOf, seedRecord, startFrom } from '../lib/watermark.js';
 import { createChatDb } from './chatdb-fixture.js';
 
 const HANDLE = 'ava.agent@icloud.com';
@@ -196,4 +196,177 @@ test('advance drops settled rows it moves past', (t) => {
   const b = fixture.received(PHONE);
   const next = advance({ ...observe(record, b.rowid), settled: [a.rowid, b.rowid] }, a);
   assert.deepEqual(next.settled, [b.rowid]);
+});
+
+// Recovery when chat.db is replaced (stratuslabs/plugins#23).
+
+const at = (iso) => new Date(iso);
+
+test('a seed and each scan record the newest message date read, which a replacement recovers from', (t) => {
+  const { fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  const record = seedRecord(db, HANDLE);
+  assert.equal(record.observedDate, at('2026-10-20T12:00:00Z').getTime());
+  assert.equal(observe(record, record.watermark + 1, at('2026-10-21T00:00:00Z').getTime()).observedDate, at('2026-10-21T00:00:00Z').getTime());
+  // Never backwards.
+  assert.equal(observe(record, record.watermark + 1, at('2026-10-01T00:00:00Z').getTime()).observedDate, record.observedDate);
+});
+
+test('an empty chat.db seeds with no date, and the store keeps such a record', (t) => {
+  const { db, store } = setup(t);
+  const record = seedRecord(db, HANDLE);
+  assert.equal(record.observedDate, null);
+  store.save('ava', record);
+  assert.equal(store.load('ava').status, 'ok');
+});
+
+test('the store refuses a record whose dates are not times', (t) => {
+  const { db, store } = setup(t);
+  const record = seedRecord(db, HANDLE);
+  assert.throws(() => store.save('ava', { ...record, observedDate: '2026-10-20' }), /invalid watermark/);
+  assert.throws(() => store.save('ava', { ...record, observedDate: -1 }), /invalid watermark/);
+  assert.throws(() => store.save('ava', { ...record, historyThrough: 1.5 }), /invalid watermark/);
+  store.save('ava', { ...record, observedDate: 5, historyThrough: 5 });
+  assert.equal(store.load('ava').record.historyThrough, 5);
+});
+
+test('a record written before dates were kept still loads', (t) => {
+  const { db, store } = setup(t);
+  const { observedDate, ...old } = seedRecord(db, HANDLE);
+  assert.equal(observedDate, null);
+  store.save('ava', old);
+  assert.equal(store.load('ava').status, 'ok');
+});
+
+test('recovery re-anchors on the new database: what it held up to the last date read is history', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = seedRecord(db, HANDLE);
+  // The new database: history first, then what arrived around the switch,
+  // with an old row synced in after it, as an iCloud rebuild does.
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  const h1 = next.received(PHONE, { date: at('2026-10-19T09:00:00Z') });
+  next.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const fresh = next.received(PHONE, { date: at('2026-10-20T12:05:00Z') });
+  next.received(PHONE, { date: at('2026-10-18T08:00:00Z') });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.deepEqual(recovered.identity, nextDb.identity());
+  assert.equal(recovered.handle, HANDLE);
+  assert.equal(recovered.historyThrough, old.observedDate);
+  assert.equal(recovered.observedDate, old.observedDate);
+  // Starts just before the first row dated after the last one read.
+  assert.equal(recovered.watermark, fresh.rowid - 1);
+  assert.equal(recovered.observedThrough, fresh.rowid - 1);
+  assert.equal(recovered.fingerprint, nextDb.guidAt(fresh.rowid - 1));
+  assert.deepEqual(recovered.settled, []);
+  assert.ok(h1.rowid < recovered.watermark);
+  assert.equal(replacementOf(recovered, nextDb), null);
+});
+
+test('recovery on a database with nothing new starts at its end', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = seedRecord(db, HANDLE);
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  next.received(PHONE, { date: at('2026-10-19T09:00:00Z') });
+  const last = next.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.equal(recovered.watermark, last.rowid);
+  assert.equal(recovered.fingerprint, last.guid);
+});
+
+test('recovery on an empty database starts at 0 and keeps the history date', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = seedRecord(db, HANDLE);
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.equal(recovered.watermark, 0);
+  assert.equal(recovered.fingerprint, null);
+  assert.equal(recovered.historyThrough, old.observedDate);
+});
+
+test('a record that never read a dated message cannot be recovered from, and says so', (t) => {
+  const { directory, db } = setup(t);
+  const old = seedRecord(db, HANDLE);
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  next.received(PHONE);
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  assert.equal(recoveredRecord(old, nextDb), null);
+  const { observedDate, ...older } = old;
+  assert.equal(recoveredRecord(older, nextDb), null);
+});
+
+test('a second replacement takes the newest date read since the first one', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = { ...seedRecord(db, HANDLE), historyThrough: at('2026-10-20T11:00:00Z').getTime() };
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  next.received(PHONE, { date: at('2026-10-20T13:00:00Z') });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  assert.equal(recoveredRecord(old, nextDb).historyThrough, at('2026-10-20T12:00:00Z').getTime());
+});
+
+test('recovery carries what the old database left unsettled, from just before it in the new one', (t) => {
+  const { directory, fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  const kept = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = { ...seedRecord(db, HANDLE), pending: [kept.guid, 'GONE-FROM-THE-NEW-ONE'], carry: [] };
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  next.received(PHONE, { date: at('2026-10-19T09:00:00Z') });
+  const again = next.received(PHONE, { date: at('2026-10-20T11:00:00Z'), guid: kept.guid });
+  next.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const fresh = next.received(PHONE, { date: at('2026-10-20T12:05:00Z') });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.deepEqual(recovered.carry, [kept.guid]);
+  assert.equal(recovered.watermark, again.rowid - 1);
+  assert.ok(recovered.watermark < fresh.rowid);
+  assert.deepEqual(recovered.pending, []);
+});
+
+test('a resumed record from before dates were kept gets its date from the rows it already read', (t) => {
+  const { fixture, db } = setup(t);
+  fixture.received(PHONE, { date: at('2026-10-20T10:00:00Z') });
+  const read = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const { observedDate, ...old } = { ...seedRecord(db, HANDLE), watermark: read.rowid, observedThrough: read.rowid, fingerprint: read.guid };
+  const start = startFrom({ loaded: { status: 'ok', record: old }, db, handle: HANDLE });
+  assert.equal(start.action, 'resume');
+  assert.equal(start.record.observedDate, at('2026-10-20T11:00:00Z').getTime());
+  assert.equal(start.changed, true);
+});
+
+test('a second replacement still carries what the first carried and has not been answered', (t) => {
+  const { directory, fixture, db } = setup(t);
+  const carried = fixture.received(PHONE, { date: at('2026-10-20T11:00:00Z') });
+  fixture.received(PHONE, { date: at('2026-10-20T12:00:00Z') });
+  const old = { ...seedRecord(db, HANDLE), historyThrough: at('2026-10-20T12:00:00Z').getTime(), pending: [], carry: [carried.guid] };
+  const nextFile = path.join(directory, 'next.db');
+  const next = createChatDb(nextFile);
+  const again = next.received(PHONE, { date: at('2026-10-20T11:00:00Z'), guid: carried.guid });
+  const nextDb = openChatDb(nextFile);
+  t.after(() => { nextDb.close(); next.close(); });
+  const recovered = recoveredRecord(old, nextDb);
+  assert.deepEqual(recovered.carry, [carried.guid]);
+  assert.equal(recovered.watermark, again.rowid - 1);
 });

@@ -1,7 +1,7 @@
 import { watch as watchDirectory } from 'node:fs';
 import path from 'node:path';
 
-import { classifyRow } from './chatdb.js';
+import { appleDate, classifyRow } from './chatdb.js';
 import { advance, isSettled, markSettled, observe, replacementOf } from './watermark.js';
 
 /**
@@ -24,7 +24,8 @@ import { advance, isSettled, markSettled, observe, replacementOf } from './water
  * handed over. A row first read more than `replayCapMs` after it was sent
  * is skipped, counted, not answered: after a daemon was off for days, or
  * Apple's push service replayed a backlog. A row a running channel already
- * read is never capped, however long it was held.
+ * read, or one carried over from a replaced chat.db, is never capped,
+ * however long it was held.
  *
  * A row that is poison (its body can't be decoded) or incomplete (nothing
  * in it yet) holds the rows behind it and is read again on each scan, up to
@@ -32,8 +33,15 @@ import { advance, isSettled, markSettled, observe, replacementOf } from './water
  *
  * The periodic scan is the guarantee; a change to chat.db or its WAL only
  * makes delivery sooner. Before each scan the stored record is checked
- * against the file, and a chat.db that was replaced stops intake for this
- * agent rather than reading the new file with the old cursor.
+ * against the file. A chat.db that was replaced is never read with the old
+ * cursor: intake reads nothing more, lets what it handed over settle (and
+ * stores that), and only then calls `onReplaced(reason)`, so the channel
+ * opens the new file and recovers from a record nothing else will write.
+ * Without `onReplaced`, intake just stops.
+ *
+ * After a recovery, a message dated at or before `record.historyThrough`
+ * was in the old database and is skipped, counted, not answered, unless
+ * the old database left it unsettled (`record.carry`).
  *
  * The log names rows by ROWID and never carries message text or numbers.
  */
@@ -52,6 +60,7 @@ export const createIntake = ({
   replayCapMs = DAY_MS,
   poisonLimit = 5,
   batch = 100,
+  onReplaced,
 }) => {
   let record = initial;
   // ROWID of the last row read in this process; rows above it are unread.
@@ -85,7 +94,7 @@ export const createIntake = ({
       next = advance(next, open.shift());
     }
     if (outcome === 'settled' && open.includes(entry)) {
-      next = markSettled(next, entry.rowid);
+      next = markSettled(next, entry.rowid, entry.guid);
     }
     if (next === record) {
       return;
@@ -114,8 +123,16 @@ export const createIntake = ({
     const replaced = replacementOf(record, db);
     if (replaced) {
       stopped = replaced;
-      warn(`imessage: ${agentId} stopped reading: ${replaced}. Messages that arrive now are not answered until the channel is set up on this database again.`);
       close();
+      if (onReplaced) {
+        void (async () => {
+          while (inflight.size > 0) {
+            await Promise.all([...inflight]);
+          }
+        })().then(() => onReplaced(replaced));
+      } else {
+        warn(`imessage: ${agentId} stopped reading: ${replaced}. Messages that arrive now are not answered until the channel is set up on this database again.`);
+      }
       return;
     }
     for (;;) {
@@ -124,8 +141,20 @@ export const createIntake = ({
         return;
       }
       const observedBefore = record.observedThrough;
-      persist(observe(record, rows.at(-1).rowid));
+      const newest = Math.max(...rows.map((row) => appleDate(row.date).getTime()).filter(Number.isSafeInteger));
+      const unsettled = rows.filter((row) => !isSettled(record, row.rowid)).map((row) => row.guid);
+      persist(observe(record, rows.at(-1).rowid, Number.isSafeInteger(newest) && newest >= 0 ? newest : undefined, unsettled));
       let skippedOld = 0;
+      let skippedHistory = 0;
+      const history = Number.isSafeInteger(record.historyThrough) ? record.historyThrough : null;
+      const tally = () => {
+        if (skippedOld > 0) {
+          log(`imessage: ${agentId} skipped ${skippedOld} message${skippedOld === 1 ? '' : 's'} older than ${Math.round(replayCapMs / 3_600_000)}h when first read.`);
+        }
+        if (skippedHistory > 0) {
+          log(`imessage: ${agentId} skipped ${skippedHistory} message${skippedHistory === 1 ? '' : 's'} from before chat.db was replaced.`);
+        }
+      };
       for (const row of rows) {
         const result = classifyRow(row);
         if (result.kind === 'poison' || result.kind === 'incomplete') {
@@ -133,9 +162,7 @@ export const createIntake = ({
           attempts.set(row.rowid, count);
           if (count < poisonLimit) {
             stalled = { rowid: row.rowid, reason: result.reason, attempts: count };
-            if (skippedOld > 0) {
-              log(`imessage: ${agentId} skipped ${skippedOld} message${skippedOld === 1 ? '' : 's'} older than ${Math.round(replayCapMs / 3_600_000)}h when first read.`);
-            }
+            tally();
             return;
           }
           warn(`imessage: ${agentId} skipped row ${row.rowid} after ${count} reads: ${result.reason}.`);
@@ -150,7 +177,15 @@ export const createIntake = ({
           continue;
         }
         stalled = null;
-        if (capped(result, row.rowid > observedBefore)) {
+        // Carried from a replaced chat.db: read there and never answered,
+        // so neither history nor a first read, however old it is now.
+        const carried = (record.carry ?? []).includes(result.guid);
+        if (history !== null && result.date.getTime() <= history && !carried) {
+          skippedHistory += 1;
+          settle(entry, 'settled');
+          continue;
+        }
+        if (capped(result, row.rowid > observedBefore && !carried)) {
           skippedOld += 1;
           settle(entry, 'settled');
           continue;
@@ -172,9 +207,7 @@ export const createIntake = ({
         ).finally(() => inflight.delete(tracked));
         inflight.add(tracked);
       }
-      if (skippedOld > 0) {
-        log(`imessage: ${agentId} skipped ${skippedOld} message${skippedOld === 1 ? '' : 's'} older than ${Math.round(replayCapMs / 3_600_000)}h when first read.`);
-      }
+      tally();
       if (rows.length < batch) {
         return;
       }

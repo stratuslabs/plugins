@@ -13,6 +13,8 @@ const HANDLE = 'ava.agent@icloud.com';
 const PHONE = '+15551234821';
 const DAY = 24 * 60 * 60 * 1000;
 
+const readStore = (store) => JSON.stringify(store.load('ava'));
+
 const deferred = () => {
   let resolve;
   const promise = new Promise((r) => { resolve = r; });
@@ -317,4 +319,109 @@ test('a watermark that cannot be saved warns once, keeps going, and never dispat
   await intake.idle();
   assert.equal(seen.length, 2);
   assert.equal(store.load('ava').record.watermark, seen[1]);
+});
+
+test('after a recovery, a message dated at or before the history date is skipped, and counted', async (t) => {
+  const { fixture, store, logs, make } = setup(t);
+  const historyThrough = Date.now() - 60_000;
+  store.save('ava', { ...store.load('ava').record, historyThrough });
+  const old = fixture.received(PHONE, { date: new Date(historyThrough - 1000) });
+  const same = fixture.received(PHONE, { date: new Date(historyThrough) });
+  const fresh = fixture.received(PHONE, { date: new Date(historyThrough + 1000) });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [fresh.rowid]);
+  assert.equal(store.load('ava').record.watermark, fresh.rowid);
+  assert.ok(old.rowid < same.rowid);
+  assert.ok(logs.some((line) => /skipped 2 messages from before chat\.db was replaced/.test(line)), logs.join('\n'));
+});
+
+test('each scan records the newest message date it read', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const newest = new Date(Date.now() - 5000);
+  fixture.received(PHONE, { date: newest });
+  fixture.received(PHONE, { date: new Date(newest.getTime() - 3000) });
+  const intake = make(async () => 'settled');
+  await intake.scan();
+  await intake.idle();
+  assert.equal(store.load('ava').record.observedDate, newest.getTime());
+});
+
+test('a replaced chat.db hands recovery to the channel only once what intake handed over has settled, and those settles are stored', async (t) => {
+  const { directory, file, fixture, store, make } = setup(t);
+  const { guid } = fixture.received(PHONE);
+  const slow = deferred();
+  const replaced = [];
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return slow.promise; }, { onReplaced: (reason) => replaced.push(reason) });
+  await intake.scan();
+  assert.equal(seen.length, 1);
+  assert.deepEqual(store.load('ava').record.pending, [guid]);
+  fixture.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  copyFileSync(file, path.join(directory, 'copy.db'));
+  renameSync(path.join(directory, 'copy.db'), file);
+  fixture.received(PHONE);
+  await intake.scan();
+  await intake.scan();
+  assert.deepEqual(replaced, [], 'not while a message is still being answered');
+  assert.match(intake.status().stopped, /different file/);
+  slow.resolve('kept');
+  await intake.idle();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(replaced.length, 1);
+  assert.match(replaced[0], /different file/);
+  assert.equal(seen.length, 1, 'nothing more was read from either file');
+  // Kept, so still pending for the recovery to carry.
+  assert.deepEqual(store.load('ava').record.pending, [guid]);
+});
+
+test('pending lists what was handed over and not yet settled, and settling clears it', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const a = fixture.received(PHONE);
+  const b = fixture.received(PHONE);
+  const gates = new Map([[a.rowid, deferred()], [b.rowid, deferred()]]);
+  const intake = make(async (message) => gates.get(message.rowid).promise);
+  await intake.scan();
+  assert.deepEqual(store.load('ava').record.pending, [a.guid, b.guid]);
+  gates.get(b.rowid).resolve('settled');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(store.load('ava').record.pending, [a.guid]);
+  gates.get(a.rowid).resolve('settled');
+  await intake.idle();
+  assert.deepEqual(store.load('ava').record.pending, []);
+  assert.equal(store.load('ava').record.watermark, b.rowid);
+});
+
+test('a carried message older than the replay cap is still handed over: it was read before the replacement', async (t) => {
+  const { fixture, store, make } = setup(t);
+  // Unanswered when chat.db was replaced, and the daemon then stayed down
+  // for longer than the 24 h cap.
+  const sent = new Date(Date.now() - 30 * 3_600_000);
+  const carried = fixture.received(PHONE, { date: sent });
+  const stale = fixture.received(PHONE, { date: new Date(sent.getTime() + 1000) });
+  store.save('ava', { ...store.load('ava').record, historyThrough: sent.getTime() - 1, carry: [carried.guid] });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [carried.rowid], 'the carried one is answered; a never-read one that old is still capped');
+  assert.ok(stale.rowid > carried.rowid);
+  assert.deepEqual(store.load('ava').record.carry, []);
+});
+
+test('a carried message dated before the history date is still handed over, then leaves the carry', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const historyThrough = Date.now() - 60_000;
+  const carried = fixture.received(PHONE, { date: new Date(historyThrough - 5000) });
+  const other = fixture.received(PHONE, { date: new Date(historyThrough - 4000) });
+  store.save('ava', { ...store.load('ava').record, historyThrough, carry: [carried.guid] });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [carried.rowid]);
+  assert.ok(other.rowid > carried.rowid);
+  assert.deepEqual(store.load('ava').record.carry, []);
 });

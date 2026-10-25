@@ -232,9 +232,12 @@ export const createDreamer = ({
     // the next experiment on restart and never replays this one.
     claims.claim(agentId, window.night, entry);
 
-    const out = openSync(logFile, 'a', 0o600);
+    let out;
     let child;
     try {
+      // Inside the try: a log that can't be opened is recorded tonight,
+      // not left looking like a run until the next restart.
+      out = openSync(logFile, 'a', 0o600);
       // The tether's stdin is a pipe this daemon never writes to: when the
       // daemon is gone, it closes, and the tether stops the run.
       child = spawn(...tethered(lockFile, command, args), { cwd: experimentDir, env, stdio: ['pipe', out, out] });
@@ -242,7 +245,9 @@ export const createDreamer = ({
       claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
       throw error;
     } finally {
-      closeSync(out);
+      if (out !== undefined) {
+        closeSync(out);
+      }
     }
     // Nothing is ever written; an EPIPE after the tether exits is expected.
     child.stdin?.on('error', () => {});

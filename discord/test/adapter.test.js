@@ -531,6 +531,27 @@ test('stopping while a message\'s attachments download leaves it unanswered, for
   assert.equal(gateway.turns.length, 0, 'not answered with the image missing');
 });
 
+test('messages in one conversation reach the agent in the order they were sent, however long a download takes', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.state.fileDelayMs = 400;
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000020', channel_id: DM, content: 'first, with a file', attachments: [file(discord, 'slow.png', png(1, 1), { content_type: 'image/png' })] }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000021', channel_id: DM, content: 'second' }));
+  await until(() => gateway.turns.length === 2, 'both dispatches');
+  assert.deepEqual(gateway.turns.map((turn) => turn.input.idempotencyKey), ['discord:600000000000000020', 'discord:600000000000000021']);
+});
+
+test('a slow download holds back only its own conversation', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.state.fileDelayMs = 1500;
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000030', channel_id: DM, content: 'slow', attachments: [file(discord, 'slow.png', png(1, 1), { content_type: 'image/png' })] }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000031', guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> elsewhere`, mentions: [{ id: BOT }] }));
+  await until(() => gateway.turns.length === 1, 'the other conversation');
+  assert.equal(gateway.turns[0].input.idempotencyKey, 'discord:600000000000000031');
+  await until(() => gateway.turns.length === 2, 'the slow one');
+});
+
 test('a file a tool made during the turn is uploaded into the conversation, in its place', async (t) => {
   const { discord, registered, gateway } = await setUp(t);
   await registered[0].adapter.start(gateway);

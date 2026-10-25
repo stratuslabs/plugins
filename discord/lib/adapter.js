@@ -311,7 +311,41 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     }
   };
 
+  // Per session, the last message still on its way to the gateway. Reading
+  // a message's attachments takes time a plain message doesn't, so each
+  // waits until the one before it has been handed over: the agent reads a
+  // conversation in the order it was written. Other sessions don't wait.
+  const intakes = new Map();
+  const inOrder = (sessionId) => {
+    const before = intakes.get(sessionId) ?? Promise.resolve();
+    let release;
+    const handed = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = before.then(() => handed);
+    intakes.set(sessionId, tail);
+    return {
+      before,
+      handed: () => {
+        release();
+        if (intakes.get(sessionId) === tail) {
+          intakes.delete(sessionId);
+        }
+      },
+    };
+  };
+
   const answer = async (agentId, agent, bot, message, raw, verdict) => {
+    const turn = inOrder(sessionIdFor(agentId, routeFor(message)));
+    try {
+      await turn.before;
+      return await answerInOrder(agentId, agent, bot, message, raw, verdict, turn.handed);
+    } finally {
+      turn.handed();
+    }
+  };
+
+  const answerInOrder = async (agentId, agent, bot, message, raw, verdict, handed) => {
     const text = withoutMention(message.content, bot.botId);
     // Read only once admitted: nothing is downloaded for a message the
     // agent won't answer.
@@ -388,8 +422,9 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     let absorbed = false;
     let session;
     let failure;
+    let dispatched;
     try {
-      session = await gateway.dispatch({
+      dispatched = gateway.dispatch({
         sessionId,
         agentId,
         userMessage,
@@ -405,6 +440,13 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
           absorbed = true;
         },
       });
+    } catch (error) {
+      dispatched = Promise.reject(error);
+    }
+    // Queued at the gateway: the next message in this session may go.
+    handed();
+    try {
+      session = await dispatched;
     } catch (error) {
       failure = error;
     }

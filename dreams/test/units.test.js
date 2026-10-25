@@ -166,6 +166,12 @@ test('config: two paths to one experiment directory through a symlink are still 
     () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: path.join(links, 'not-yet') }] } } }),
     'a directory that does not exist yet is still accepted',
   );
+  // Not there yet, but under a linked parent: the existing part is resolved.
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: path.join(exp, 'new', 'run') }] }, bo: { window: '01:00-05:00', experiments: [{ path: path.join(a, 'new', 'run') }] } } }),
+    (error) => error.message.includes('listed for both ava and bo') && error.message.includes(path.join(exp, 'new', 'run')),
+    'two agents, a missing directory under two aliases of its parent',
+  );
 });
 
 test('the summary reads a bounded amount of a log the model can grow without limit', () => {

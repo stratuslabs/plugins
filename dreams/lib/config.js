@@ -1,5 +1,22 @@
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
-import { real } from './sandbox.js';
+
+// The real path of the longest part of `target` that exists, with the rest
+// as written: a directory not made yet, under a linked parent, still keys
+// to where it will be.
+const realAsFarAsExists = (target) => {
+  const rest = [];
+  for (let head = path.resolve(target); ; head = path.dirname(head)) {
+    try {
+      return path.join(realpathSync(head), ...rest);
+    } catch {
+      if (path.dirname(head) === head) {
+        return path.resolve(target);
+      }
+      rest.unshift(path.basename(head));
+    }
+  }
+};
 
 /**
  * The plugin's config block, checked once at load. Everything here is
@@ -127,9 +144,9 @@ export const parseDreamsConfig = (config, { home } = {}) => {
     }
     const experiments = block.experiments.map((experiment, index) => parseExperiment(experiment, `${where}.experiments[${index}]`));
     // Keyed by real path, as the runs are: two links to one directory are
-    // one directory. One that doesn't exist yet is keyed as written.
+    // one directory.
     for (const { path: configured } of experiments) {
-      const dir = real(configured);
+      const dir = realAsFarAsExists(configured);
       const named = dir === configured ? dir : `${dir} (as ${configured})`;
       const other = owner.get(dir);
       if (other !== undefined) {

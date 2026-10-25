@@ -277,3 +277,36 @@ test('createPlugin registers the configured agent and names any it refused', asy
   await assert.rejects(createPlugin({}, {}).setup({ channels: context.channels }), /no state directory/);
   await assert.rejects(createPlugin({}, {}).setup({}), /no channel handle/);
 });
+
+test('"stop" from an approver ends the turn running in their conversation; with nothing running it is a message', async (t) => {
+  let release;
+  const aborted = [];
+  const gateway = fakeGateway((input) => new Promise((resolve) => {
+    release = () => resolve({ text: 'late answer' });
+    input.signal?.addEventListener('abort', () => { aborted.push(input.signal.reason.message); resolve({ text: 'partial' }); });
+  }));
+  gateway.abortTurns = (sessionId, reason) => { aborted.push(`host:${sessionId}:${reason}`); return 1; };
+  const { fixture, sender } = await setup(t, { gateway });
+  fixture.received(PHONE, { text: 'do a long thing', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  fixture.received(PHONE, { text: 'Stop.', body: null });
+  await waitFor(() => sender.sent.length === 1);
+  assert.deepEqual(sender.sent, [[PHONE, 'Stopped.']]);
+  assert.ok(aborted.some((line) => /Stopped from iMessage by \+1•••••4821/.test(line)));
+  assert.ok(aborted.some((line) => line.startsWith(`host:imessage:ava:${HANDLE}:${PHONE}`)));
+  assert.equal(gateway.dispatched.length, 1);
+  release?.();
+});
+
+test('"stop" over SMS, or from someone who is not an approver, stops nothing', async (t) => {
+  const gateway = fakeGateway(() => ({ text: 'fine' }));
+  let calls = 0;
+  gateway.abortTurns = () => { calls += 1; return 1; };
+  const { fixture, sender } = await setup(t, { gateway, config: { principals: [PHONE, STRANGER] } });
+  fixture.received(PHONE, { text: 'stop', body: null, service: 'SMS' });
+  fixture.received(STRANGER, { text: 'stop', body: null });
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(calls, 0);
+  assert.equal(gateway.dispatched.length, 1);
+  assert.equal(gateway.dispatched[0].userMessage, 'stop');
+});

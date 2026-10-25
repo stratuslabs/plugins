@@ -45,6 +45,8 @@ export const createImessageAdapter = ({
   const running = new Map();
   // requestId -> an approval request put to approvers by text, while it is pending.
   const asks = new Map();
+  // sessionId -> the AbortControllers of turns this adapter dispatched there and is waiting on.
+  const turns = new Map();
   let host;
   let unsubscribe;
   let stopping = false;
@@ -211,8 +213,39 @@ export const createImessageAdapter = ({
     return true;
   };
 
+  /**
+   * "stop" from an approver over iMessage, while a turn runs in their
+   * conversation: ends it, including a turn the host recovered after a
+   * restart that no adapter started. With nothing running it is an
+   * ordinary message. Only an approver, since a stop throws away work.
+   */
+  const stopRequest = (agentId, agent, message) => {
+    if (!/^\s*stop[\s.!]*$/i.test(message.text) || message.service !== 'iMessage') {
+      return false;
+    }
+    const from = normalizeHandle(message.from);
+    if (from === null || !agent.approvers.has(from)) {
+      return false;
+    }
+    const sessionId = sessionIdFor(agentId, agent.handle, from);
+    const reason = `Stopped from iMessage by ${maskHandle(from)}`;
+    const mine = turns.get(sessionId) ?? new Set();
+    for (const controller of mine) {
+      controller.abort(new Error(reason));
+    }
+    const onSession = host.abortTurns?.(sessionId, reason) ?? 0;
+    if (mine.size === 0 && onSession === 0) {
+      return false;
+    }
+    log(`imessage: ${maskHandle(from)} stopped ${agentId}.`);
+    return true;
+  };
+
   const answer = async (gateway, agentId, agent, message) => {
     if (await answerApproval(agentId, agent, message)) {
+      return 'settled';
+    }
+    if (stopRequest(agentId, agent, message)) {
       return 'settled';
     }
     const verdict = admit(message, agent);
@@ -233,6 +266,10 @@ export const createImessageAdapter = ({
     let absorbed = false;
     let session;
     let failure;
+    const controller = new AbortController();
+    const running = turns.get(sessionId) ?? new Set();
+    running.add(controller);
+    turns.set(sessionId, running);
     try {
       session = await gateway.dispatch({
         sessionId,
@@ -240,6 +277,7 @@ export const createImessageAdapter = ({
         userMessage: message.text,
         metadata,
         turnId: randomUUID(),
+        signal: controller.signal,
         idempotencyKey,
         onRepeat: (kind) => {
           repeat = kind;
@@ -250,6 +288,15 @@ export const createImessageAdapter = ({
       });
     } catch (error) {
       failure = error;
+    } finally {
+      running.delete(controller);
+      if (running.size === 0 && turns.get(sessionId) === running) {
+        turns.delete(sessionId);
+      }
+    }
+    if (controller.signal.aborted) {
+      await tell(agentId, verdict.from, 'Stopped.');
+      return 'settled';
     }
     if (repeat === 'live' || absorbed) {
       // Another delivery of this message, or the turn it was merged into,

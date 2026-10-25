@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -109,7 +110,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     keyProxy: proxies.keyProxy,
     warn: (message) => warnings.push(message),
   });
-  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports, reportCalls };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports, reportCalls, state };
 };
 
 // A second daemon on the first one's state.
@@ -465,6 +466,27 @@ test('a setup failure after the key proxy opens closes it, and retries do not pi
   assert.ok(proxies.opened.length >= 1);
   assert.deepEqual(proxies.opened.map((proxy) => proxy.closed), proxies.opened.map(() => true), 'every proxy opened for a failed setup is closed');
   assert.ok(warnings.some((message) => message.includes('cannot express the path')));
+});
+
+test('a run log that cannot be opened records the claim as failed to start, not as still running', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, claims, proxies, warnings, state } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+  });
+  // A directory where the run's log file goes: opening it throws EISDIR.
+  const id = createHash('sha256').update(exp).digest('hex').slice(0, 12);
+  mkdirSync(path.join(state, 'agents', 'ava', id, 'logs', '2026-10-23-1.log'), { recursive: true });
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'nothing is spawned');
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result?.status, 'failed-to-start', 'the claim says what happened tonight, not at the next restart');
+  assert.match(entry.result.error, /EISDIR/);
+  assert.equal(proxies.opened.every((proxy) => proxy.closed), true, 'the key proxy is closed');
+  assert.ok(warnings.some((message) => message.includes('EISDIR')), 'and the failure is said');
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'the spent experiment is not tried again tonight');
+  assert.equal(claims.night('ava', '2026-10-23').length, 1);
 });
 
 test('a daemon stop after the tether has exited signals nothing', async () => {

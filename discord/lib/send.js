@@ -1,3 +1,5 @@
+import { open } from 'node:fs/promises';
+import path from 'node:path';
 import { chunk } from './chunk.js';
 
 const Routes = {
@@ -75,4 +77,42 @@ export const threadFrom = async (rest, channelId, messageId, name) => {
     body: { name: (name.trim() || 'Conversation').slice(0, 100), auto_archive_duration: 1440 },
   });
   return thread.id;
+};
+
+/**
+ * The most a bot may upload in one file to a server with no boost, and to
+ * a DM. A boosted server takes more, but the bot can't cheaply tell, so
+ * this is the one limit it holds to.
+ */
+export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Upload a local file as a message of its own (a chart, a screenshot a
+ * tool made), named by its basename, with `title` as its text when given.
+ * Read through one open handle, so what is checked is what is sent.
+ * Returns the message id.
+ */
+export const uploadFile = async (rest, channelId, filePath, { title } = {}) => {
+  const handle = await open(filePath, 'r');
+  let data;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new Error(`${filePath} is not a file`);
+    }
+    if (info.size > UPLOAD_MAX_BYTES) {
+      throw new Error(`${path.basename(filePath)} is ${info.size} bytes, over the ${UPLOAD_MAX_BYTES} bytes Discord takes from a bot`);
+    }
+    data = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  if (data.length > UPLOAD_MAX_BYTES) {
+    throw new Error(`${path.basename(filePath)} grew past the ${UPLOAD_MAX_BYTES} bytes Discord takes from a bot while it was read`);
+  }
+  const posted = await rest.post(Routes.channelMessages(channelId), {
+    body: { ...(title ? { content: title.slice(0, 2000) } : {}), allowed_mentions: NO_PINGS, flags: SUPPRESS_EMBEDS },
+    files: [{ name: path.basename(filePath), data }],
+  });
+  return posted.id;
 };

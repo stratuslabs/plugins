@@ -18,12 +18,26 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
-    let body = '';
+    const parts = [];
     req.on('data', (part) => {
-      body += part;
+      parts.push(part);
     });
-    req.on('end', () => {
-      const json = body ? JSON.parse(body) : undefined;
+    req.on('end', async () => {
+      const raw = Buffer.concat(parts);
+      let json;
+      // A post with files is multipart: `payload_json` is the body and each
+      // `files[n]` part is recorded as { name, bytes }.
+      let uploads;
+      if (/^multipart\/form-data/.test(req.headers['content-type'] ?? '')) {
+        const form = await new Request('http://fake/', { method: 'POST', headers: { 'content-type': req.headers['content-type'] }, body: raw }).formData();
+        json = JSON.parse(form.get('payload_json') ?? '{}');
+        uploads = [];
+        for (const [key, value] of form.entries()) {
+          if (key.startsWith('files[')) uploads.push({ name: value.name, bytes: Buffer.from(await value.arrayBuffer()) });
+        }
+      } else {
+        json = raw.length ? JSON.parse(raw.toString('utf8')) : undefined;
+      }
       const send = (status, value) => {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(value));
@@ -78,7 +92,7 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
         return send(200, page.reverse());
       }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/messages$/))) {
-        state.posts.push({ channelId: match[1], body: json, authorization: req.headers.authorization });
+        state.posts.push({ channelId: match[1], body: json, authorization: req.headers.authorization, ...(uploads ? { files: uploads } : {}) });
         return send(200, { id: id(), channel_id: match[1] });
       }
       if (req.method === 'PATCH' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {

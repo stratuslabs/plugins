@@ -77,11 +77,18 @@ either place fails the load with its name.
   a message is admitted, only from Discord's CDN over https, without the
   bot token, within 30s a message.
 
+- Files the agent sends: a file a tool made during a turn (an ok result's
+  `file` or `files`) is uploaded into the conversation in its place, below
+  what was said before the tool and above what comes after, and a
+  `message.send` destination takes uploads too. Up to 10 MB a file, the
+  most Discord takes from a bot in a server with no boosts; a failed upload
+  is logged and the turn goes on.
+
 ## Not built yet
 
-Files the agent sends (uploads), and saving a large text file to the
-agent's workspace instead of naming it. The package stays private until
-uploads are in.
+Saving a large text file someone sends to the agent's workspace instead of
+naming it: that needs the host's tainted-write ledger, which plugins don't
+get.
 
 ## Connecting
 

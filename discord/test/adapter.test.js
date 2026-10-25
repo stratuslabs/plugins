@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createPlugin } from '../index.js';
 import { connectBot } from '../lib/gateway.js';
@@ -527,4 +529,26 @@ test('stopping while a message\'s attachments download leaves it unanswered, for
   await adapter.stop();
   assert.ok(Date.now() - started < 1000, 'stop does not wait out the download');
   assert.equal(gateway.turns.length, 0, 'not answered with the image missing');
+});
+
+test('a file a tool made during the turn is uploaded into the conversation, in its place', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'discord-turn-file-'));
+  const chart = path.join(dir, 'chart.png');
+  await writeFile(chart, png(2, 2));
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, content: 'chart please' }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  const [turn] = gateway.turns;
+  turn.start();
+  turn.emit({ type: 'provider.delta', delta: { type: 'text', text: 'Drawing it.' } });
+  turn.emit({ type: 'provider.response', parts: [{ type: 'text', text: 'Drawing it.' }] });
+  turn.emit({ type: 'tool.called', call: { id: 'c1', toolName: 'chart.render', input: {} } });
+  turn.emit({ type: 'tool.completed', result: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: chart } } });
+  turn.finish('Here it is.');
+  await until(() => discord.state.posts.some((p) => p.body.content === 'Here it is.') || discord.state.patches.some((p) => p.body.content === 'Here it is.'), 'the reply');
+  const uploads = discord.state.posts.filter((p) => p.files);
+  assert.deepEqual(uploads.map((p) => [p.channelId, p.files[0].name]), [[DM, 'chart.png']]);
+  const order = discord.state.posts.map((p) => (p.files ? 'file' : p.body.content));
+  assert.ok(order.indexOf('Drawing it.') < order.indexOf('file'), `words before the tool come first (${order})`);
 });

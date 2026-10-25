@@ -7,7 +7,7 @@ import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
 import { createPositions } from './positions.js';
 import { createRenderer } from './render.js';
-import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, typing } from './send.js';
+import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, typing, uploadFile } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
 import { isStopRequest } from './stop.js';
 import { latestTurnReply, turnFailureFor, turnReplyFor } from './turns.js';
@@ -376,6 +376,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         edit: (id, piece) => editText(bot.rest, replyChannel, id, piece),
         remove: (id) => removeMessage(bot.rest, replyChannel, id),
         typing: () => typing(bot.rest, replyChannel),
+        upload: (filePath) => uploadFile(bot.rest, replyChannel, filePath),
       },
     });
     const entry = { turnId: randomUUID(), renderer, controller: new AbortController() };

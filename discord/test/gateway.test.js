@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
 import { connectBot, INTENTS, stopManager } from '../lib/gateway.js';
-import { postText, editText, threadFrom, typing } from '../lib/send.js';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { postText, editText, threadFrom, typing, uploadFile, UPLOAD_MAX_BYTES } from '../lib/send.js';
 import { BOT, fakeDiscord } from './fake-discord.js';
 
 const until = async (check, what) => {
@@ -186,4 +189,34 @@ test('replies are chunked, ping nobody, suppress link previews and reply to the 
   const thread = await threadFrom(bot.rest, CHANNEL, '600000000000000001', '  ');
   assert.equal(discord.state.threads[0].body.name, 'Conversation');
   assert.equal(thread, discord.state.threads[0].id);
+});
+
+test('a file is uploaded as a message of its own, by name, pinging nobody', async (t) => {
+  const discord = await fakeDiscord();
+  const bot = await connectBot({ token: 'bot-token-a', api: discord.api, onMessage: () => {} });
+  t.after(async () => {
+    await bot.close();
+    await discord.close();
+  });
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'discord-upload-'));
+  const file = path.join(dir, 'chart.png');
+  await writeFile(file, Buffer.from([1, 2, 3, 255]));
+  const id = await uploadFile(bot.rest, CHANNEL, file);
+  assert.equal(typeof id, 'string');
+  const [post] = discord.state.posts;
+  assert.equal(post.channelId, CHANNEL);
+  assert.equal(post.authorization, 'Bot bot-token-a');
+  assert.deepEqual(post.body.allowed_mentions, { parse: [], replied_user: false });
+  assert.deepEqual(post.files.map((f) => [f.name, [...f.bytes]]), [['chart.png', [1, 2, 3, 255]]]);
+
+  await uploadFile(bot.rest, CHANNEL, file, { title: 'The chart' });
+  assert.equal(discord.state.posts[1].body.content, 'The chart');
+
+  await mkdir(path.join(dir, 'folder'));
+  await assert.rejects(uploadFile(bot.rest, CHANNEL, path.join(dir, 'folder')), /not a file/);
+  await assert.rejects(uploadFile(bot.rest, CHANNEL, path.join(dir, 'missing.png')), /ENOENT/);
+  const big = path.join(dir, 'big.bin');
+  await writeFile(big, Buffer.alloc(UPLOAD_MAX_BYTES + 1));
+  await assert.rejects(uploadFile(bot.rest, CHANNEL, big), /over the 10485760 bytes Discord takes from a bot/);
+  assert.equal(discord.state.posts.length, 2, 'nothing posted for a refused file');
 });

@@ -1,5 +1,5 @@
 import { chunk } from './chunk.js';
-import { editText, postText, typing } from './send.js';
+import { editText, postText, typing, uploadFile } from './send.js';
 
 /**
  * Discord as an addressable channel: `discord:` destinations for
@@ -193,6 +193,9 @@ export const createAddressing = ({ bots, config }) => {
         for (const piece of rest) {
           await postText(bot.rest, ref.channel, piece);
         }
+      },
+      async upload(filePath, title) {
+        await uploadFile(bot.rest, target, filePath, title ? { title } : {});
       },
       async typing() {
         await typing(bot.rest, target);

@@ -7,7 +7,7 @@ import { createRenderer, NO_REPLY_TEXT } from '../lib/render.js';
  * only when the test advances time, and every post, edit and delete lands
  * in `calls` in order.
  */
-const harness = ({ intervalMs = 1000, failEdits = false } = {}) => {
+const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } = {}) => {
   let clock = 0;
   let timers = [];
   let nextTimer = 1;
@@ -32,6 +32,13 @@ const harness = ({ intervalMs = 1000, failEdits = false } = {}) => {
     },
     async typing() {
       calls.push(['typing']);
+    },
+    async upload(filePath) {
+      if (failUploads) throw new Error('upload refused');
+      const id = `m${nextId++}`;
+      messages.set(id, `[file ${filePath}]`);
+      calls.push(['upload', id, filePath]);
+      return id;
     },
   };
   const fakeTimers = {
@@ -214,4 +221,55 @@ test('a Discord error on an edit is logged, not thrown into the event stream', a
   assert.match(warnings.join('\n'), /edit refused/);
   const outcome = await renderer.finalize('ab');
   assert.equal(outcome.spoke, true, 'the first post landed, so it spoke');
+});
+
+const produced = (output, ok = true) => ({ type: 'tool.completed', sessionId: 's', result: { callId: 'c1', ok, output } });
+
+test('a file a tool produced is posted in its place: below the words before it, above the words after', async () => {
+  const { renderer, visible, calls, advance, settle } = harness();
+  renderer.onEvent(text('Making the chart.'));
+  await settle();
+  renderer.onEvent(response('Making the chart.'));
+  renderer.onEvent(called('chart.render'));
+  await advance(1000);
+  renderer.onEvent(produced({ file: '/w/chart.png', files: ['/w/data.csv'] }));
+  await settle();
+  renderer.onEvent(text('Here it is.'));
+  await advance(1000);
+  await renderer.finalize('Here it is.');
+  assert.deepEqual(visible(), ['Making the chart.', '[file /w/chart.png]', '[file /w/data.csv]', 'Here it is.']);
+  assert.deepEqual(calls.filter(([kind]) => kind === 'upload').map(([, , file]) => file), ['/w/chart.png', '/w/data.csv']);
+});
+
+test('a failed tool, or a result naming no file, uploads nothing', async () => {
+  const { renderer, calls, settle } = harness();
+  renderer.onEvent(called('x'));
+  renderer.onEvent(produced({ file: '/w/a.png' }, false));
+  renderer.onEvent(called('y'));
+  renderer.onEvent(produced({ text: 'no file' }));
+  renderer.onEvent(called('z'));
+  renderer.onEvent({ type: 'tool.denied', sessionId: 's', call: { id: 'c3', toolName: 'z' }, result: { ok: true, output: { file: '/w/b.png' } } });
+  await settle();
+  await renderer.finalize('done');
+  assert.equal(calls.filter(([kind]) => kind === 'upload').length, 0);
+});
+
+test('a file alone is something said: no (no reply) after it', async () => {
+  const { renderer, visible, settle } = harness();
+  renderer.onEvent(called('shot'));
+  renderer.onEvent(produced({ file: '/w/shot.png' }));
+  await settle();
+  const { spoke } = await renderer.finalize('');
+  assert.deepEqual(visible(), ['[file /w/shot.png]']);
+  assert.equal(spoke, true);
+});
+
+test('a failed upload is logged and the turn goes on', async () => {
+  const { renderer, visible, warnings, settle } = harness({ failUploads: true });
+  renderer.onEvent(called('shot'));
+  renderer.onEvent(produced({ file: '/w/shot.png' }));
+  await settle();
+  await renderer.finalize('Done.');
+  assert.deepEqual(visible(), ['Done.']);
+  assert.match(warnings.join('\n'), /could not upload shot\.png: upload refused/);
 });

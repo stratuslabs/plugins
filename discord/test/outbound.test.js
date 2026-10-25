@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPlugin } from '../index.js';
@@ -191,4 +194,17 @@ test('conversationKindFor asks Discord, keeps definite answers and says nothing 
   const asked = discord.state.gets.length;
   assert.equal(await adapter.conversationKindFor('ava', DM), 'direct');
   assert.equal(discord.state.gets.length, asked, 'cached');
+});
+
+test('a destination takes a file: uploaded into the thread it names', async (t) => {
+  const { discord, adapter } = await setUp(t);
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'discord-out-'));
+  const file = path.join(dir, 'report.csv');
+  await writeFile(file, 'a,b\n1,2\n');
+  const connection = await adapter.resolveOutbound({ agentId: 'ava', to: CHANNEL, thread: THREAD });
+  await connection.upload(file, 'Weekly report');
+  const [post] = discord.state.posts;
+  assert.equal(post.channelId, THREAD);
+  assert.equal(post.body.content, 'Weekly report');
+  assert.deepEqual(post.files.map((f) => [f.name, f.bytes.toString()]), [['report.csv', 'a,b\n1,2\n']]);
 });

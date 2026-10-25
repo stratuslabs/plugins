@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { filePathsOf } from '@stratusagent/core';
 import { chunk } from './chunk.js';
 
 /**
@@ -23,9 +25,14 @@ export const NO_REPLY_TEXT = '(no reply)';
  * end of the live segment, or as the live message itself when the response
  * has said nothing yet; the next words replace it.
  *
+ * A file a tool produced (an ok result's `file` or `files`, core's
+ * `filePathsOf`) is a message of its own, in its place: after what was
+ * said before the tool, before what is said after.
+ *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
- * `remove(id)`, `typing()`. Every call is serialized, and a failed one is
- * logged through `warn`, never thrown into the event stream.
+ * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
+ * serialized, and a failed one is logged through `warn`, never thrown into
+ * the event stream.
  */
 export const createRenderer = ({
   ops,
@@ -45,6 +52,7 @@ export const createRenderer = ({
   let chain = Promise.resolve();
   let typingTimer;
   let posted = 0;
+  let uploaded = 0;
 
   const live = () => segments[segments.length - 1];
 
@@ -200,7 +208,28 @@ export const createRenderer = ({
       if (event.type === 'tool.completed' || event.type === 'tool.denied') {
         tool = undefined;
         breakPending = true;
-        schedule();
+        const files = event.type === 'tool.completed' && event.result && ops.upload ? filePathsOf(event.result) : [];
+        if (files.length === 0) {
+          schedule();
+          return;
+        }
+        // Brought up to date first (the status line comes down), so the
+        // file lands below the words before it; words after it start a
+        // message of their own below it.
+        if (timer !== undefined) {
+          timers.clearTimeout(timer);
+          timer = undefined;
+        }
+        lastSyncAt = now();
+        chain = chain.then(syncNow).then(async () => {
+          for (const file of files) {
+            const id = await call(`upload ${path.basename(file)}`, () => ops.upload(file));
+            if (id !== undefined) {
+              posted += 1;
+              uploaded += 1;
+            }
+          }
+        });
       }
     },
 
@@ -219,7 +248,10 @@ export const createRenderer = ({
       if (text.trim().length > 0 && !repeatsPrevious) {
         live().text = text;
       }
-      if (segments.every((segment) => display(segment) === '')) {
+      // A file is something said; NO_REPLY_TEXT is for a turn with nothing
+      // to show. The uploads are in the chain, so wait for them first.
+      await chain;
+      if (uploaded === 0 && segments.every((segment) => display(segment) === '')) {
         live().text = NO_REPLY_TEXT;
       }
       await sync();

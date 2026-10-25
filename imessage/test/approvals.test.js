@@ -264,3 +264,15 @@ test('a scheduled firing asks at the schedule destination when it is an approver
   await waitFor(() => sent.length === 1);
   assert.equal(sent[0][0], OTHER_APPROVER);
 });
+
+test('messages reach the gateway in the order they arrived, approval-shaped ones included', async (t) => {
+  const { fixture, host, sent } = await setup(t);
+  // Pending, but put to the other approver: a bare "no" from this one is a message.
+  host.request('r1', { metadata: { channel: 'imessage', imessageTo: OTHER_APPROVER } });
+  await waitFor(() => sent.length === 1);
+  fixture.received(APPROVER, { text: 'no', body: null });
+  fixture.received(APPROVER, { text: 'second', body: null });
+  fixture.received(APPROVER, { text: 'third', body: null });
+  await waitFor(() => host.dispatched.length === 3);
+  assert.deepEqual(host.dispatched.map((input) => input.userMessage), ['no', 'second', 'third']);
+});

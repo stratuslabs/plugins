@@ -174,35 +174,37 @@ export const createImessageAdapter = ({
 
   /**
    * A text that reads as an approval answer, while this agent has a request
-   * pending. Settled here, never dispatched: true when it was one.
+   * pending: settled here, never dispatched. Returns undefined when it is
+   * not one, decided synchronously, so a message that goes on to dispatch
+   * keeps its place behind the messages before it; otherwise a promise for
+   * the notes it sends.
    */
-  const answerApproval = async (agentId, agent, message) => {
+  const answerApproval = (agentId, agent, message) => {
     const parsed = parseAnswer(message.text);
     if (!parsed) {
-      return false;
+      return undefined;
     }
     const pending = [...asks.values()].filter((ask) => ask.agentId === agentId && !ask.spent);
     if (pending.length === 0) {
-      return false;
+      return undefined;
     }
     const from = normalizeHandle(message.from);
     const overIMessage = message.service === 'iMessage';
     const approver = from !== null && agent.approvers.has(from);
     if (parsed.code === undefined) {
       if (approver && overIMessage && pending.some((ask) => ask.askedTo.includes(from))) {
-        await tell(agentId, from, 'To answer the approval request, reply with its code too, like Y K7QM2X.');
-        return true;
+        return tell(agentId, from, 'To answer the approval request, reply with its code too, like Y K7QM2X.');
       }
-      return false;
+      return undefined;
     }
     const ask = pending.find((candidate) => candidate.code === parsed.code);
     if (ask && approver && overIMessage) {
       ask.spent = true;
       if (!host.resolveApproval({ requestId: ask.requestId, answer: parsed.answer, actor: from })) {
         asks.delete(ask.requestId);
-        await tell(agentId, from, 'That request is no longer pending.');
+        return tell(agentId, from, 'That request is no longer pending.');
       }
-      return true;
+      return Promise.resolve();
     }
     // A wrong code, a code over SMS, or a code from someone who is not an
     // approver: all count as guesses against every request pending.
@@ -216,10 +218,7 @@ export const createImessageAdapter = ({
         host.resolveApproval({ requestId: candidate.requestId, answer: 'deny', reason: 'undeliverable' });
       }
     }
-    if (approver && overIMessage) {
-      await tell(agentId, from, "That code doesn't match a pending request.");
-    }
-    return true;
+    return approver && overIMessage ? tell(agentId, from, "That code doesn't match a pending request.") : Promise.resolve();
   };
 
   /**
@@ -250,8 +249,12 @@ export const createImessageAdapter = ({
     return true;
   };
 
+  // Everything up to gateway.dispatch runs synchronously, so messages reach
+  // the gateway in the order intake hands them over.
   const answer = async (gateway, agentId, agent, message) => {
-    if (await answerApproval(agentId, agent, message)) {
+    const approval = answerApproval(agentId, agent, message);
+    if (approval) {
+      await approval;
       return 'settled';
     }
     if (stopRequest(agentId, agent, message)) {

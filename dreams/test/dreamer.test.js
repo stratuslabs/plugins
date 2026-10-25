@@ -59,7 +59,7 @@ const fakeChild = (kills) => {
   child.pid = (pids += 1);
   child.kill = (signal) => kills.push(signal);
   // The daemon asks the tether to stop by closing its stdin.
-  child.stdin = { on() {}, end: () => kills.push('close-stdin') };
+  child.stdin = { on() {}, end: () => { child.stdinClosed = true; kills.push('close-stdin'); } };
   return child;
 };
 const unwrap = (command, args, options, child) => {
@@ -481,8 +481,36 @@ test('a daemon stop after the tether has exited signals nothing', async () => {
   const stopped = dreamer.stop();
   reports[0].emit('exit', 0, null);
   await stopped;
-  assert.deepEqual(kills, [], 'the pid may be reused by now: nothing is sent');
+  assert.equal(runs[0].child.stdinClosed, undefined, 'the exited run is sent nothing');
+  assert.equal(kills.filter((kill) => kill !== 'close-stdin').length, 0, 'the pid may be reused by now: no signal is sent');
   assert.equal([...timers.pending].length, 0, 'and no timer is left armed');
+});
+
+test('a daemon stop while the report runs closes the report\'s pipe instead of waiting out its timeout', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, kills, timers, reports, claims } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports.length, 1, 'the report is running');
+  let returned = false;
+  const stopped = dreamer.stop().then(() => {
+    returned = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports[0].stdinClosed, true, 'the stop asks the report\'s tether to go, without the 120 s timer');
+  assert.deepEqual(kills, ['close-stdin'], 'once, and with no signal');
+  assert.equal(returned, false, 'the stop still waits for the report to exit');
+  reports[0].emit('exit', null, 'SIGTERM');
+  await stopped;
+  assert.equal([...timers.pending].length, 0, 'the report timer is cleared');
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result.status, 'finished', 'the run itself had finished before the stop');
+  assert.equal(entry.result.report, undefined, 'and the cut-short report is not linked');
 });
 
 test('the experiment directory stays busy until its report and summary are done', async () => {

@@ -86,13 +86,14 @@ local delivery has no secret.
 
 ## Not built yet
 
-- Images and files sent to the agent: the text arrives, the attachment
-  doesn't.
+- Images and files sent to the agent: the text arrives, and the agent is
+  told an attachment came with it (stratuslabs/plugins#24).
 - Files the agent sends.
 - Group chats.
 - Recovery when `chat.db` is replaced (restored from a backup, or rebuilt
   by Messages). Today the agent stops reading and the log tells you to
-  remove `watermarks.json`, which restarts reading from that moment.
+  remove `watermarks.json`, which restarts reading from that moment
+  (stratuslabs/plugins#23).
 - The other delivery methods (`photon-local`, `photon`, `sendblue`).
 
 ## Risks

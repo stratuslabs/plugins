@@ -310,3 +310,12 @@ test('"stop" over SMS, or from someone who is not an approver, stops nothing', a
   assert.equal(gateway.dispatched.length, 1);
   assert.equal(gateway.dispatched[0].userMessage, 'stop');
 });
+
+test('an attachment the channel cannot pass on is named in the turn, not silently dropped', async (t) => {
+  const { fixture, gateway, sender } = await setup(t);
+  fixture.received(PHONE, { text: '￼', body: null, attachments: 1 });
+  fixture.received(PHONE, { text: 'look', body: null, attachments: 2 });
+  await waitFor(() => sender.sent.length === 2);
+  assert.match(gateway.dispatched[0].userMessage, /^\[An attachment was sent with this message; this channel can't pass attachments on yet\.\]$/);
+  assert.match(gateway.dispatched[1].userMessage, /^look\n\n\[2 attachments were sent/);
+});

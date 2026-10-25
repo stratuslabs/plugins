@@ -16,6 +16,15 @@ const SEND_RETRY_MS = [2000, 10_000, 30_000];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** The text, with a note for attachments, which aren't passed on yet (stratuslabs/plugins#24). */
+const withAttachmentNote = ({ text, attachments }) => {
+  if (!attachments) {
+    return text;
+  }
+  const note = `[${attachments === 1 ? 'An attachment was' : `${attachments} attachments were`} sent with this message; this channel can't pass attachments on yet.]`;
+  return text.trim().length > 0 ? `${text}\n\n${note}` : note;
+};
+
 /**
  * The iMessage channel adapter, local delivery: the agent's own Apple ID
  * in Messages on this Mac. Intake reads chat.db (lib/intake.js); each
@@ -274,7 +283,7 @@ export const createImessageAdapter = ({
       session = await gateway.dispatch({
         sessionId,
         agentId,
-        userMessage: message.text,
+        userMessage: withAttachmentNote(message),
         metadata,
         turnId: randomUUID(),
         signal: controller.signal,

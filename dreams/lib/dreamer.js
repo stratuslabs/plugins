@@ -102,11 +102,21 @@ export const createDreamer = ({
   // daemon, and its whole group stopped at the timeout.
   const tethered = (lockFile, command, args) => [process.execPath, [TETHER, lockFile, String(KILL_GRACE_MS), '--', command, ...args]];
 
-  const report = (experimentDir, dirs, env) => new Promise((resolve) => {
+  // `run.endReport` closes the report's pipe early, for a daemon stop: its
+  // tether then stops the report's group as it would at the timeout.
+  const report = (run, experimentDir, dirs, env) => new Promise((resolve) => {
     const [command, args] = tethered(lockFor(experimentDir), ...sandboxed(experimentDir, dirs, ['report', experimentDir]));
     const child = spawn(command, args, { cwd: experimentDir, env, stdio: ['pipe', 'ignore', 'ignore'] });
     child.stdin?.on('error', () => {});
-    const timer = timers.setTimeout(() => child.stdin.end(), REPORT_TIMEOUT_MS);
+    let ended = false;
+    const end = () => {
+      if (!ended) {
+        ended = true;
+        child.stdin.end();
+      }
+    };
+    run.endReport = end;
+    const timer = timers.setTimeout(end, REPORT_TIMEOUT_MS);
     child.on('error', () => {
       timers.clearTimeout(timer);
       resolve(undefined);
@@ -222,9 +232,12 @@ export const createDreamer = ({
     // the next experiment on restart and never replays this one.
     claims.claim(agentId, window.night, entry);
 
-    const out = openSync(logFile, 'a', 0o600);
+    let out;
     let child;
     try {
+      // Inside the try: a log that can't be opened is recorded tonight,
+      // not left looking like a run until the next restart.
+      out = openSync(logFile, 'a', 0o600);
       // The tether's stdin is a pipe this daemon never writes to: when the
       // daemon is gone, it closes, and the tether stops the run.
       child = spawn(...tethered(lockFile, command, args), { cwd: experimentDir, env, stdio: ['pipe', out, out] });
@@ -232,7 +245,9 @@ export const createDreamer = ({
       claims.finish(agentId, window.night, index, { status: 'failed-to-start', error: error.message, endedAt: now().toISOString(), log: logFile });
       throw error;
     } finally {
-      closeSync(out);
+      if (out !== undefined) {
+        closeSync(out);
+      }
     }
     // Nothing is ever written; an EPIPE after the tether exits is expected.
     child.stdin?.on('error', () => {});
@@ -267,7 +282,7 @@ export const createDreamer = ({
           if (exitCode === LOCK_BUSY) {
             error = new Error(`a run from an earlier daemon still holds ${experimentDir}`);
           }
-          const reportPath = error || stopping ? undefined : await report(experimentDir, dirs, env);
+          const reportPath = error || stopping ? undefined : await report(run, experimentDir, dirs, env);
           const summary = summarizeFile(path.join(experimentDir, 'experiments.jsonl'), entry.offset);
           claims.finish(agentId, window.night, index, {
             status: error ? 'failed-to-start' : run.reason ?? 'finished',
@@ -393,6 +408,8 @@ export const createDreamer = ({
         const runs = [...running.values()].filter((run) => run.child);
         for (const run of runs) {
           run.terminate('stopped-by-daemon');
+          // A run that has exited may still be reporting: stop that too.
+          run.endReport?.();
         }
         return runs;
       };

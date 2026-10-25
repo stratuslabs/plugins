@@ -127,7 +127,7 @@ contains, any agent workspace or protected path. Whoever can edit
   old run has finished stopping and let go of its directory. The interrupted one isn't retried that
   night.
 - **Report:** when a run ends, the plugin runs `overnight report` (same
-  sandbox, same tether, stopped after two minutes) and summarizes only the
+  sandbox, same tether, stopped after two minutes or when the daemon stops) and summarizes only the
   lines appended to `experiments.jsonl` that night, reading at most 8 MiB of
   them, since the experimenting model can make that file any size: attempts, kept, not kept, failed, best score before and after, and up
   to five kept changes. The run's output goes to a log in the plugin's state

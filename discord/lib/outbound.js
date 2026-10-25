@@ -134,6 +134,39 @@ export const createAddressing = ({ bots, config }) => {
     kinds.set(key, kind);
   };
 
+  /**
+   * Where a destination's `thread` sends the words: a thread in `to` (its
+   * id), or a message in `to` with no thread, which the post replies under.
+   * No thread is `to` itself. Throws, saying why, for anything else.
+   */
+  const threadTarget = async (bot, agentId, to, value) => {
+    const thread = value?.trim() || undefined;
+    if (thread === undefined) {
+      return { target: to };
+    }
+    channelId(thread, 'a thread');
+    let threadChannel;
+    try {
+      threadChannel = await bot.rest.get(`/channels/${thread}`);
+    } catch (error) {
+      if (!notFound(error)) {
+        throw new Error(`discord: ${agentId}'s bot could not look up thread ${thread} (${describe(error)}).`);
+      }
+    }
+    if (threadChannel) {
+      if (!THREAD_TYPES.has(threadChannel.type) || threadChannel.parent_id !== to) {
+        throw new Error(`discord: ${thread} is not a thread in ${to}.`);
+      }
+      return { target: thread };
+    }
+    try {
+      await bot.rest.get(`/channels/${to}/messages/${thread}`);
+    } catch (error) {
+      throw new Error(`discord: there is no thread or message ${thread} in ${to} that ${agentId}'s bot can see (${describe(error)}).`);
+    }
+    return { target: to, replyTo: thread };
+  };
+
   const resolveOutbound = async (address) => {
     const to = channelId(address.to, 'a destination');
     const bot = botFor(address.agentId, 'reached', to);
@@ -153,35 +186,7 @@ export const createAddressing = ({ bots, config }) => {
       }
     }
 
-    // A thread names where the words go: a thread in this channel (its id),
-    // or a message here with no thread, which the post replies under.
-    let target = to;
-    let replyTo;
-    const thread = address.thread?.trim() || undefined;
-    if (thread !== undefined) {
-      channelId(thread, 'a thread');
-      let threadChannel;
-      try {
-        threadChannel = await bot.rest.get(`/channels/${thread}`);
-      } catch (error) {
-        if (!notFound(error)) {
-          throw new Error(`discord: ${address.agentId}'s bot could not look up thread ${thread} (${describe(error)}).`);
-        }
-      }
-      if (threadChannel) {
-        if (!THREAD_TYPES.has(threadChannel.type) || threadChannel.parent_id !== to) {
-          throw new Error(`discord: ${thread} is not a thread in ${to}.`);
-        }
-        target = thread;
-      } else {
-        try {
-          await bot.rest.get(`/channels/${to}/messages/${thread}`);
-        } catch (error) {
-          throw new Error(`discord: there is no thread or message ${thread} in ${to} that ${address.agentId}'s bot can see (${describe(error)}).`);
-        }
-        replyTo = thread;
-      }
-    }
+    const { target, replyTo } = await threadTarget(bot, address.agentId, to, address.thread);
 
     // A post over 2000 characters is several messages. An edit rewrites all
     // of them, so the ids of each post are kept, by its first id.
@@ -349,5 +354,5 @@ export const createAddressing = ({ bots, config }) => {
     return { messages, more };
   };
 
-  return { resolveOutbound, readConversation, conversationKindFor };
+  return { resolveOutbound, readConversation, conversationKindFor, threadTarget };
 };

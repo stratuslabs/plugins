@@ -44,9 +44,15 @@ export const editText = (rest, channelId, messageId, text) =>
   rest.patch(Routes.channelMessage(channelId, messageId), { body: { content: text, allowed_mentions: NO_PINGS } });
 
 /** Post one message with components (an approval prompt). Returns its id. */
-export const postPrompt = async (rest, channelId, { content, components }) => {
+export const postPrompt = async (rest, channelId, { content, components }, { replyTo } = {}) => {
   const posted = await rest.post(Routes.channelMessages(channelId), {
-    body: { content, components, allowed_mentions: NO_PINGS, flags: SUPPRESS_EMBEDS },
+    body: {
+      content,
+      components,
+      allowed_mentions: NO_PINGS,
+      flags: SUPPRESS_EMBEDS,
+      ...(replyTo ? { message_reference: { message_id: replyTo, fail_if_not_exists: false } } : {}),
+    },
   });
   return posted.id;
 };

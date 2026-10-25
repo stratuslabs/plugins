@@ -328,6 +328,36 @@ test('an approval is asked in the conversation, and an approver\'s click decides
   assert.deepEqual(discord.state.patches[0].body.components, [], 'no buttons left on a settled prompt');
 });
 
+test('a schedule whose thread names a message asks under that message, and one naming a thread asks in it', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const ROOT = '600000000000000040';
+  const THREAD = '600000000000000041';
+  discord.state.history[CHANNEL] = [{ id: ROOT, channel_id: CHANNEL, content: 'report here', author: { id: OWNER } }];
+  discord.state.channels[THREAD] = { id: THREAD, type: 11, parent_id: CHANNEL };
+  gateway.ask({ sessionId: 'schedule:nightly', requestId: 'req-s1', scheduleDestination: { channel: 'discord', to: CHANNEL, thread: ROOT } });
+  await until(() => discord.state.posts.length === 1, 'the prompt under the message');
+  assert.equal(discord.state.posts[0].channelId, CHANNEL);
+  assert.equal(discord.state.posts[0].body.message_reference?.message_id, ROOT);
+  assert.ok(discord.state.posts[0].body.components?.length > 0);
+  gateway.ask({ sessionId: 'schedule:nightly', requestId: 'req-s2', scheduleDestination: { channel: 'discord', to: CHANNEL, thread: THREAD } });
+  await until(() => discord.state.posts.length === 2, 'the prompt in the thread');
+  assert.equal(discord.state.posts[1].channelId, THREAD);
+  assert.equal(discord.state.posts[1].body.message_reference, undefined);
+  assert.deepEqual(gateway.resolutions, [], 'neither was denied');
+});
+
+test('a schedule whose thread names nothing the bot can see is denied as undeliverable, saying why', async (t) => {
+  const warns = [];
+  const { discord, registered, gateway } = await setUp(t, { warns });
+  await registered[0].adapter.start(gateway);
+  gateway.ask({ sessionId: 'schedule:nightly', requestId: 'req-s3', scheduleDestination: { channel: 'discord', to: CHANNEL, thread: '600000000000000049' } });
+  await until(() => gateway.resolutions.length === 1, 'the denial');
+  assert.deepEqual(gateway.resolutions[0], { requestId: 'req-s3', answer: 'deny', reason: 'undeliverable' });
+  assert.equal(discord.state.posts.length, 0);
+  assert.match(warns.join('\n'), /discord: there is no thread or message 600000000000000049 in 444444444444444444/);
+});
+
 test('someone who is not an approver is told so privately, and the request stays pending', async (t) => {
   const { discord, registered, gateway } = await setUp(t);
   await registered[0].adapter.start(gateway);

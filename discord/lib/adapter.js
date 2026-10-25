@@ -110,8 +110,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     const metadata = (viaOrigin ? origin.metadata : event.metadata) ?? {};
     const scheduled = event.scheduleDestination?.channel?.trim().toLowerCase() === 'discord' ? event.scheduleDestination : undefined;
     const here = metadata.channel === 'discord' && typeof metadata.discordChannel === 'string' ? metadata.discordChannel : undefined;
-    const channelId = here ?? scheduled?.thread ?? scheduled?.to;
-    if (channelId === undefined) {
+    if (here === undefined && scheduled?.to === undefined) {
       return;
     }
     const decline = (why) => {
@@ -129,7 +128,6 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     const agentName = viaOrigin && origin.agentId !== event.agentId ? `${nameOf(event.agentId)} (for ${nameOf(origin.agentId)})` : nameOf(event.agentId);
     const post = {
       bot,
-      channelId,
       agentId: event.agentId,
       agentName,
       toolName: event.call.toolName,
@@ -140,20 +138,34 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     };
     rendering.add(event.requestId);
     let failure;
+    // A conversation's own channel is where it is. A schedule's `thread`
+    // is a thread in `to`, or a message there to ask under.
+    let channelId = here;
+    let replyTo;
     try {
-      post.messageId = await postPrompt(bot.rest, channelId, approvalMessage({
-        agentName,
-        toolName: event.call.toolName,
-        risk: event.risk,
-        input: event.call.input,
-        origin: event.origin,
-        oneShot: post.oneShot,
-        always: event.always,
-        requestId: event.requestId,
-      }));
-      prompts.set(event.requestId, post);
+      if (channelId === undefined) {
+        ({ target: channelId, replyTo } = await addressing.threadTarget(bot, askingAgent, scheduled.to, scheduled.thread));
+      }
     } catch (error) {
-      failure = `could not post an approval request in ${channelId} (${error instanceof Error ? error.message : String(error)})`;
+      failure = (error instanceof Error ? error.message : String(error)).replace(/^discord: /, '');
+    }
+    if (failure === undefined) {
+      post.channelId = channelId;
+      try {
+        post.messageId = await postPrompt(bot.rest, channelId, approvalMessage({
+          agentName,
+          toolName: event.call.toolName,
+          risk: event.risk,
+          input: event.call.input,
+          origin: event.origin,
+          oneShot: post.oneShot,
+          always: event.always,
+          requestId: event.requestId,
+        }), replyTo ? { replyTo } : {});
+        prompts.set(event.requestId, post);
+      } catch (error) {
+        failure = `could not post an approval request in ${channelId} (${error instanceof Error ? error.message : String(error)})`;
+      }
     }
     rendering.delete(event.requestId);
     const settled = settledWhileRendering.get(event.requestId);

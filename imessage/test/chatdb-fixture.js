@@ -70,12 +70,13 @@ export const createChatDb = (file, { account = 'E:ava.agent@icloud.com' } = {}) 
     associatedGuid = null,
     balloon = null,
     attachments = 0,
+    files = [],
     guid = nextGuid(),
   } = {}) => {
     const handleId = from ? handleFor(from, service ?? 'iMessage') : 0;
     const result = db.prepare(`INSERT INTO message (guid, text, handle_id, attributedBody, service, account, date, is_from_me, is_finished, cache_has_attachments, item_type, associated_message_type, associated_message_guid, balloon_bundle_id, destination_caller_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`)
-      .run(guid, text, handleId, body, service, account, appleNanos(date), fromMe ? 1 : 0, attachments > 0 ? 1 : 0, itemType, associatedType, associatedGuid, balloon, account.replace(/^[EP]:/, ''));
+      .run(guid, text, handleId, body, service, account, appleNanos(date), fromMe ? 1 : 0, attachments + files.length > 0 ? 1 : 0, itemType, associatedType, associatedGuid, balloon, account.replace(/^[EP]:/, ''));
     const rowid = Number(result.lastInsertRowid);
     if (chat) {
       const chatId = chatFor(chat, { group, service: service ?? 'iMessage' });
@@ -84,6 +85,12 @@ export const createChatDb = (file, { account = 'E:ava.agent@icloud.com' } = {}) 
     for (let index = 0; index < attachments; index += 1) {
       const attachment = Number(db.prepare('INSERT INTO attachment (guid, filename, mime_type, transfer_name) VALUES (?, ?, ?, ?)')
         .run(`AT-${guid}-${index}`, `~/Library/Messages/Attachments/xx/${index}.jpg`, 'image/jpeg', `${index}.jpg`).lastInsertRowid);
+      db.prepare('INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?, ?)').run(rowid, attachment);
+    }
+    // Attachments as Messages records them: { filename, mimeType, uti, transferName, totalBytes }.
+    for (const [index, file] of files.entries()) {
+      const attachment = Number(db.prepare('INSERT INTO attachment (guid, filename, uti, mime_type, transfer_name, total_bytes) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(`AT-${guid}-f${index}`, file.filename ?? null, file.uti ?? null, file.mimeType ?? null, file.transferName ?? null, file.totalBytes ?? 0).lastInsertRowid);
       db.prepare('INSERT INTO message_attachment_join (message_id, attachment_id) VALUES (?, ?)').run(rowid, attachment);
     }
     return { rowid, guid };

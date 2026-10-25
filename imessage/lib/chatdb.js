@@ -47,6 +47,14 @@ WHERE m.ROWID > ?
 ORDER BY m.ROWID
 LIMIT ?`;
 
+const ATTACHMENTS_OF = `
+SELECT a.ROWID AS rowid, a.filename AS filename, a.mime_type AS mimeType, a.uti AS uti,
+       a.transfer_name AS transferName, a.total_bytes AS totalBytes
+FROM message_attachment_join maj
+JOIN attachment a ON a.ROWID = maj.attachment_id
+WHERE maj.message_id = ?
+ORDER BY a.ROWID`;
+
 export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {}) => {
   const db = new Database(file, { readOnly: true });
   db.exec('PRAGMA query_only = 1;');
@@ -54,6 +62,7 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
   const rowsAfter = db.prepare(ROWS_AFTER);
   const maxRowid = db.prepare('SELECT MAX(ROWID) AS max FROM message');
   const guidAt = db.prepare('SELECT guid FROM message WHERE ROWID = ?');
+  const attachmentsOf = db.prepare(ATTACHMENTS_OF);
   return {
     file,
     raw: db,
@@ -68,6 +77,8 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
     guidAt: (rowid) => guidAt.get(rowid)?.guid,
     /** Up to `limit` rows with ROWID above `rowid`, in ROWID order. */
     rowsAfter: (rowid, limit = 100) => rowsAfter.all(rowid, limit),
+    /** The attachments joined to message `rowid`, in the order they were added. */
+    attachmentsOf: (rowid) => attachmentsOf.all(rowid),
     close: () => db.close(),
   };
 };

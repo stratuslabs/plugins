@@ -1,0 +1,17 @@
+{
+  "name": "@stratusagent/plugin-imessage",
+  "version": "0.0.0",
+  "private": true,
+  "description": "iMessage channel for Stratus: text an agent from your phone through Messages.app on its own Mac.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@parseaple/typedstream": "2.0.2"
+  }
+}

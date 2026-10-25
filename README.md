@@ -14,6 +14,7 @@ agent's core any bigger.
 | [`plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`: an agent shows a native screen as A2UI v1.0, validated against your catalogs | Comes with the `a2ui-screens` skill |
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
+| [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
 
 All are published as `@stratusagent/plugin-<name>` from the directory of the
 same name. Each directory's README covers setup and configuration.

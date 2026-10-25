@@ -1,0 +1,20 @@
+{
+  "name": "@stratusagent/plugin-dreams",
+  "version": "0.1.0",
+  "description": "Overnight experiment dreams: each night, in a window you set, run overnight-experimenter under the macOS sandbox, at most once per experiment, and report what it tried in the morning.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "os": ["darwin"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [{ "name": "dreams.report", "risk": "safe" }],
+      "channels": [{ "name": "dreams" }]
+    }
+  }
+}

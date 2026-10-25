@@ -15,6 +15,7 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
   const messages = new Map();
   let nextId = 1;
   let editsFail = failEdits;
+  let removesFail = false;
   const ops = {
     async post(text) {
       const id = `m${nextId++}`;
@@ -28,6 +29,7 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
       calls.push(['edit', id, text]);
     },
     async remove(id) {
+      if (removesFail) throw new Error('delete refused');
       messages.delete(id);
       calls.push(['remove', id]);
     },
@@ -76,7 +78,10 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
   const setFailEdits = (value) => {
     editsFail = value;
   };
-  return { renderer, calls, visible, advance, settle, warnings, setFailEdits };
+  const setFailRemoves = (value) => {
+    removesFail = value;
+  };
+  return { renderer, calls, visible, advance, settle, warnings, setFailEdits, setFailRemoves };
 };
 
 const text = (value) => ({ type: 'provider.delta', sessionId: 's', delta: { type: 'text', text: value } });
@@ -288,4 +293,30 @@ test('an edit Discord refused is tried again, so the reply that lands is the who
   setFailEdits(false);
   await renderer.finalize('ab');
   assert.deepEqual(visible(), ['ab'], 'the failed edit is not counted as shown');
+});
+
+test('a message Discord would not delete is still tracked, so it is reused rather than left behind', async () => {
+  const { renderer, visible, advance, settle, setFailRemoves } = harness();
+  renderer.onEvent(called('search'));
+  await settle();
+  assert.deepEqual(visible(), ['-# ⚙ search…']);
+  setFailRemoves(true);
+  renderer.onEvent(completed());
+  await advance(1000);
+  setFailRemoves(false);
+  renderer.onEvent(text('done'));
+  await renderer.finalize('done');
+  assert.deepEqual(visible(), ['done'], 'the status line is not left up beside the reply');
+});
+
+test('after a reset, a provider that answers in one piece still has its words before a tool shown', async () => {
+  const { renderer, visible, settle } = harness();
+  renderer.onEvent(text('abandoned attempt'));
+  await settle();
+  renderer.onEvent({ type: 'provider.delta', sessionId: 's', delta: { type: 'reset' } });
+  renderer.onEvent(response('Looking that up.'));
+  renderer.onEvent(called('search'));
+  renderer.onEvent(completed());
+  await renderer.finalize('Found it.');
+  assert.deepEqual(visible(), ['Looking that up.', 'Found it.']);
 });

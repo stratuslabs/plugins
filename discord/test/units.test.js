@@ -164,3 +164,10 @@ test('approval prompt: shows the call, offers Always only when it means somethin
   assert.equal(outcomeMessage(post, { answer: 'deny', reason: 'timeout' }), '**Ava**: `x` (gated): Expired without an answer, denied.');
   assert.match(outcomeMessage(post, { answer: 'once', reason: 'decided', actor: 'dashboard' }), /by `dashboard`/);
 });
+
+test('deleting a message that is already gone is done; any other refusal is not', async () => {
+  const { removeMessage } = await import('../lib/send.js');
+  const refusing = (status) => ({ delete: async () => { throw Object.assign(new Error(`status ${status}`), { status }); } });
+  await removeMessage(refusing(404), '1', '2');
+  await assert.rejects(removeMessage(refusing(403), '1', '2'), /status 403/);
+});

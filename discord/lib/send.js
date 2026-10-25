@@ -62,8 +62,16 @@ export const editPrompt = (rest, channelId, messageId, { content, components = [
 export const answerInteraction = (rest, interaction, body) =>
   rest.post(`/interactions/${interaction.id}/${interaction.token}/callback`, { body, auth: false });
 
-/** Take a message down: a streamed piece the reply no longer needs. */
-export const removeMessage = (rest, channelId, messageId) => rest.delete(Routes.channelMessage(channelId, messageId));
+/** Take a message down: a streamed piece the reply no longer needs. One already gone (404) counts as taken down. */
+export const removeMessage = async (rest, channelId, messageId) => {
+  try {
+    await rest.delete(Routes.channelMessage(channelId, messageId));
+  } catch (error) {
+    if (error?.status !== 404) {
+      throw error;
+    }
+  }
+};
 
 /** "Agent is typing…" for about ten seconds. */
 export const typing = (rest, channelId) => rest.post(Routes.channelTyping(channelId));

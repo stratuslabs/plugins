@@ -104,10 +104,19 @@ export const createRenderer = ({
       }
       // A segment that shrank (a reset, a cleared status line) takes down
       // what it no longer needs: Discord has no empty message.
+      // A refused delete keeps the id, so the next sync tries again or
+      // reuses the message.
       while (segment.ids.length > pieces.length) {
-        const id = segment.ids.pop();
+        const id = segment.ids.at(-1);
+        const removed = await call('delete a message', async () => {
+          await ops.remove(id);
+          return true;
+        });
+        if (!removed) {
+          break;
+        }
+        segment.ids.pop();
         segment.shown.pop();
-        await call('delete a message', () => ops.remove(id));
       }
     }
   };
@@ -190,6 +199,7 @@ export const createRenderer = ({
         // The provider abandoned this response: drop its words, keep what
         // earlier responses said.
         live().text = '';
+        streamedThisResponse = false;
         schedule();
         return;
       }

@@ -241,3 +241,47 @@ test('a new gateway session after a long disconnect reads what was missed', { ti
   assert.equal(gateway.turns[1].idempotencyKey, `discord:${missed}`);
   assert.ok(discord.state.identifies.length >= 2, 'a fresh identify, not a resume');
 });
+
+test('a message sent while a restart is still reading the missed ones waits behind them', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  const first = idAt(60_000);
+  const gateway = fakeGateway();
+  const one = await startAdapter(env, gateway);
+  discord.dispatch('MESSAGE_CREATE', raw(first, { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the live one');
+  await one.stop();
+
+  const missed = idAt(30_000);
+  discord.state.channels[DM] = { id: DM, type: 1 };
+  discord.state.history[DM] = [raw(first, { channel_id: DM }), raw(missed, { channel_id: DM, content: 'while you were out' })];
+  discord.state.historyDelayMs = 300;
+  const turns = gateway.turns.length;
+  await startAdapter(env, gateway);
+  // Live while the history read is still out.
+  const live = idAt(0, 1);
+  discord.dispatch('MESSAGE_CREATE', raw(live, { channel_id: DM, content: 'and now' }));
+  await until(() => gateway.turns.length === turns + 2, 'both dispatched');
+  assert.deepEqual(gateway.turns.slice(turns).map((turn) => turn.idempotencyKey), [`discord:${missed}`, `discord:${live}`]);
+});
+
+test('a message sent while a new gateway session is reading what was missed waits behind it', { timeout: 30_000 }, async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  const first = idAt(60_000);
+  const gateway = fakeGateway();
+  await startAdapter(env, gateway);
+  discord.dispatch('MESSAGE_CREATE', raw(first, { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the live one');
+  const missed = idAt(1_000);
+  discord.state.channels[DM] = { id: DM, type: 1 };
+  discord.state.history[DM] = [raw(first, { channel_id: DM }), raw(missed, { channel_id: DM })];
+  discord.state.historyDelayMs = 500;
+  const gets = discord.state.gets.length;
+  discord.invalidate();
+  await until(() => discord.state.gets.slice(gets).some((url) => url.startsWith(`/channels/${DM}/messages`)), 'the history read after re-identify', 600);
+  const live = idAt(0, 1);
+  discord.dispatch('MESSAGE_CREATE', raw(live, { channel_id: DM, content: 'and now' }));
+  await until(() => gateway.turns.length === 3, 'both dispatched');
+  assert.deepEqual(gateway.turns.slice(1).map((turn) => turn.idempotencyKey), [`discord:${missed}`, `discord:${live}`]);
+});

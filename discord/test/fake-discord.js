@@ -89,7 +89,9 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
           const before = query.has('before') ? BigInt(query.get('before')) : undefined;
           page = all.filter((m) => before === undefined || BigInt(m.id) < before).slice(-limit);
         }
-        return send(200, page.reverse());
+        // `historyDelayMs` holds a history page back, for a slow read.
+        const reply = () => send(200, page.reverse());
+        return state.historyDelayMs ? void setTimeout(reply, state.historyDelayMs).unref() : reply();
       }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/messages$/))) {
         state.posts.push({ channelId: match[1], body: json, authorization: req.headers.authorization, ...(uploads ? { files: uploads } : {}) });

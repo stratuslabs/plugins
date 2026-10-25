@@ -579,6 +579,17 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     const ready = new Promise((resolve) => {
       resolveBot = resolve;
     });
+    // Live messages wait behind a backfill that is reading what came before
+    // them, so the agent still reads each conversation in the order it was
+    // written. Interactions don't wait. Set before the first READY, so what
+    // arrives while connect() is still running waits for the start's own read.
+    let releaseCaughtUp;
+    let caughtUp = new Promise((resolve) => {
+      releaseCaughtUp = resolve;
+    });
+    const readOn = (connected) => backfill(agentId, agent, connected).catch((error) => {
+      warn(`discord: ${agentId} could not read messages sent while it was away: ${errorText(error)}`);
+    });
     const timeout = AbortSignal.timeout(connectTimeoutMs);
     let bot;
     try {
@@ -589,7 +600,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         signal: AbortSignal.any([stopController.signal, timeout]),
         onMessage: (normalized, raw) => {
           if (!stopping) {
-            track(ready.then((connected) => handle(agentId, agent, connected, normalized, raw)));
+            track(caughtUp.then(() => ready).then((connected) => handle(agentId, agent, connected, normalized, raw)));
           }
         },
         onInteraction: (interaction) => {
@@ -602,7 +613,9 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         // was missed while disconnected; read it instead.
         onReconnect: () => {
           if (!stopping) {
-            track(ready.then((connected) => backfill(agentId, agent, connected)));
+            // Synchronous with the READY, so no message after it slips ahead.
+            caughtUp = caughtUp.then(() => ready).then(readOn);
+            track(caughtUp);
           }
         },
       });
@@ -634,7 +647,11 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     resolveBot(bot);
     log(`discord: ${agentId} connected as bot ${bot.botId}${attempt > 0 ? ` after ${attempt + 1} attempts` : ''}`);
     if (stateDirectory) {
-      track(backfill(agentId, agent, bot));
+      const read = readOn(bot);
+      track(read);
+      read.then(releaseCaughtUp);
+    } else {
+      releaseCaughtUp();
     }
   };
 

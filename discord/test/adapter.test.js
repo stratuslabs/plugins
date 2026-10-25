@@ -224,6 +224,41 @@ test('a mention in a guild channel opens a thread on it and answers there, namin
   assert.deepEqual(discord.state.posts[0].body.allowed_mentions, { parse: [], replied_user: false });
 });
 
+test('a message whose thread already exists is answered in that thread', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  // Opened by an earlier run that stopped before answering, or by someone else.
+  discord.state.channels['600000000000000003'] = { id: '600000000000000003', type: 11, parent_id: CHANNEL };
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000003', guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> again?`, mentions: [{ id: BOT }],
+  }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  const [turn] = gateway.turns;
+  assert.equal(turn.input.metadata.discordChannel, '600000000000000003');
+  turn.start();
+  turn.finish('Yes.');
+  await until(() => discord.state.posts.length === 1, 'the reply');
+  assert.equal(discord.state.posts[0].channelId, '600000000000000003', 'in the thread, not the channel');
+  assert.equal(discord.state.posts[0].body.message_reference, undefined);
+});
+
+test('with no permission to open a thread, the answer replies under the message in the channel', async (t) => {
+  const warns = [];
+  const { discord, registered, gateway } = await setUp(t, { warns });
+  await registered[0].adapter.start(gateway);
+  discord.state.refuseThreads = true;
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000004', guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> here?`, mentions: [{ id: BOT }],
+  }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  gateway.turns[0].start();
+  gateway.turns[0].finish('Here.');
+  await until(() => discord.state.posts.length === 1, 'the reply');
+  assert.equal(discord.state.posts[0].channelId, CHANNEL);
+  assert.equal(discord.state.posts[0].body.message_reference?.message_id, '600000000000000004');
+  assert.match(warns.join('\n'), /could not open a thread/);
+});
+
 test('a message admission refuses never becomes a turn', async (t) => {
   const { discord, registered, gateway } = await setUp(t);
   await registered[0].adapter.start(gateway);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { chunk } from './chunk.js';
 
 const Routes = {
+  channel: (channel) => `/channels/${channel}`,
   channelMessages: (channel) => `/channels/${channel}/messages`,
   channelMessage: (channel, message) => `/channels/${channel}/messages/${message}`,
   channelTyping: (channel) => `/channels/${channel}/typing`,
@@ -85,6 +86,20 @@ export const threadFrom = async (rest, channelId, messageId, name) => {
     body: { name: (name.trim() || 'Conversation').slice(0, 100), auto_archive_duration: 1440 },
   });
   return thread.id;
+};
+
+/**
+ * The thread already opened on a message, if there is one: Discord allows
+ * one per message and gives it the message's id. Undefined when there is
+ * none, or it can't be read.
+ */
+export const threadOn = async (rest, channelId, messageId) => {
+  try {
+    const channel = await rest.get(Routes.channel(messageId));
+    return [10, 11, 12].includes(channel?.type) && channel.parent_id === channelId ? channel.id : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 /**

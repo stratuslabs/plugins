@@ -7,7 +7,7 @@ import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
 import { createPositions } from './positions.js';
 import { createRenderer } from './render.js';
-import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, typing, uploadFile } from './send.js';
+import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, threadOn, typing, uploadFile } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
 import { isStopRequest } from './stop.js';
 import { latestTurnReply, turnFailureFor, turnReplyFor } from './turns.js';
@@ -367,11 +367,19 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       try {
         replyChannel = await threadFrom(bot.rest, message.channelId, message.id, text);
       } catch (error) {
-        // No permission to start threads here: answer under the message
-        // in the channel. The session is still the message's own.
-        warn(`discord: ${agentId} could not open a thread in ${message.channelId}, replying in the channel: ${error instanceof Error ? error.message : String(error)}`);
-        replyChannel = message.channelId;
-        replyTo = message.id;
+        // Its thread may be open already: from a run that stopped before
+        // answering, or opened by someone else meanwhile. Later messages
+        // there are this session's, so the answer goes there too.
+        const existing = await threadOn(bot.rest, message.channelId, message.id);
+        if (existing !== undefined) {
+          replyChannel = existing;
+        } else {
+          // No permission to start threads here: answer under the message
+          // in the channel. The session is still the message's own.
+          warn(`discord: ${agentId} could not open a thread in ${message.channelId}, replying in the channel: ${error instanceof Error ? error.message : String(error)}`);
+          replyChannel = message.channelId;
+          replyTo = message.id;
+        }
       }
     }
     const sessionId = sessionIdFor(agentId, route);

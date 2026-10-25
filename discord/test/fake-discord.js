@@ -115,9 +115,17 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
         return res.end();
       }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)\/threads$/))) {
-        const thread = id();
+        // As Discord does: one thread per message, with the message's id.
+        const thread = match[2];
+        if (state.refuseThreads) {
+          return send(403, { message: 'Missing Permissions', code: 50013 });
+        }
+        if (state.channels[thread]) {
+          return send(400, { message: 'A thread has already been created for this message', code: 160004 });
+        }
         state.threads.push({ channelId: match[1], messageId: match[2], body: json, id: thread });
-        return send(201, { id: thread, type: 11, parent_id: match[1] });
+        state.channels[thread] = { id: thread, type: 11, parent_id: match[1] };
+        return send(201, state.channels[thread]);
       }
       send(404, { message: 'Unknown', code: 0 });
     });

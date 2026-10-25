@@ -83,7 +83,10 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
  *   those would have the agent answer itself. `reaction` is a tapback or
  *   its removal (associated_message_type 2000s and 3000s, and stickers in
  *   the 1000s). `group-event` is a membership or rename row (item_type is
- *   not 0). `empty` has no text and no attachment.
+ *   not 0).
+ * - `incomplete`: received, but with no text and no attachment yet. It may
+ *   still be filling in, so the caller reads it again a bounded number of
+ *   times before skipping it.
  * - `poison`: something about the row itself stops it being read, the
  *   same every time. The caller skips it after a bounded number of tries.
  *
@@ -108,7 +111,7 @@ export const classifyRow = (row) => {
   }
   const attachments = Number(row.attachments ?? 0);
   if (text.trim().length === 0 && attachments === 0) {
-    return { kind: 'skip', reason: 'empty', rowid: row.rowid, guid: row.guid };
+    return { kind: 'incomplete', reason: 'a received row with no text and no attachment', rowid: row.rowid, guid: row.guid };
   }
   if (typeof row.handle !== 'string' || row.handle.length === 0) {
     return { kind: 'poison', reason: 'a received row with no sender handle', rowid: row.rowid, guid: row.guid };

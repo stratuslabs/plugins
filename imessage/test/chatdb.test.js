@@ -133,7 +133,7 @@ test('classifyRow skips what is not a received message, naming why', (t) => {
     const result = classifyRow(row);
     return result.kind === 'skip' ? `skip:${result.reason}` : result.kind;
   });
-  assert.deepEqual(kinds, ['message', 'skip:sent', 'skip:reaction', 'skip:reaction', 'skip:group-event', 'skip:group-event', 'skip:empty']);
+  assert.deepEqual(kinds, ['message', 'skip:sent', 'skip:reaction', 'skip:reaction', 'skip:group-event', 'skip:group-event', 'incomplete']);
 });
 
 test('classifyRow keeps a link a person sent, preview balloon and all', (t) => {
@@ -148,7 +148,7 @@ test('classifyRow keeps a link a person sent, preview balloon and all', (t) => {
   assert.equal(result.text, 'https://example.com/a');
 });
 
-test('classifyRow: an attachment with no text is a message, not empty', (t) => {
+test('classifyRow: an attachment with no text is a message, not incomplete', (t) => {
   const file = path.join(scratch(t), 'chat.db');
   const fixture = createChatDb(file);
   fixture.received(PHONE, { text: '￼', body: null, attachments: 1 });

@@ -77,9 +77,15 @@ would need.
   `editedArgs` on resume.
 - Authentication beyond a static token on a loopback-only port.
 - A `reset` delta (a fallback provider took over mid-stream) is not
-  handled. AG-UI has no way to retract streamed text, so the client keeps
-  the abandoned partial next to the new answer. A real version would end
-  the partial message and say it was dropped, or buffer until the response.
+  handled, so the client keeps the abandoned partial next to the new
+  answer. AG-UI can retract it: `@ag-ui/client` 1.0.3 applies a
+  `MESSAGES_SNAPSHOT` by dropping every text and tool message whose id is
+  not in the snapshot (checked with an `AbstractAgent` emitting a partial,
+  a snapshot of `input.messages`, then the answer: the partial was gone).
+  A real version would end the partial, then send a
+  snapshot of the thread without it (the run's `input.messages` plus what
+  this run has completed). That means tracking this run's messages in
+  AG-UI form, which the spike doesn't do.
 
 ## Verified
 

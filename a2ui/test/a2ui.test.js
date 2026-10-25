@@ -215,6 +215,52 @@ test('a chain as deep as the byte limit allows is checked without overflowing th
   });
 });
 
+test('@index is accepted only inside a list template, where a renderer has an index to give', async (t) => {
+  const tools = await setUp();
+  const index = { '@call': '@index' };
+  const list = (id, template) => ({ id, component: 'Column', children: { componentId: template, path: '/items' } });
+  await t.test('refused in a component outside every template, at the call', async () => {
+    const detail = await failure(render(tools, [create(), components([column('root', ['title']), text('title', index)])]));
+    assert.equal(detail.path, '/messages/1/updateComponents/components/1/text');
+    assert.match(detail.message, /@index/);
+    assert.match(detail.message, /template/);
+  });
+  await t.test('refused on root itself', async () => {
+    const detail = await failure(render(tools, [create(), components([text('root', index)])]));
+    assert.equal(detail.path, '/messages/1/updateComponents/components/0/text');
+  });
+  await t.test('accepted in the template component', async () => {
+    assert.deepEqual(await render(tools, [create(), components([list('root', 'item'), text('item', index)])]), { surfaceId: 's1', accepted: true });
+  });
+  await t.test('accepted anywhere under the template component', async () => {
+    assert.deepEqual(
+      await render(tools, [create(), components([list('root', 'card'), column('card', ['label']), text('label', index)])]),
+      { surfaceId: 's1', accepted: true },
+    );
+  });
+  await t.test('nested in another call\'s args: refused outside, at the nested call, and accepted inside', async () => {
+    const nested = { '@call': 'formatString', args: { value: index } };
+    const detail = await failure(render(tools, [create(), components([column('root', ['title']), text('title', nested)])]));
+    assert.equal(detail.path, '/messages/1/updateComponents/components/1/text/args/value');
+    assert.deepEqual(await render(tools, [create(), components([list('root', 'item'), text('item', nested)])]), { surfaceId: 's1', accepted: true });
+  });
+  await t.test('a template component that root also lists directly is rendered outside a template there', async () => {
+    const detail = await failure(render(tools, [create(), components([column('root', ['list', 'item']), list('list', 'item'), text('item', index)])]));
+    assert.equal(detail.path, '/messages/1/updateComponents/components/2/text');
+  });
+  await t.test('a static child list is not a template', async () => {
+    const detail = await failure(render(tools, [create(), components([column('root', ['item']), text('item', index)])]));
+    assert.equal(detail.path, '/messages/1/updateComponents/components/1/text');
+  });
+  await t.test('an update whose component may sit under a template already on the device is accepted', async () => {
+    assert.deepEqual(await render(tools, [components([column('card', ['label']), text('label', index)])]), { surfaceId: 's1', accepted: true });
+  });
+  await t.test('an update that places it under root through its own components is refused', async () => {
+    const detail = await failure(render(tools, [components([column('root', ['label']), text('label', index)])]));
+    assert.equal(detail.path, '/messages/0/updateComponents/components/1/text');
+  });
+});
+
 test('one call carries one surface, created first, from the catalog it names', async (t) => {
   const tools = await setUp();
   await t.test('two surfaces', async () => {

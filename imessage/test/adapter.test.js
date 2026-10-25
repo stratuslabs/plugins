@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -318,4 +318,108 @@ test('an attachment the channel cannot pass on is named in the turn, not silentl
   await waitFor(() => sender.sent.length === 2);
   assert.match(gateway.dispatched[0].userMessage, /^\[An attachment was sent with this message; this channel can't pass attachments on yet\.\]$/);
   assert.match(gateway.dispatched[1].userMessage, /^look\n\n\[2 attachments were sent/);
+});
+
+// chat.db replaced (stratuslabs/plugins#23).
+
+/**
+ * Builds another chat.db beside `chatDb` with `fill`, then swaps it into
+ * place the way a restore does. The old writer is closed first, as Messages
+ * is while its database is swapped, so no WAL of the old file is left
+ * beside the new one.
+ */
+const replaceChatDb = (chatDb, fixture, fill) => {
+  fixture.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  fixture.close();
+  fixture.close = () => {};
+  const nextFile = `${chatDb}.next`;
+  const next = createChatDb(nextFile);
+  const rows = fill(next);
+  next.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  next.close();
+  rmSync(`${nextFile}-wal`, { force: true });
+  rmSync(`${nextFile}-shm`, { force: true });
+  renameSync(nextFile, chatDb);
+  return rows;
+};
+
+test('a chat.db replaced while the daemon was down is recovered from at the next start: history stays history', async (t) => {
+  const { chatDb, fixture, adapter, gateway, sender, logs, stateDirectory } = await setup(t);
+  const read = new Date(Date.now() - 60_000);
+  fixture.received(PHONE, { text: 'before the swap', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  const rows = replaceChatDb(chatDb, fixture, (next) => ({
+    history: next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) }),
+    again: next.received(PHONE, { text: 'before the swap', body: null, date: read }),
+    fresh: next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) }),
+    synced: next.received(PHONE, { text: 'older, synced in late', body: null, date: new Date(read.getTime() - 7_200_000) }),
+  }));
+  const next = fakeGateway();
+  const nextSender = fakeSender();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender: nextSender,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await waitFor(() => nextSender.sent.length === 1);
+  await settle();
+  await settle();
+  assert.deepEqual(next.dispatched.map((input) => input.userMessage), ['sent around the swap']);
+  assert.equal(gateway.dispatched.length, 1);
+  assert.ok(logs.some((line) => /WARN imessage: ava found chat\.db replaced \(chat\.db is a different file/.test(line)), logs.join('\n'));
+  assert.ok(!logs.some((line) => /Remove .*watermarks\.json/.test(line)), 'no hand-holding needed');
+  const record = createWatermarkStore({ directory: stateDirectory }).load('ava').record;
+  assert.ok(record.watermark >= rows.fresh.rowid);
+  assert.equal(record.historyThrough, read.getTime());
+});
+
+test('a chat.db replaced while the channel runs is reopened and recovered from, and later messages are answered', async (t) => {
+  const { chatDb, fixture, gateway, sender, logs } = await setup(t);
+  const read = new Date(Date.now() - 60_000);
+  fixture.received(PHONE, { text: 'before the swap', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) });
+    next.received(PHONE, { text: 'before the swap', body: null, date: read });
+    next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) });
+  });
+  await waitFor(() => sender.sent.length === 2);
+  const writer = createChatDb(chatDb, { existing: true });
+  t.after(() => writer.close());
+  writer.received(PHONE, { text: 'after the swap', body: null });
+  await waitFor(() => sender.sent.length === 3);
+  await settle();
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['before the swap', 'sent around the swap', 'after the swap']);
+  assert.equal(logs.filter((line) => /found chat\.db replaced/.test(line)).length, 1, logs.join('\n'));
+});
+
+test('a replaced chat.db with no date to recover from still stops the agent and says how to restart it', async (t) => {
+  const { chatDb, fixture, adapter, logs, stateDirectory } = await setup(t);
+  await adapter.stop();
+  // Seeded on an empty chat.db: no message was ever read, so there is no date.
+  replaceChatDb(chatDb, fixture, (next) => next.received(PHONE, { text: 'history', body: null }));
+  const next = fakeGateway();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender: fakeSender(),
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await settle();
+  assert.equal(next.dispatched.length, 0);
+  assert.ok(logs.some((line) => /is not on iMessage: .*Remove .*watermarks\.json/.test(line)), logs.join('\n'));
 });

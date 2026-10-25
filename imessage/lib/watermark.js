@@ -22,6 +22,13 @@ import path from 'node:path';
  * tell rows a running channel already read from rows that arrived while
  * the daemon was down.
  *
+ * `observedDate` is the newest message date read so far (epoch ms, null
+ * before any), written with `observedThrough`. When chat.db is replaced it
+ * is what the channel recovers from: in the new database, a message dated
+ * at or before it is history (`historyThrough`), and reading resumes from
+ * the first one dated after it. Messages carry their dates across a
+ * restore or a rebuild; ROWIDs don't.
+ *
  * A missing record is never read as 0, which would replay the account's
  * whole history as fresh instructions. A record that cannot be read is
  * never replaced by a fresh seed either, which would drop whatever arrived
@@ -32,6 +39,8 @@ import path from 'node:path';
 const FILE = 'watermarks.json';
 
 const isRowid = (value) => Number.isSafeInteger(value) && value >= 0;
+const isTime = (value) => Number.isSafeInteger(value) && value >= 0;
+const optionalTime = (value) => value === undefined || value === null || isTime(value);
 const SETTLED_LIMIT = 10_000;
 
 const validRecord = (record) => record
@@ -45,6 +54,8 @@ const validRecord = (record) => record
   && record.observedThrough >= record.watermark
   && (record.fingerprint === null || typeof record.fingerprint === 'string')
   && (record.watermark === 0 || typeof record.fingerprint === 'string')
+  && optionalTime(record.observedDate)
+  && optionalTime(record.historyThrough)
   && validSettled(record);
 
 /** Rows settled above the watermark: increasing, above it, and already observed. */
@@ -156,6 +167,35 @@ export const seedRecord = (db, handle) => {
     observedThrough: max,
     fingerprint: max === 0 ? null : db.guidAt(max) ?? null,
     settled: [],
+    observedDate: db.maxDate(),
+  };
+};
+
+/**
+ * A record for `db`, the database that replaced the one `old` describes,
+ * or null when `old` read no dated message to recover from. Everything in
+ * `db` dated at or before the newest message `old` read is history; reading
+ * starts just before the first row dated after it, so what arrived around
+ * the switch is answered and nothing already read is answered again.
+ */
+export const recoveredRecord = (old, db) => {
+  // Never below an earlier recovery's history date: observe only raises it.
+  const historyThrough = old.observedDate;
+  if (!isTime(historyThrough)) {
+    return null;
+  }
+  const first = db.firstRowidAfter(historyThrough);
+  const watermark = first === undefined ? db.maxRowid() : db.lastRowidBefore(first);
+  return {
+    initialized: true,
+    identity: db.identity(),
+    handle: old.handle,
+    watermark,
+    observedThrough: watermark,
+    fingerprint: watermark === 0 ? null : db.guidAt(watermark) ?? null,
+    settled: [],
+    observedDate: historyThrough,
+    historyThrough,
   };
 };
 
@@ -232,7 +272,15 @@ export const markSettled = (record, rowid) => {
 /** Whether `rowid` is done: at or below the watermark, or listed as settled. */
 export const isSettled = (record, rowid) => rowid <= record.watermark || (record.settled ?? []).includes(rowid);
 
-/** The record after a scan read through `rowid`, before it dispatches anything. */
-export const observe = (record, rowid) => (rowid > record.observedThrough
-  ? { ...record, observedThrough: rowid }
-  : record);
+/** The record after a scan read through `rowid`, the newest of its rows dated `date` (ms), before it dispatches anything. */
+export const observe = (record, rowid, date) => {
+  const later = isTime(date) && !(isTime(record.observedDate) && record.observedDate >= date);
+  if (rowid <= record.observedThrough && !later) {
+    return record;
+  }
+  return {
+    ...record,
+    observedThrough: Math.max(record.observedThrough, rowid),
+    ...(later ? { observedDate: date } : {}),
+  };
+};

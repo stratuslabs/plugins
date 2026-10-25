@@ -30,10 +30,13 @@ export const BODIES = [
   { text: 'line1\nline2', blob: readFileSync(new URL('./fixtures/body3.bin', import.meta.url)) },
 ];
 
-export const createChatDb = (file, { account = 'E:ava.agent@icloud.com' } = {}) => {
+/** A stand-in chat.db at `file`; `existing` writes into one already there, as Messages does after a swap. */
+export const createChatDb = (file, { account = 'E:ava.agent@icloud.com', existing = false } = {}) => {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
+  if (!existing) {
+    db.exec(SCHEMA);
+  }
   let guids = 0;
   const nextGuid = () => `FAKE-${String(++guids).padStart(4, '0')}-${Math.random().toString(16).slice(2, 10)}`;
 

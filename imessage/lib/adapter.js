@@ -10,7 +10,7 @@ import { maskHandle, normalizeHandle } from './handles.js';
 import { createIntake } from './intake.js';
 import { createSender } from './send.js';
 import { splitMessages, toPlainText } from './text.js';
-import { createWatermarkStore, startFrom } from './watermark.js';
+import { createWatermarkStore, recoveredRecord, startFrom } from './watermark.js';
 
 const SEND_RETRY_MS = [2000, 10_000, 30_000];
 
@@ -348,6 +348,82 @@ export const createImessageAdapter = ({
     return outcome;
   };
 
+  let store;
+  // Intakes retired by a replaced chat.db, still finishing what they handed over.
+  const retired = new Set();
+
+  /**
+   * Opens chat.db for one agent and starts its intake, from where it left
+   * off. A chat.db that replaced the one last read is recovered from: what
+   * it holds up to the newest message already read is history, and what
+   * came after is answered (lib/watermark.js recoveredRecord). Run at start,
+   * and again by intake when it finds chat.db replaced while running.
+   */
+  const startAgent = (gateway, agentId, agent) => {
+    let db;
+    try {
+      db = openDb(chatDb);
+    } catch (error) {
+      warn(`imessage: ${agentId} is not on iMessage: chat.db could not be opened (${error.message}). Grant Full Disk Access to ${process.execPath} in System Settings > Privacy & Security, then restart the daemon.`);
+      return;
+    }
+    const start = startFrom({ loaded: store.load(agentId), db, handle: agent.handle });
+    if (start.action === 'refuse') {
+      warn(`imessage: ${agentId} is not on iMessage: ${start.reason}. Remove ${store.file} to start reading from now on; messages sent since it was last written won't be answered.`);
+      db.close();
+      return;
+    }
+    let record = start.record;
+    if (start.action === 'replaced') {
+      record = recoveredRecord(start.record, db);
+      if (record === null) {
+        warn(`imessage: ${agentId} is not on iMessage: ${start.reason}, and no message was read from the old one to recover from. Remove ${store.file} to start reading the new database from now on.`);
+        db.close();
+        return;
+      }
+      try {
+        store.save(agentId, record);
+      } catch (error) {
+        warn(`imessage: ${agentId} is not on iMessage: ${start.reason}, and the recovery could not be saved (${error.message}).`);
+        db.close();
+        return;
+      }
+      warn(`imessage: ${agentId} found chat.db replaced (${start.reason}). Reading it from row ${record.watermark}; messages dated up to ${new Date(record.historyThrough).toISOString()}, the newest already read, are treated as history.`);
+    }
+    if (start.action === 'seed') {
+      store.save(agentId, record);
+      log(`imessage: ${agentId} starts reading Messages from row ${record.watermark}; earlier messages are history.`);
+    }
+    const intake = createIntake({
+      db,
+      store,
+      agentId,
+      record,
+      handle: (message) => answer(gateway, agentId, agent, message),
+      log,
+      warn,
+      replayCapMs: agent.replayCapMs,
+      onReplaced: () => {
+        // The old intake is retired; this handle may be on the old file.
+        if (running.get(agentId)?.intake !== intake) {
+          return;
+        }
+        running.delete(agentId);
+        db.close();
+        retired.add(intake);
+        void intake.idle().then(() => retired.delete(intake));
+        if (!stopping) {
+          startAgent(gateway, agentId, agent);
+        }
+      },
+    });
+    running.set(agentId, { db, intake, agent });
+    intake.start({ intervalMs, watch });
+    if (start.action !== 'replaced') {
+      log(`imessage: ${agentId} is on iMessage as ${maskHandle(agent.handle)}, reading ${path.basename(chatDb)}.`);
+    }
+  };
+
   return {
     name: 'imessage',
     async start(gateway) {
@@ -359,50 +435,16 @@ export const createImessageAdapter = ({
           void settleApproval(event).catch((error) => warn(`imessage: could not report an approval: ${error.message}`));
         }
       });
-      const store = createWatermarkStore({ directory: stateDirectory });
+      store = createWatermarkStore({ directory: stateDirectory });
       for (const [agentId, agent] of config.agents) {
-        let db;
-        try {
-          db = openDb(chatDb);
-        } catch (error) {
-          warn(`imessage: ${agentId} is not on iMessage: chat.db could not be opened (${error.message}). Grant Full Disk Access to ${process.execPath} in System Settings > Privacy & Security, then restart the daemon.`);
-          continue;
-        }
-        const start = startFrom({ loaded: store.load(agentId), db, handle: agent.handle });
-        if (start.action === 'refuse') {
-          warn(`imessage: ${agentId} is not on iMessage: ${start.reason}. Remove ${store.file} to start reading from now on; messages sent since it was last written won't be answered.`);
-          db.close();
-          continue;
-        }
-        if (start.action === 'replaced') {
-          warn(`imessage: ${agentId} is not on iMessage: ${start.reason}. Remove ${store.file} to start reading the new database from now on.`);
-          db.close();
-          continue;
-        }
-        if (start.action === 'seed') {
-          store.save(agentId, start.record);
-          log(`imessage: ${agentId} starts reading Messages from row ${start.record.watermark}; earlier messages are history.`);
-        }
-        const intake = createIntake({
-          db,
-          store,
-          agentId,
-          record: start.record,
-          handle: (message) => answer(gateway, agentId, agent, message),
-          log,
-          warn,
-          replayCapMs: agent.replayCapMs,
-        });
-        running.set(agentId, { db, intake, agent });
-        intake.start({ intervalMs, watch });
-        log(`imessage: ${agentId} is on iMessage as ${maskHandle(agent.handle)}, reading ${path.basename(chatDb)}.`);
+        startAgent(gateway, agentId, agent);
       }
     },
     async stop() {
       stopping = true;
       // Intake first, so nothing new starts; the bus last, so a request
       // the shutdown settles is still reported.
-      await Promise.all([...running.values()].map(({ intake }) => intake.stop()));
+      await Promise.all([...running.values(), ...[...retired].map((intake) => ({ intake }))].map(({ intake }) => intake.stop()));
       unsubscribe?.();
       unsubscribe = undefined;
       for (const { db } of running.values()) {

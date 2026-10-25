@@ -13,6 +13,8 @@ const HANDLE = 'ava.agent@icloud.com';
 const PHONE = '+15551234821';
 const DAY = 24 * 60 * 60 * 1000;
 
+const readStore = (store) => JSON.stringify(store.load('ava'));
+
 const deferred = () => {
   let resolve;
   const promise = new Promise((r) => { resolve = r; });
@@ -317,4 +319,55 @@ test('a watermark that cannot be saved warns once, keeps going, and never dispat
   await intake.idle();
   assert.equal(seen.length, 2);
   assert.equal(store.load('ava').record.watermark, seen[1]);
+});
+
+test('after a recovery, a message dated at or before the history date is skipped, and counted', async (t) => {
+  const { fixture, store, logs, make } = setup(t);
+  const historyThrough = Date.now() - 60_000;
+  store.save('ava', { ...store.load('ava').record, historyThrough });
+  const old = fixture.received(PHONE, { date: new Date(historyThrough - 1000) });
+  const same = fixture.received(PHONE, { date: new Date(historyThrough) });
+  const fresh = fixture.received(PHONE, { date: new Date(historyThrough + 1000) });
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [fresh.rowid]);
+  assert.equal(store.load('ava').record.watermark, fresh.rowid);
+  assert.ok(old.rowid < same.rowid);
+  assert.ok(logs.some((line) => /skipped 2 messages from before chat\.db was replaced/.test(line)), logs.join('\n'));
+});
+
+test('each scan records the newest message date it read', async (t) => {
+  const { fixture, store, make } = setup(t);
+  const newest = new Date(Date.now() - 5000);
+  fixture.received(PHONE, { date: newest });
+  fixture.received(PHONE, { date: new Date(newest.getTime() - 3000) });
+  const intake = make(async () => 'settled');
+  await intake.scan();
+  await intake.idle();
+  assert.equal(store.load('ava').record.observedDate, newest.getTime());
+});
+
+test('a replaced chat.db hands recovery to the channel: intake retires, and its late answers write nothing', async (t) => {
+  const { directory, file, fixture, store, make } = setup(t);
+  fixture.received(PHONE);
+  const slow = deferred();
+  const replaced = [];
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return slow.promise; }, { onReplaced: (reason) => replaced.push(reason) });
+  await intake.scan();
+  assert.equal(seen.length, 1);
+  fixture.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  copyFileSync(file, path.join(directory, 'copy.db'));
+  renameSync(path.join(directory, 'copy.db'), file);
+  const before = readStore(store);
+  await intake.scan();
+  await intake.scan();
+  assert.equal(replaced.length, 1);
+  assert.match(replaced[0], /different file/);
+  assert.match(intake.status().stopped, /different file/);
+  slow.resolve('settled');
+  await intake.idle();
+  assert.deepEqual(readStore(store), before);
 });

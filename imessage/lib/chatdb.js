@@ -19,6 +19,9 @@ export const MESSAGES_DB = path.join(homedir(), 'Library', 'Messages', 'chat.db'
 
 const APPLE_EPOCH_MS = Date.UTC(2001, 0, 1);
 
+/** The first chat.db date, in nanoseconds, of the millisecond after `ms`. */
+const nanosAfter = (ms) => BigInt(ms + 1 - APPLE_EPOCH_MS) * 1_000_000n;
+
 /**
  * A chat.db date as a Date. Since macOS 10.13 dates are nanoseconds since
  * 2001-01-01; before that they were seconds. Anything above 1e12 cannot be
@@ -54,6 +57,9 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
   const rowsAfter = db.prepare(ROWS_AFTER);
   const maxRowid = db.prepare('SELECT MAX(ROWID) AS max FROM message');
   const guidAt = db.prepare('SELECT guid FROM message WHERE ROWID = ?');
+  const maxDate = db.prepare('SELECT CAST(MAX(date) AS TEXT) AS max FROM message');
+  const firstAfter = db.prepare('SELECT MIN(ROWID) AS rowid FROM message WHERE date >= ?');
+  const lastBefore = db.prepare('SELECT MAX(ROWID) AS rowid FROM message WHERE ROWID < ?');
   return {
     file,
     raw: db,
@@ -66,6 +72,15 @@ export const openChatDb = (file = MESSAGES_DB, { Database = DatabaseSync } = {})
     maxRowid: () => Number(maxRowid.get()?.max ?? 0),
     /** The guid of the row at `rowid`, or undefined when there is none. */
     guidAt: (rowid) => guidAt.get(rowid)?.guid,
+    /** The newest message date in chat.db as epoch milliseconds, null when it holds none. */
+    maxDate: () => {
+      const max = maxDate.get()?.max;
+      return max === null || max === undefined ? null : appleDate(max).getTime();
+    },
+    /** The lowest ROWID dated after `ms` (to the millisecond), undefined when there is none. */
+    firstRowidAfter: (ms) => firstAfter.get(nanosAfter(ms))?.rowid ?? undefined,
+    /** The highest ROWID below `rowid`, 0 when there is none. */
+    lastRowidBefore: (rowid) => Number(lastBefore.get(rowid)?.rowid ?? 0),
     /** Up to `limit` rows with ROWID above `rowid`, in ROWID order. */
     rowsAfter: (rowid, limit = 100) => rowsAfter.all(rowid, limit),
     close: () => db.close(),

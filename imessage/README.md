@@ -81,6 +81,12 @@ local delivery has no secret.
   - A message being answered when the daemon stops is read again at the
     next start, and the gateway's idempotency key keeps it from running
     twice. Messages already answered behind it are not answered again.
+  - When `chat.db` is replaced (restored from a backup, or rebuilt by
+    Messages), the channel opens the new file and carries on. Anything in
+    it dated at or before the newest message already read is history and
+    is not answered; what came after is. The log says when this happens.
+    A message delivered late with an older date than one already read is
+    treated as history too.
 - **Logs.** The log names rows by number and masks handles
   (`+1•••••4567`). It never contains message text or approval codes.
 
@@ -90,10 +96,6 @@ local delivery has no secret.
   told an attachment came with it (stratuslabs/plugins#24).
 - Files the agent sends.
 - Group chats.
-- Recovery when `chat.db` is replaced (restored from a backup, or rebuilt
-  by Messages). Today the agent stops reading and the log tells you to
-  remove `watermarks.json`, which restarts reading from that moment
-  (stratuslabs/plugins#23).
 - The other delivery methods (`photon-local`, `photon`, `sendblue`).
 
 ## Risks

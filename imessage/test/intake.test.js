@@ -288,3 +288,33 @@ test('a message answered while an earlier one was still running is not answered 
   // The first process's turn ends as a dead process's would: nothing more written.
   hung.resolve('kept');
 });
+
+test('a watermark that cannot be saved warns once, keeps going, and never dispatches unobserved rows', async (t) => {
+  const { fixture, store, logs, make } = setup(t);
+  const realSave = store.save;
+  const seen = [];
+  const intake = make(async (message) => { seen.push(message.rowid); return 'settled'; });
+  const a = fixture.received(PHONE);
+  let failing = 'settle';
+  store.save = (agentId, record) => {
+    if (failing === 'all' || (failing === 'settle' && record.watermark > 0 && record.observedThrough === record.watermark)) {
+      throw new Error('disk full');
+    }
+    return realSave(agentId, record);
+  };
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [a.rowid]);
+  assert.equal(logs.filter((line) => /could not save how far/.test(line)).length, 1);
+  // With the observed mark unsaveable too, nothing new is handed over.
+  failing = 'all';
+  fixture.received(PHONE);
+  await intake.scan();
+  await intake.idle();
+  assert.deepEqual(seen, [a.rowid]);
+  failing = 'none';
+  await intake.scan();
+  await intake.idle();
+  assert.equal(seen.length, 2);
+  assert.equal(store.load('ava').record.watermark, seen[1]);
+});

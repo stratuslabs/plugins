@@ -71,10 +71,12 @@ export const createIntake = ({
   let dirWatcher;
   let watchWarned = false;
 
+  /** Stores `next`, and only then takes it as the record. Throws when it can't be stored. */
   const persist = (next) => {
+    store.save(agentId, next);
     record = next;
-    store.save(agentId, record);
   };
+  let saveWarned = false;
 
   const settle = (entry, outcome) => {
     entry.outcome = outcome;
@@ -85,8 +87,21 @@ export const createIntake = ({
     if (outcome === 'settled' && open.includes(entry)) {
       next = markSettled(next, entry.rowid);
     }
-    if (next !== record) {
+    if (next === record) {
+      return;
+    }
+    try {
       persist(next);
+      saveWarned = false;
+    } catch (error) {
+      // Kept in memory and written with the next change that saves. Until
+      // then a restart reads these rows again, and the gateway's key keeps
+      // each from running twice.
+      record = next;
+      if (!saveWarned) {
+        saveWarned = true;
+        warn(`imessage: ${agentId} could not save how far it has read (${error instanceof Error ? error.message : String(error)}); a restart now would read some messages again.`);
+      }
     }
   };
 

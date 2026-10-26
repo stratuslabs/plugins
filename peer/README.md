@@ -40,11 +40,16 @@ npm install -g @stratusagent/plugin-peer
     "@stratusagent/plugin-peer": {
       "enabled": true,
       "self": "studio",
-      "listen": { "host": "0.0.0.0", "port": 4180 }
+      "listen": { "host": "::", "port": 4180 }
     }
   }
 }
 ```
+
+`::` accepts both IPv6 and IPv4. Use it rather than `0.0.0.0` wherever the
+sender reaches this daemon by a name that resolves to IPv6: on Fly's private
+network every `.internal` name does, and a listener on `0.0.0.0` there
+refuses every request (`unreachable`, `ECONNREFUSED`).
 
 Then give each pair of agents a shared secret, stored on both sides under
 the name of the *other* daemon:
@@ -122,10 +127,24 @@ budget. An A → B → A loop therefore stops once the budget is spent.
 | --- | --- |
 | `result` | `answer` holds the remote agent's final reply |
 | `refused` | `reason` says why: the sender refused before sending, or the receiver refused |
-| `failed` | The remote turn failed. No detail from the other daemon is passed on |
+| `failed` | The remote turn failed, or the peer stopped it because the peer was shutting down. No other detail from the other daemon is passed on |
 | `timed out` | No answer within `timeoutMs` |
-| `unreachable` | The connection failed. If it dropped after the peer had started the turn, the peer stopped that turn when the connection closed, and the turn may have done part of its work first. Calling again sends a new request |
+| `unreachable` | The connection failed, and `error` says how: `ECONNREFUSED` (nothing listening at that address), `ENOTFOUND` (the name doesn't resolve, as for a stopped machine on Fly's private network), or the connection closing mid-answer. If it dropped after the peer had started the turn, the peer stopped that turn when the connection closed, and the turn may have done part of its work first. Calling again sends a new request |
 | `cancelled` | The caller's turn was stopped. The receiver aborts the remote turn when the connection closes, but the caller can't wait for confirmation, so the remote turn may still have finished |
+
+## When a daemon stops
+
+A receiving daemon that is stopping (a restart, an upgrade, a machine stop)
+lets its running turns finish first, as it does for every channel, and then
+sends each one's answer before it closes the listener: a turn that finished
+comes back as `result`, and one it had to abort as `failed`. Give it time to
+do that. Stratus drains for up to 30 seconds and then gives aborted turns 30
+more, so a platform's stop timeout should be over a minute (`kill_timeout`
+on Fly, where the default is 5 seconds, `stop_grace_period` in compose).
+
+A daemon killed outright can't close its connections. If the asking daemon's
+machine dies mid-request, the peer can't tell the caller is gone, finishes
+the turn, and its answer reaches nobody.
 
 ## Not yet
 

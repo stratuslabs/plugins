@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
 
-import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH } from '../index.js';
+import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH, STOP_GRACE_MS } from '../index.js';
 
 const SECRET = 'a-shared-secret-between-two-daemons';
 
@@ -549,4 +549,78 @@ test('a redirect is not followed, so the signed prompt goes only to the configur
   assert.equal(elsewhere, 0);
   assert.equal(output.status, 'failed');
   assert.match(output.error, /redirect/);
+});
+
+test('a turn that finishes as the daemon stops still sends its answer', async (t) => {
+  // Live on Fly (card 341): a restart's drain let nova's turn finish, then
+  // the channel's stop closed the caller's connection before the answer was
+  // written. The caller saw `unreachable` for a turn that had completed.
+  // The gateway stops its channels only once its in-flight turns settle,
+  // which is the moment modelled here: dispatch resolves, stop() follows.
+  let finish;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise((resolve) => {
+      finish = () => resolve(answered('nova finished'));
+      started();
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  finish();
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.deepEqual([output.status, output.answer], ['result', 'nova finished']);
+});
+
+test('stopping the channel tells the caller it stopped the turn, instead of dropping the connection', async (t) => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: (input) => new Promise((resolve) => {
+      started();
+      input.signal.addEventListener('abort', () => resolve({ status: 'cancelled', messages: [] }));
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.equal(output.status, 'failed');
+  assert.match(output.error, /peer stopped the turn/);
+});
+
+test('stop waits a bounded time for a turn that ignores its abort, then closes', async (t) => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise(() => { started(); }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  const before = Date.now();
+  await studio.channels[0].adapter.stop();
+  assert.ok(Date.now() - before < STOP_GRACE_MS + 1_000);
+  assert.equal((await pending).status, 'unreachable');
+});
+
+test('unreachable names why the connection failed, not only "fetch failed"', async (t) => {
+  // Live on Fly (card 341): a stopped peer and a listener on 0.0.0.0 both
+  // came back as "fetch failed"; the cause (ECONNREFUSED, ENOTFOUND) is
+  // what tells an operator which one it is.
+  const free = net.createServer();
+  await new Promise((resolve) => free.listen(0, '127.0.0.1', resolve));
+  const { port } = free.address();
+  await new Promise((resolve) => free.close(resolve));
+  const home = fakeContext({ ava: { down: SECRET, nowhere: SECRET } });
+  await createPlugin({ self: 'home', peers: { down: { url: `http://127.0.0.1:${port}` }, nowhere: { url: 'http://peer.invalid:4180' } } }).setup(home.context);
+  const down = await home.tools[0].execute({ target: 'down/nova', prompt: 'x' }, session());
+  assert.equal(down.status, 'unreachable');
+  assert.match(down.error, /^fetch failed: .*ECONNREFUSED/);
+  // .invalid never resolves (RFC 6761), the way a stopped machine's name
+  // drops out of a private network's DNS.
+  const nowhere = await home.tools[0].execute({ target: 'nowhere/nova', prompt: 'x' }, session());
+  assert.equal(nowhere.status, 'unreachable');
+  assert.match(nowhere.error, /^fetch failed: .*(ENOTFOUND|EAI_AGAIN)/);
 });

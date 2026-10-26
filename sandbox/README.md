@@ -27,7 +27,7 @@ Runs every command an agent composes under the macOS sandbox. A command can writ
 
 `readPaths` and `writePaths` add up: an agent gets the shared list plus its own. Paths are resolved through symlinks, so a symlinked workspace is allowed where it actually is. A working directory, write path or read path named inside a writable path must also resolve inside it: if an agent swaps such a folder for a symlink that points elsewhere, the command is refused rather than given the target. `~` expands to the daemon user's home.
 
-If a tool needs a file outside these, such as a git identity file or a credential helper, list it in `readPaths`. A command that's denied fails with `Operation not permitted`, and the failed output reaches the agent.
+If a tool needs a file outside these, such as a git identity file or a credential helper, list it in `readPaths`. git won't run at all when `~/.gitconfig` exists but isn't readable (`fatal: unable to access '…/.gitconfig': Operation not permitted`), so an agent that runs git needs it in `readPaths`, or a `HOME` of its own. A command that's denied fails with `Operation not permitted`, and the failed output reaches the agent.
 
 ## Scope
 

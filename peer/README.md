@@ -124,7 +124,7 @@ budget. An A → B → A loop therefore stops once the budget is spent.
 | `refused` | `reason` says why: the sender refused before sending, or the receiver refused |
 | `failed` | The remote turn failed. No detail from the other daemon is passed on |
 | `timed out` | No answer within `timeoutMs` |
-| `unreachable` | The connection failed |
+| `unreachable` | The connection failed. If it dropped after the peer had started the turn, the peer stopped that turn when the connection closed, and the turn may have done part of its work first. Calling again sends a new request |
 | `cancelled` | The caller's turn was stopped. The receiver aborts the remote turn when the connection closes, but the caller can't wait for confirmation, so the remote turn may still have finished |
 
 ## Not yet

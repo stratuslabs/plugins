@@ -37,6 +37,27 @@ test('a package with no os runs on both runners; os picks them otherwise', () =>
   ]);
 });
 
+test('npm\'s negated os entries block a runner, the way npm reads them', () => {
+  const { include, problems } = listPackages(repo({
+    anywhere: tested({ os: ['!win32'] }),
+    notmac: tested({ os: ['!darwin'] }),
+    // A listed platform still has to be the runner's, and a block wins.
+    both: tested({ os: ['linux', '!linux', 'darwin'] }),
+  }));
+  assert.deepEqual(problems, []);
+  assert.deepEqual(include, [
+    { package: 'anywhere', runner: 'macos-latest' },
+    { package: 'anywhere', runner: 'ubuntu-latest' },
+    { package: 'both', runner: 'macos-latest' },
+    { package: 'notmac', runner: 'ubuntu-latest' },
+  ]);
+});
+
+test('an os that blocks every runner fails the listing', () => {
+  assert.deepEqual(listPackages(repo({ none: tested({ os: ['!darwin', '!linux'] }) })).problems,
+    ['none: its "os" (!darwin, !linux) names no runner this workflow has']);
+});
+
 test('directories without a package.json, and dot directories, are not packages', () => {
   const { include, problems } = listPackages(repo({
     docs: null,

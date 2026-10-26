@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 
-import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH } from '../index.js';
+import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH, STOP_GRACE_MS } from '../index.js';
 
 const SECRET = 'a-shared-secret-between-two-daemons';
 
@@ -257,6 +258,44 @@ test('a peer that does not answer in time comes back as timed out, and one that 
   assert.equal(down.status, 'unreachable');
 });
 
+test('a connection that drops after the peer started the turn comes back as unreachable, and the peer stops that turn', async (t) => {
+  let remoteSignal;
+  let started;
+  const turnStarted = new Promise((resolve) => {
+    started = resolve;
+  });
+  const { port } = await twoDaemons(t, {
+    answer: (input) => {
+      remoteSignal = input.signal;
+      started();
+      return new Promise((resolve) => input.signal.addEventListener('abort', () => resolve({ status: 'cancelled', messages: [] })));
+    },
+  });
+  // A relay between the two daemons, so the connection can be cut mid-turn
+  // the way a network reset would, with neither daemon choosing to close it.
+  const sockets = new Set();
+  const relay = net.createServer((inbound) => {
+    const outbound = net.connect(port, '127.0.0.1');
+    sockets.add(inbound).add(outbound);
+    inbound.pipe(outbound).pipe(inbound);
+    inbound.on('error', () => {});
+    outbound.on('error', () => {});
+  });
+  await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => relay.close());
+  const home = fakeContext({ ava: { studio: SECRET } });
+  await createPlugin({ self: 'home', peers: { studio: { url: `http://127.0.0.1:${relay.address().port}` } } }).setup(home.context);
+  const pending = home.tools[0].execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await turnStarted;
+  for (const socket of sockets) {
+    socket.resetAndDestroy();
+  }
+  const output = await pending;
+  assert.equal(output.status, 'unreachable');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(remoteSignal.aborted, true);
+});
+
 test('stopping the channel aborts turns still running and closes the listener', async (t) => {
   let remoteSignal;
   let started;
@@ -510,4 +549,160 @@ test('a redirect is not followed, so the signed prompt goes only to the configur
   assert.equal(elsewhere, 0);
   assert.equal(output.status, 'failed');
   assert.match(output.error, /redirect/);
+});
+
+test('a turn that finishes as the daemon stops still sends its answer', async (t) => {
+  // Live on Fly (card 341): a restart's drain let nova's turn finish, then
+  // the channel's stop closed the caller's connection before the answer was
+  // written. The caller saw `unreachable` for a turn that had completed.
+  // The gateway stops its channels only once its in-flight turns settle,
+  // which is the moment modelled here: dispatch resolves, stop() follows.
+  let finish;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise((resolve) => {
+      finish = () => resolve(answered('nova finished'));
+      started();
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  finish();
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.deepEqual([output.status, output.answer], ['result', 'nova finished']);
+});
+
+test('stopping the channel tells the caller it stopped the turn, instead of dropping the connection', async (t) => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: (input) => new Promise((resolve) => {
+      started();
+      input.signal.addEventListener('abort', () => resolve({ status: 'cancelled', messages: [] }));
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.equal(output.status, 'failed');
+  assert.match(output.error, /peer stopped the turn/);
+});
+
+test('stop waits a bounded time for a turn that ignores its abort, then closes', async (t) => {
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise(() => { started(); }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  const before = Date.now();
+  await studio.channels[0].adapter.stop();
+  assert.ok(Date.now() - before < STOP_GRACE_MS + 1_000);
+  assert.equal((await pending).status, 'unreachable');
+});
+
+test('unreachable names why the connection failed, not only "fetch failed"', async (t) => {
+  // Live on Fly (card 341): a stopped peer and a listener on 0.0.0.0 both
+  // came back as "fetch failed"; the cause (ECONNREFUSED, ENOTFOUND) is
+  // what tells an operator which one it is.
+  const free = net.createServer();
+  await new Promise((resolve) => free.listen(0, '127.0.0.1', resolve));
+  const { port } = free.address();
+  await new Promise((resolve) => free.close(resolve));
+  const home = fakeContext({ ava: { down: SECRET, nowhere: SECRET } });
+  await createPlugin({ self: 'home', peers: { down: { url: `http://127.0.0.1:${port}` }, nowhere: { url: 'http://peer.invalid:4180' } } }).setup(home.context);
+  const down = await home.tools[0].execute({ target: 'down/nova', prompt: 'x' }, session());
+  assert.equal(down.status, 'unreachable');
+  assert.match(down.error, /^fetch failed: .*ECONNREFUSED/);
+  // .invalid never resolves (RFC 6761), the way a stopped machine's name
+  // drops out of a private network's DNS.
+  const nowhere = await home.tools[0].execute({ target: 'nowhere/nova', prompt: 'x' }, session());
+  assert.equal(nowhere.status, 'unreachable');
+  assert.match(nowhere.error, /^fetch failed: .*(ENOTFOUND|EAI_AGAIN)/);
+});
+
+test('a large answer sent as the daemon stops arrives whole', async (t) => {
+  // Codex P2 4380581418: stop() waited for the handler, which returns once
+  // end() has queued the body, then destroyed the socket with bytes unsent.
+  const big = 'x'.repeat(3 * 1024 * 1024);
+  let finish;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise((resolve) => {
+      finish = () => resolve(answered(big));
+      started();
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  finish();
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.equal(output.status, 'result');
+  assert.equal(output.answer.length, big.length);
+});
+
+test('a request whose body finishes arriving after stop() began is refused, not run', async (t) => {
+  // Codex P2 4380639591: a request still being read when stop() started had
+  // no controller to abort, so it could reach dispatch during teardown.
+  const { gateway, studio, port } = await twoDaemons(t);
+  const raw = JSON.stringify({ v: 1, id: 'late-1', from: { daemon: 'home', agent: 'ava' }, to: 'nova', conversation: 'c', prompt: 'p', depth: 0, ceiling: 3, sentAt: Date.now() });
+  const socket = net.connect(port, '127.0.0.1');
+  await new Promise((resolve) => socket.once('connect', resolve));
+  let reply = '';
+  socket.on('data', (chunk) => { reply += chunk; });
+  const ended = new Promise((resolve) => socket.once('close', resolve));
+  socket.write(`POST /peer/v1/delegate HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\nx-stratus-peer-signature: ${sign(SECRET, raw)}\r\ncontent-length: ${Buffer.byteLength(raw)}\r\nconnection: close\r\n\r\n`);
+  socket.write(raw.slice(0, 10));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const stopping = studio.channels[0].adapter.stop();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  socket.end(raw.slice(10));
+  await stopping;
+  await ended;
+  assert.equal(gateway.calls.length, 0);
+  // Chunked: the JSON sits between the chunk-size lines.
+  const rest = reply.slice(reply.indexOf('\r\n\r\n') + 4);
+  const body = JSON.parse(rest.slice(rest.indexOf('{'), rest.lastIndexOf('}') + 1));
+  assert.deepEqual([body.status, body.reason, body.re], ['refused', 'the peer is stopping', 'late-1']);
+});
+
+test('a request the gateway refuses because it is draining is refused as stopping, not failed', async (t) => {
+  // The gateway refuses new dispatches for the whole drain, before it stops
+  // the channels; it says so with a GatewayStoppingError, by name.
+  const { tool, gateway } = await twoDaemons(t, {
+    answer: () => {
+      const error = new Error('stratusd is restarting');
+      error.name = 'GatewayStoppingError';
+      throw error;
+    },
+  });
+  const output = await tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(gateway.calls.length, 1);
+  assert.deepEqual([output.status, output.reason], ['refused', 'the peer is stopping']);
+});
+
+test('a connection that drops partway through the answer is unreachable, with the cause', async (t) => {
+  // Codex P2 4380704895: once headers had arrived, a reset mid-body was
+  // reported as `failed: ... no readable body`, a remote failure.
+  const { createServer } = await import('node:http');
+  const server = createServer(async (request, response) => {
+    for await (const _ of request) { /* drain */ }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"status":"res');
+    setTimeout(() => response.socket.destroy(), 20);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const home = fakeContext({ ava: { studio: SECRET } });
+  await createPlugin({ self: 'home', peers: { studio: { url: `http://127.0.0.1:${server.address().port}` } } }).setup(home.context);
+  const output = await home.tools[0].execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(output.status, 'unreachable');
+  assert.match(output.error, /^\S.*: .+/);
+  assert.doesNotMatch(output.error, /no readable body/);
 });

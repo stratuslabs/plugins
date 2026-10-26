@@ -39,8 +39,8 @@ const setup = async (config = {}) => {
     workspaces: { forAgent: () => workspace, prepare: () => workspace, all: async () => [workspace] },
   });
   const session = { id: 's1', agent: { id: 'nova', name: 'Nova' }, status: 'running', messages: [] };
-  const run = async (command, executor = registered.executor) => {
-    const result = await executor.execute({ id: 'c1', toolName: 'shell.run', input: { command } }, shellIn(workspace), session);
+  const run = async (command, executor = registered.executor, env = {}) => {
+    const result = await executor.execute({ id: 'c1', toolName: 'shell.run', input: { command } }, shellIn(workspace, env), session);
     return { ok: result.ok, out: `${result.output?.stdout ?? ''}${result.output?.stderr ?? ''}` };
   };
   return { root, workspace, outside, run, host: createLocalCommandExecutor() };
@@ -157,12 +157,17 @@ test('a git hook runs inside the same walls', { skip: !onMac || !existsSync('/us
   const marker = path.join(outside, 'hook-ran');
   const repo = path.join(workspace, 'app');
   await mkdir(path.join(repo), { recursive: true });
-  const init = await run('git init -q app && cd app && git config user.name a && git config user.email a@b && echo 1 > f && git add f');
+  // A HOME of the test's own: git refuses to run when ~/.gitconfig exists
+  // but the sandbox can't read it, and this test is about the hook's walls,
+  // not about the machine's git config.
+  const home = path.join(workspace, 'home');
+  await mkdir(home);
+  const init = await run('git init -q app && cd app && git config user.name a && git config user.email a@b && echo 1 > f && git add f', undefined, { HOME: home });
   assert.equal(init.ok, true, init.out);
   const insideMarker = path.join(workspace, 'hook-ran-inside');
   await writeFile(path.join(repo, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho ran > ${insideMarker}\necho ran > ${marker} 2>/dev/null\nexit 0\n`);
   await chmod(path.join(repo, '.git', 'hooks', 'pre-commit'), 0o755);
-  const commit = await run('cd app && git commit -q -m m && git log --oneline | wc -l');
+  const commit = await run('cd app && git commit -q -m m && git log --oneline | wc -l', undefined, { HOME: home });
   assert.equal(commit.ok, true, commit.out);
   assert.equal(existsSync(insideMarker), true, 'the hook ran (inside)');
   assert.equal(existsSync(marker), false, 'the hook could not write outside the workspace');

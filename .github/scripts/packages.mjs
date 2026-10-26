@@ -17,6 +17,28 @@ import { pathToFileURL } from 'node:url';
 
 export const RUNNERS = { darwin: 'macos-latest', linux: 'ubuntu-latest' };
 
+/**
+ * Whether npm would install a package with this "os" on this platform: the
+ * same rules as npm-install-checks' checkList. A string is a list of one, a
+ * sole "any" allows everything, "!name" blocks name, and once any entry is a
+ * plain name, only the platforms named are allowed.
+ */
+export function osAllows(os, platform) {
+  const list = typeof os === 'string' ? [os] : Array.isArray(os) ? os.filter((entry) => typeof entry === 'string') : [];
+  if (list.length === 1 && list[0] === 'any') return true;
+  let negated = 0;
+  let match = false;
+  for (const entry of list) {
+    if (entry.startsWith('!')) {
+      negated += 1;
+      if (entry.slice(1) === platform) return false;
+    } else if (entry === platform) {
+      match = true;
+    }
+  }
+  return match || negated === list.length;
+}
+
 export function listPackages(root, { changed } = {}) {
   const include = [];
   const problems = [];
@@ -32,16 +54,9 @@ export function listPackages(root, { changed } = {}) {
       problems.push(`${dir}: package.json has no "test" script`);
       continue;
     }
-    // npm's reading: "!name" blocks a platform, and once any entry is a
-    // plain name, only the platforms named are allowed.
-    const os = Array.isArray(pkg.os) ? pkg.os.filter((entry) => typeof entry === 'string') : [];
-    const allowed = os.filter((entry) => !entry.startsWith('!'));
-    const blocked = new Set(os.filter((entry) => entry.startsWith('!')).map((entry) => entry.slice(1)));
-    const runners = Object.keys(RUNNERS)
-      .filter((name) => !blocked.has(name) && (allowed.length === 0 || allowed.includes(name)))
-      .map((name) => RUNNERS[name]);
+    const runners = Object.keys(RUNNERS).filter((name) => osAllows(pkg.os, name)).map((name) => RUNNERS[name]);
     if (runners.length === 0) {
-      problems.push(`${dir}: its "os" (${os.join(', ')}) names no runner this workflow has`);
+      problems.push(`${dir}: its "os" (${[pkg.os].flat().join(', ')}) names no runner this workflow has`);
       continue;
     }
     for (const runner of runners) include.push({ package: dir, runner });

@@ -53,6 +53,19 @@ test('npm\'s negated os entries block a runner, the way npm reads them', () => {
   ]);
 });
 
+test('npm\'s other os forms: a single string, and a sole "any"', () => {
+  const { include, problems } = listPackages(repo({
+    mac: tested({ os: 'darwin' }),
+    any: tested({ os: ['any'] }),
+  }));
+  assert.deepEqual(problems, []);
+  assert.deepEqual(include, [
+    { package: 'any', runner: 'macos-latest' },
+    { package: 'any', runner: 'ubuntu-latest' },
+    { package: 'mac', runner: 'macos-latest' },
+  ]);
+});
+
 test('an os that blocks every runner fails the listing', () => {
   assert.deepEqual(listPackages(repo({ none: tested({ os: ['!darwin', '!linux'] }) })).problems,
     ['none: its "os" (!darwin, !linux) names no runner this workflow has']);

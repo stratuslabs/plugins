@@ -646,3 +646,28 @@ test('a large answer sent as the daemon stops arrives whole', async (t) => {
   assert.equal(output.status, 'result');
   assert.equal(output.answer.length, big.length);
 });
+
+test('a request whose body finishes arriving after stop() began is refused, not run', async (t) => {
+  // Codex P2 4380639591: a request still being read when stop() started had
+  // no controller to abort, so it could reach dispatch during teardown.
+  const { gateway, studio, port } = await twoDaemons(t);
+  const raw = JSON.stringify({ v: 1, id: 'late-1', from: { daemon: 'home', agent: 'ava' }, to: 'nova', conversation: 'c', prompt: 'p', depth: 0, ceiling: 3, sentAt: Date.now() });
+  const socket = net.connect(port, '127.0.0.1');
+  await new Promise((resolve) => socket.once('connect', resolve));
+  let reply = '';
+  socket.on('data', (chunk) => { reply += chunk; });
+  const ended = new Promise((resolve) => socket.once('close', resolve));
+  socket.write(`POST /peer/v1/delegate HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\nx-stratus-peer-signature: ${sign(SECRET, raw)}\r\ncontent-length: ${Buffer.byteLength(raw)}\r\nconnection: close\r\n\r\n`);
+  socket.write(raw.slice(0, 10));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const stopping = studio.channels[0].adapter.stop();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  socket.end(raw.slice(10));
+  await stopping;
+  await ended;
+  assert.equal(gateway.calls.length, 0);
+  // Chunked: the JSON sits between the chunk-size lines.
+  const rest = reply.slice(reply.indexOf('\r\n\r\n') + 4);
+  const body = JSON.parse(rest.slice(rest.indexOf('{'), rest.lastIndexOf('}') + 1));
+  assert.deepEqual([body.status, body.reason, body.re], ['refused', 'the peer is stopping', 'late-1']);
+});

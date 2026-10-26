@@ -93,6 +93,8 @@ A request is also refused when:
 - its request id is already running or already answered (`already running`,
   `already answered`), so a retry never runs a turn twice
 - it would exceed the hop budget (`depth limit`)
+- the receiving daemon is stopping (`the peer is stopping`); calling again
+  later reaches it once it's back
 
 An answer from a peer is another agent's words. On the receiving daemon the
 turn runs with sender trust `agent`, never as that daemon's principal. On
@@ -137,7 +139,8 @@ budget. An A → B → A loop therefore stops once the budget is spent.
 A receiving daemon that is stopping (a restart, an upgrade, a machine stop)
 lets its running turns finish first, as it does for every channel, and then
 sends each one's answer before it closes the listener: a turn that finished
-comes back as `result`, and one it had to abort as `failed`. Give it time to
+comes back as `result`, and one it had to abort as `failed`. A request that
+arrives while it's stopping is refused without running. Give it time to
 do that. Stratus drains for up to 30 seconds and then gives aborted turns 30
 more, so a platform's stop timeout should be over a minute (`kill_timeout`
 on Fly, where the default is 5 seconds, `stop_grace_period` in compose).

@@ -230,6 +230,9 @@ const createListener = ({ secrets, maxDepth, log }) => {
   const live = new Set();
   // Every response not yet sent, so stop() can let the answers out.
   const handling = new Set();
+  // Set by stop(): a request still being read when it began has no turn to
+  // abort, and must not start one while the daemon is going down.
+  let stopping = false;
 
   const handle = async (request, response) => {
     if (request.method !== 'POST' || request.url !== '/peer/v1/delegate') {
@@ -255,6 +258,10 @@ const createListener = ({ secrets, maxDepth, log }) => {
     // is no secret yet, and the caller never takes one as an answer.
     const secret = secrets[body.to][body.from.daemon];
     const answer = (status, payload) => respond(response, status, { ...payload, re: body.id }, secret);
+    if (stopping) {
+      answer(503, { status: 'refused', reason: 'the peer is stopping' });
+      return;
+    }
     const controller = new AbortController();
     // The caller gave up (cancelled, timed out, or went away): stop the turn
     // rather than finish work nobody will read.
@@ -312,6 +319,7 @@ const createListener = ({ secrets, maxDepth, log }) => {
     address: () => server?.address(),
     async start(nextGateway, listen) {
       gateway = nextGateway;
+      stopping = false;
       server = createServer((request, response) => {
         // What stop() waits for is the response, not the handler: the
         // handler returns once end() has queued the body, and a large answer
@@ -330,6 +338,7 @@ const createListener = ({ secrets, maxDepth, log }) => {
       log(`peer: listening on ${bound.address}:${bound.port}`);
     },
     async stop() {
+      stopping = true;
       for (const controller of live.values()) {
         controller.abort(new Error('the daemon is stopping'));
       }

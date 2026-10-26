@@ -44,12 +44,18 @@ test('every entry is a package name and one short line, and nothing else', () =>
   }
 });
 
-test('every @stratusagent entry is a plugin package in this repository', () => {
+test('every @stratusagent entry is a plugin in this repository that setup can offer', () => {
   const own = ownPackages();
   for (const { name } of index.plugins.filter((entry) => entry.name.startsWith('@stratusagent/'))) {
     const found = own.get(name);
     assert.ok(found, `${name} is not a package in this repository`);
-    assert.equal(found.manifest.stratus?.pluginVersion, 1, `${name} (${found.dir}/) has no plugin manifest`);
+    const stratus = found.manifest.stratus;
+    assert.equal(stratus?.pluginVersion, 1, `${name} (${found.dir}/) has no plugin manifest`);
+    // Setup's More plugins is a tools menu and skips a release that adds
+    // none (an executor-only plugin, say), so such an entry could never be
+    // picked there.
+    const tools = [...(stratus.contributes?.tools ?? []), ...(stratus.contributes?.toolsDiscovered ?? [])];
+    assert.ok(tools.length > 0, `${name} adds no tools, so setup would never offer it`);
   }
 });
 

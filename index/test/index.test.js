@@ -10,8 +10,10 @@ const repo = join(here, '..', '..');
 const index = pkg.stratusPluginIndex;
 
 // The rules `stratus setup` reads the index by (packages/cli/src/plugin-index.ts
-// in stratuslabs/agent). An entry it would drop is a mistake here.
-const NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
+// in stratuslabs/agent). An entry it would drop is a mistake here. NAME is
+// `isPackageName` from @stratusagent/plugins, which is stricter than npm (no
+// `~`, and a name starts with a letter or digit).
+const NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 
 /** This repository's plugin packages by npm name. */
 const ownPackages = () => {

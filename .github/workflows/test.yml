@@ -14,8 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
+      any: ${{ steps.list.outputs.any }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -24,13 +27,27 @@ jobs:
       - name: Test the package lister
         run: node --test .github/scripts/packages.test.mjs
 
+      # A pull request runs only the packages it touches (all of them when it
+      # changes .github/). macOS minutes cost more on a private repository.
+      - name: Files this pull request changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git diff --name-only "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/changed.txt"
+
       - name: List packages and their runners
         id: list
-        run: node .github/scripts/packages.mjs
+        run: |
+          if [ -f "$RUNNER_TEMP/changed.txt" ]; then
+            node .github/scripts/packages.mjs . --changed "$RUNNER_TEMP/changed.txt"
+          else
+            node .github/scripts/packages.mjs .
+          fi
 
   test:
     name: ${{ matrix.package }} (${{ matrix.runner }})
     needs: packages
+    if: needs.packages.outputs.any == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

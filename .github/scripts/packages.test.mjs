@@ -68,6 +68,30 @@ test('directories without a package.json, and dot directories, are not packages'
   assert.deepEqual(include.map((entry) => entry.package), ['peer', 'peer']);
 });
 
+test('on a pull request only the packages it touches run, and every one when CI itself changes', () => {
+  const packages = { peer: tested(), spawn: tested({ os: ['linux'] }), docs: null };
+  const only = (changed) => listPackages(repo(packages), { changed });
+  const peer = only(['peer/index.js', 'peer/test/peer.test.js', 'README.md']);
+  assert.deepEqual(peer.problems, []);
+  assert.deepEqual(peer.include, [
+    { package: 'peer', runner: 'macos-latest' },
+    { package: 'peer', runner: 'ubuntu-latest' },
+  ]);
+  rmSync(root, { recursive: true, force: true });
+  assert.equal(only(['.github/workflows/test.yml']).include.length, 3);
+  rmSync(root, { recursive: true, force: true });
+  // Nothing to test is not a failure: the README alone, or a folder that isn't a package.
+  assert.deepEqual(only(['README.md', 'docs/notes.md']), { include: [], problems: [] });
+  rmSync(root, { recursive: true, force: true });
+  // A file whose name only starts like a package's directory isn't in it.
+  assert.deepEqual(only(['peer-notes.md']).include, []);
+});
+
+test('a broken package fails the listing even when the pull request does not touch it', () => {
+  const { problems } = listPackages(repo({ peer: tested(), quiet: { name: 'quiet' } }), { changed: ['peer/index.js'] });
+  assert.deepEqual(problems, ['quiet: package.json has no "test" script']);
+});
+
 test('a package with no test script fails the listing instead of being skipped', () => {
   const { problems } = listPackages(repo({ peer: tested(), quiet: { name: 'quiet' } }));
   assert.deepEqual(problems, ['quiet: package.json has no "test" script']);

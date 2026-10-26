@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 
 import { admit, budgetFor, createPlugin, peerSessionId, sign, signResponse, DEFAULT_MAX_DEPTH } from '../index.js';
 
@@ -255,6 +256,44 @@ test('a peer that does not answer in time comes back as timed out, and one that 
   await createPlugin({ self: 'home', peers: { down: { url: 'http://127.0.0.1:9' } } }).setup(home.context);
   const down = await home.tools[0].execute({ target: 'down/nova', prompt: 'x' }, session());
   assert.equal(down.status, 'unreachable');
+});
+
+test('a connection that drops after the peer started the turn comes back as unreachable, and the peer stops that turn', async (t) => {
+  let remoteSignal;
+  let started;
+  const turnStarted = new Promise((resolve) => {
+    started = resolve;
+  });
+  const { port } = await twoDaemons(t, {
+    answer: (input) => {
+      remoteSignal = input.signal;
+      started();
+      return new Promise((resolve) => input.signal.addEventListener('abort', () => resolve({ status: 'cancelled', messages: [] })));
+    },
+  });
+  // A relay between the two daemons, so the connection can be cut mid-turn
+  // the way a network reset would, with neither daemon choosing to close it.
+  const sockets = new Set();
+  const relay = net.createServer((inbound) => {
+    const outbound = net.connect(port, '127.0.0.1');
+    sockets.add(inbound).add(outbound);
+    inbound.pipe(outbound).pipe(inbound);
+    inbound.on('error', () => {});
+    outbound.on('error', () => {});
+  });
+  await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => relay.close());
+  const home = fakeContext({ ava: { studio: SECRET } });
+  await createPlugin({ self: 'home', peers: { studio: { url: `http://127.0.0.1:${relay.address().port}` } } }).setup(home.context);
+  const pending = home.tools[0].execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await turnStarted;
+  for (const socket of sockets) {
+    socket.resetAndDestroy();
+  }
+  const output = await pending;
+  assert.equal(output.status, 'unreachable');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(remoteSignal.aborted, true);
 });
 
 test('stopping the channel aborts turns still running and closes the listener', async (t) => {

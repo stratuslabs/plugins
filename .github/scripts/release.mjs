@@ -3,8 +3,10 @@
 //
 // The tag has to agree with the package: the directory holds a package.json,
 // the version there is the tag's version, the name is in the @stratusagent/
-// scope, and the package isn't private. Anything else fails before a test
-// runs, so a mistyped tag never stages a package.
+// scope, the package isn't private, and its repository is this GitHub
+// repository (npm trusted publishing refuses a package whose repository.url
+// is anything else). Anything else fails before a test runs, so a mistyped
+// tag never stages a package.
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -14,7 +16,24 @@ import { packageRunners } from './packages.mjs';
 const TAG = /^([a-z0-9][a-z0-9_-]*)\/v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 const SCOPE = '@stratusagent/';
 
-export function resolveRelease(root, tag) {
+// npm compares repository.url with the repository in the workflow's OIDC
+// token, case-sensitively. These are the spellings of it npm writes and reads.
+function repositoryProblem(dir, pkg, repository) {
+  const expected = `https://github.com/${repository}`;
+  const url = typeof pkg.repository === 'object' && pkg.repository !== null ? pkg.repository.url : undefined;
+  if (typeof url !== 'string') {
+    return `${dir}/package.json has no repository.url. npm trusted publishing stages a package only when it is ${expected}.`;
+  }
+  if (![expected, `${expected}.git`, `git+${expected}.git`].includes(url)) {
+    return `${dir}/package.json has repository.url ${JSON.stringify(url)}; npm trusted publishing stages a package only when it is ${expected}.`;
+  }
+  if (pkg.repository.directory !== dir) {
+    return `${dir}/package.json has repository.directory ${JSON.stringify(pkg.repository.directory)}; it should be "${dir}".`;
+  }
+  return undefined;
+}
+
+export function resolveRelease(root, tag, repository) {
   const match = TAG.exec(tag);
   if (!match) throw new Error(`${JSON.stringify(tag)} is not a release tag. Use <dir>/v<major.minor.patch>, for example peer/v0.1.0.`);
   const [, dir, version] = match;
@@ -28,6 +47,8 @@ export function resolveRelease(root, tag) {
   if (pkg.version !== version) {
     throw new Error(`${tag} says version ${version}, but ${dir}/package.json is at ${pkg.version}. Tag the commit that bumps it.`);
   }
+  const repoProblem = repositoryProblem(dir, pkg, repository);
+  if (repoProblem) throw new Error(repoProblem);
   const { runners, problem } = packageRunners(dir, pkg);
   if (problem) throw new Error(problem);
   return { dir, name: pkg.name, version, include: runners.map((runner) => ({ package: dir, runner })) };
@@ -37,7 +58,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [root = '.', tag = ''] = process.argv.slice(2);
   let release;
   try {
-    release = resolveRelease(root, tag);
+    release = resolveRelease(root, tag, process.env.GITHUB_REPOSITORY || 'stratuslabs/plugins');
   } catch (error) {
     console.error(error.message);
     process.exit(1);

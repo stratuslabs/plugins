@@ -93,11 +93,18 @@ staged on npm by CI and goes public only when a maintainer approves it.
 
 CI holds no npm token. It stages through npm
 [trusted publishing](https://docs.npmjs.com/trusted-publishers), which npm
-sets up in an existing package's settings, so each package needs this once:
+sets up in an existing package's settings. npm also checks that the
+package's `repository.url` is this repository, and the Release workflow
+refuses a tag whose package says otherwise. Provenance is added by npm once
+this repository is public; it isn't generated from a private one. Each
+package needs this once:
 
 - **A package that was never published** is staged by hand the first time:
-  from a clean checkout of its tag, `npm stage publish --access public`, then
-  approve it.
+  from a clean checkout of its tag, run
+  `npx npm@11.19.1 stage publish --access public` (staging needs npm 11.15.0
+  or later and Node 22.14.0 or later; Node 22 ships npm 10), then approve it.
+  Staging a package npm has never seen also publishes a `0.0.0-stage`
+  placeholder version.
 - **Then, on npmjs.com**, open the package's Settings, Trusted publishing, and
   add GitHub Actions: organization `stratuslabs`, repository `plugins`,
   workflow `release.yml`, environment `release`, allowed action stage publish

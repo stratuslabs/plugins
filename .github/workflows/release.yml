@@ -110,5 +110,8 @@ jobs:
 
       # No install step: the published files are the package's own, with
       # nothing built. Staging packs exactly what is in the tagged commit.
+      # No --provenance: npm refuses it from a private repository. Under
+      # trusted publishing npm adds provenance by itself once the repository
+      # and the package are both public.
       - name: Stage on npm
-        run: npm stage publish --access public --provenance
+        run: npm stage publish --access public

@@ -228,7 +228,7 @@ const createListener = ({ secrets, maxDepth, log }) => {
   // One controller per admitted request, not per request id: a retry of a
   // live id must not take the original turn out of reach of stop().
   const live = new Set();
-  // Every request still being handled, so stop() can let their answers out.
+  // Every response not yet sent, so stop() can let the answers out.
   const handling = new Set();
 
   const handle = async (request, response) => {
@@ -313,9 +313,14 @@ const createListener = ({ secrets, maxDepth, log }) => {
     async start(nextGateway, listen) {
       gateway = nextGateway;
       server = createServer((request, response) => {
-        const handled = handle(request, response).catch(() => respond(response, 500, { status: 'failed', error: 'internal error' }));
-        handling.add(handled);
-        handled.finally(() => handling.delete(handled));
+        // What stop() waits for is the response, not the handler: the
+        // handler returns once end() has queued the body, and a large answer
+        // is still being written then. 'close' fires once it has been sent,
+        // or once the connection is gone.
+        const sent = new Promise((resolve) => response.once('close', resolve));
+        handling.add(sent);
+        sent.then(() => handling.delete(sent));
+        handle(request, response).catch(() => respond(response, 500, { status: 'failed', error: 'internal error' }));
       });
       await new Promise((resolve, reject) => {
         server.once('error', reject);

@@ -624,3 +624,25 @@ test('unreachable names why the connection failed, not only "fetch failed"', asy
   assert.equal(nowhere.status, 'unreachable');
   assert.match(nowhere.error, /^fetch failed: .*(ENOTFOUND|EAI_AGAIN)/);
 });
+
+test('a large answer sent as the daemon stops arrives whole', async (t) => {
+  // Codex P2 4380581418: stop() waited for the handler, which returns once
+  // end() has queued the body, then destroyed the socket with bytes unsent.
+  const big = 'x'.repeat(3 * 1024 * 1024);
+  let finish;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const { tool, studio } = await twoDaemons(t, {
+    answer: () => new Promise((resolve) => {
+      finish = () => resolve(answered(big));
+      started();
+    }),
+  });
+  const pending = tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  await running;
+  finish();
+  await studio.channels[0].adapter.stop();
+  const output = await pending;
+  assert.equal(output.status, 'result');
+  assert.equal(output.answer.length, big.length);
+});

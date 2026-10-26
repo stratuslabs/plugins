@@ -55,6 +55,17 @@ test('only @stratusagent packages publish from here, and never a private one', (
     /peer\/package\.json is private/);
 });
 
+test('a package name npm would refuse is refused before it reaches a workflow output', () => {
+  // The name goes into $GITHUB_OUTPUT, which is one name=value per line, so a
+  // line break in it would write a second output (dir=..., say) for the stage job.
+  for (const name of ['@stratusagent/foo\ndir=spawn', '@stratusagent/foo\rdir=spawn', '@stratusagent/Plugin-Peer', '@stratusagent/plugin peer', '@stratusagent/.hidden', '@stratusagent/']) {
+    assert.throws(() => resolve(repo({ peer: pkg({ name }) }), 'peer/v0.1.0'),
+      /peer\/package\.json is named .* this repository publishes only @stratusagent\/ packages with a valid npm name/s, JSON.stringify(name));
+  }
+  assert.throws(() => resolve(repo({ peer: pkg({ name: `@stratusagent/${'a'.repeat(201)}` }) }), 'peer/v0.1.0'), /valid npm name/);
+  assert.equal(resolve(repo({ peer: pkg({ name: '@stratusagent/plugin-peer.v2_x~y' }) }), 'peer/v0.1.0').name, '@stratusagent/plugin-peer.v2_x~y');
+});
+
 test('a tag that is not <dir>/v<major.minor.patch> is refused, prereleases included', () => {
   repo({ peer: pkg() });
   for (const tag of ['v0.1.0', 'peer@0.1.0', 'peer/0.1.0', 'peer/v0.1', 'peer/v0.1.0-rc.1', 'peer/v01.1.0', 'a/b/v0.1.0', '../peer/v0.1.0', '.github/v0.1.0', 'peer/v0.1.0 ']) {

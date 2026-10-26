@@ -15,6 +15,10 @@ import { packageRunners } from './packages.mjs';
 
 const TAG = /^([a-z0-9][a-z0-9_-]*)\/v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 const SCOPE = '@stratusagent/';
+// npm's rule for a new scoped name: lowercase, URL-safe, no leading dot or
+// underscore, 214 characters at most. It also keeps line breaks out of the
+// name, which goes into $GITHUB_OUTPUT one name=value per line.
+const NAME = /^@stratusagent\/[a-z0-9~-][a-z0-9._~-]*$/;
 
 // npm compares repository.url with the repository in the workflow's OIDC
 // token, case-sensitively. These are the spellings of it npm writes and reads.
@@ -42,6 +46,9 @@ export function resolveRelease(root, tag, repository) {
   const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
   if (typeof pkg.name !== 'string' || !pkg.name.startsWith(SCOPE)) {
     throw new Error(`${dir}/package.json is named ${pkg.name}; this repository publishes only ${SCOPE} packages.`);
+  }
+  if (!NAME.test(pkg.name) || pkg.name.length > 214) {
+    throw new Error(`${dir}/package.json is named ${JSON.stringify(pkg.name)}; this repository publishes only ${SCOPE} packages with a valid npm name (lowercase letters, digits, - . _ ~).`);
   }
   if (pkg.private === true) throw new Error(`${dir}/package.json is private, so it is never published.`);
   if (pkg.version !== version) {

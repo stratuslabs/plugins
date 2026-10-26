@@ -16,8 +16,9 @@ agent's core any bigger.
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
 
-All are published as `@stratusagent/plugin-<name>` from the directory of the
-same name. Each directory's README covers setup and configuration.
+Each is released to npm as `@stratusagent/plugin-<name>` from the directory
+of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).
+Each directory's README covers setup and configuration.
 
 ## Installing one grants nothing
 
@@ -74,6 +75,33 @@ the shared contract in
 [`packages/search`](https://github.com/stratuslabs/agent/tree/main/packages/search)
 and read the key from the `search.apiKey` credential, so switching vendors
 never changes a soul or a skill.
+
+## Releasing a plugin
+
+Each package has its own version and is released on its own. A release is
+staged on npm by CI and goes public only when a maintainer approves it.
+
+1. Merge a pull request that bumps `version` in the package's `package.json`.
+2. Tag that commit on main `<dir>/v<version>` and push the tag, for example
+   `git tag peer/v0.2.0 <sha> && git push origin peer/v0.2.0`.
+3. The [Release workflow](.github/workflows/release.yml) refuses a tag whose
+   commit isn't on main, whose version isn't the one in `package.json`, or
+   whose package isn't a public `@stratusagent/` one. Then it runs that
+   package's tests on its runners and stages it with `npm stage publish`.
+4. Approve the staged version on npmjs.com (the Staged Packages tab) or with
+   `npm stage approve <id>`. npm asks for 2FA. Until then nothing is public.
+
+CI holds no npm token. It stages through npm
+[trusted publishing](https://docs.npmjs.com/trusted-publishers), which npm
+sets up in an existing package's settings, so each package needs this once:
+
+- **A package that was never published** is staged by hand the first time:
+  from a clean checkout of its tag, `npm stage publish --access public`, then
+  approve it.
+- **Then, on npmjs.com**, open the package's Settings, Trusted publishing, and
+  add GitHub Actions: organization `stratuslabs`, repository `plugins`,
+  workflow `release.yml`, environment `release`, allowed action stage publish
+  only. Then set the package to disallow publishing with tokens.
 
 ## Built into the agent
 

@@ -1,0 +1,114 @@
+name: Release
+
+# A tag <dir>/v<version>, for example peer/v0.1.0, releases the one package in
+# that directory. The workflow checks the tag against the package, runs the
+# package's tests on its runners, and then STAGES it on npm. Nothing is public
+# until a maintainer approves the staged version on npmjs.com with 2FA.
+# "Releasing a plugin" in the README has the steps and the one-time setup.
+on:
+  push:
+    tags:
+      - '*/v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    outputs:
+      dir: ${{ steps.release.outputs.dir }}
+      name: ${{ steps.release.outputs.name }}
+      version: ${{ steps.release.outputs.version }}
+      matrix: ${{ steps.release.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test the release scripts
+        run: node --test .github/scripts/*.test.mjs
+
+      # Only merged code ships: a tag on a branch that never reached main stops here.
+      - name: The tagged commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG points at $GITHUB_SHA, which is not on main. Tag a commit that has merged."
+            exit 1
+          fi
+
+      - name: Read the tag
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node .github/scripts/release.mjs . "$TAG"
+
+  test:
+    name: Test ${{ matrix.package }} (${{ matrix.runner }})
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund --no-package-lock
+          fi
+
+      - name: Test
+        run: npm test
+
+  stage:
+    name: Stage ${{ needs.check.outputs.name }}@${{ needs.check.outputs.version }} on npm
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    # The npm trusted publisher names this environment, so only this job can
+    # stage. Add required reviewers to it in the repository settings to gate
+    # the job itself as well.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC): no npm token is stored anywhere
+    defaults:
+      run:
+        working-directory: ${{ needs.check.outputs.dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Staged publishing needs npm 11.15.0 or later; Node 22 ships npm 10.
+      - name: Install npm 11.19.1
+        run: npm install -g npm@11.19.1
+
+      # No install step: the published files are the package's own, with
+      # nothing built. Staging packs exactly what is in the tagged commit.
+      - name: Stage on npm
+        run: npm stage publish --access public --provenance

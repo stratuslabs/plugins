@@ -79,6 +79,12 @@ test('the active Xcode is readable whatever its bundle is named, and nothing els
   // Command Line Tools sit under /Library, already readable: no bundle, nothing added.
   assert.deepEqual(toolchainReads(tools), []);
   assert.deepEqual(toolchainReads(path.join(root, 'notes.application', 'Developer')), []);
+  // Only the bundle whose Contents/Developer it is: never an outer package
+  // Xcode sits in, and never a bundle the directory is merely somewhere inside.
+  const outer = path.join(root, 'Developer.app');
+  await mkdir(path.join(outer, 'Xcode.app', 'Contents', 'Developer'), { recursive: true });
+  assert.deepEqual(toolchainReads(path.join(outer, 'Xcode.app', 'Contents', 'Developer')), [path.join(outer, 'Xcode.app')]);
+  assert.deepEqual(toolchainReads(path.join(outer, 'Resources')), []);
   for (const unusable of [undefined, '', 'Xcode.app/Contents/Developer', 42]) {
     assert.deepEqual(toolchainReads(unusable), [], String(unusable));
   }

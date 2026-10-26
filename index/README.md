@@ -16,8 +16,8 @@ goes through the same registry, proxy and auth as `npm install -g`.
 ```
 
 Each entry is an npm package name and one line, at most 80 characters, on
-what it adds. Setup drops an entry whose name npm couldn't be handed, or that
-has no description.
+what it adds. Setup drops an entry whose name npm couldn't be handed, or whose
+description is empty or has a line break or control character.
 
 ## What an entry does and doesn't do
 
@@ -45,9 +45,10 @@ are rows of the menu already.
    `npm test` checks the shape, and that every `@stratusagent` entry is a
    plugin package in this repository.
 2. After it merges, release it like any other package here: push the tag
-   `index/v<version>` (see "Releasing a plugin" in the top-level README).
-   Nothing changes for anyone until a maintainer approves the staged
-   version on npm.
+   `index/v<version>`. The release workflow (added in #37, which also adds
+   "Releasing a plugin" to the top-level README) tests it and stages it on
+   npm, and nothing changes for anyone until a maintainer approves the
+   staged version.
 3. Each CLI release carries a copy of the list (`BUNDLED_PLUGIN_INDEX` in
    `packages/cli/src/plugin-index.ts` in stratuslabs/agent), which setup
    shows when npm has no index or can't be reached. Keep that copy equal to

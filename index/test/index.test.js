@@ -41,6 +41,10 @@ test('every entry is a package name and one short line, and nothing else', () =>
     assert.equal(typeof entry.description, 'string');
     assert.equal(entry.description, entry.description.trim(), `${entry.name}: description has stray whitespace`);
     assert.ok(entry.description.length > 0 && entry.description.length <= 80, `${entry.name}: description should be one line of at most 80 characters`);
+    // Printed straight into a terminal menu: no line breaks, and no control
+    // characters (an escape sequence would be run by the terminal). Setup
+    // drops such an entry.
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(entry.description), `${entry.name}: description has a line break or control character`);
   }
 });
 

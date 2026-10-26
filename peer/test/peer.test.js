@@ -686,3 +686,23 @@ test('a request the gateway refuses because it is draining is refused as stoppin
   assert.equal(gateway.calls.length, 1);
   assert.deepEqual([output.status, output.reason], ['refused', 'the peer is stopping']);
 });
+
+test('a connection that drops partway through the answer is unreachable, with the cause', async (t) => {
+  // Codex P2 4380704895: once headers had arrived, a reset mid-body was
+  // reported as `failed: ... no readable body`, a remote failure.
+  const { createServer } = await import('node:http');
+  const server = createServer(async (request, response) => {
+    for await (const _ of request) { /* drain */ }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"status":"res');
+    setTimeout(() => response.socket.destroy(), 20);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const home = fakeContext({ ava: { studio: SECRET } });
+  await createPlugin({ self: 'home', peers: { studio: { url: `http://127.0.0.1:${server.address().port}` } } }).setup(home.context);
+  const output = await home.tools[0].execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(output.status, 'unreachable');
+  assert.match(output.error, /^\S.*: .+/);
+  assert.doesNotMatch(output.error, /no readable body/);
+});

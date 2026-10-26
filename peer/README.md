@@ -148,7 +148,11 @@ is stopping` and never runs.
 
 A daemon killed outright can't close its connections. If the asking daemon's
 machine dies mid-request, the peer can't tell the caller is gone, finishes
-the turn, and its answer reaches nobody.
+the turn, and its answer reaches nobody. If the receiving daemon is killed
+mid-turn, the caller gets `unreachable`, and the receiver's next start
+continues that turn once (a peer turn carries an idempotency key, like any
+keyed message) with no one left to read the answer. Asking again sends a
+new request, which runs a new turn.
 
 ## Not yet
 

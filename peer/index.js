@@ -486,12 +486,18 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
       return { status: 'failed', requestId: id, error: `the peer answered ${response.status}, a redirect, which is not followed; check the peer url` };
     }
     let text;
-    let answer;
     try {
       text = await readLimited(response, MAX_RESPONSE_BYTES);
-      if (text === undefined) {
-        return aborted() ?? { status: 'failed', requestId: id, error: `the peer's answer was larger than ${MAX_RESPONSE_BYTES} bytes, so it was dropped` };
-      }
+    } catch (error) {
+      // The connection broke partway through the answer: the same outcome
+      // as one that never connected, so the same status and its cause.
+      return aborted() ?? { status: 'unreachable', requestId: id, error: connectionError(error) };
+    }
+    if (text === undefined) {
+      return aborted() ?? { status: 'failed', requestId: id, error: `the peer's answer was larger than ${MAX_RESPONSE_BYTES} bytes, so it was dropped` };
+    }
+    let answer;
+    try {
       answer = JSON.parse(text);
     } catch {
       return aborted() ?? { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };

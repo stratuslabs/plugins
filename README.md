@@ -19,6 +19,10 @@ agent's core any bigger.
 All are published as `@stratusagent/plugin-<name>` from the directory of the
 same name. Each directory's README covers setup and configuration.
 
+[`index`](./index) isn't a plugin. It's the curated list `stratus setup`
+offers under Plugins → More plugins, published as `@stratusagent/plugin-index`.
+To list a plugin there, add it to that package's `stratusPluginIndex`.
+
 ## Installing one grants nothing
 
 There are two gates, and both are yours. First, a config you trust enables the

@@ -1,0 +1,28 @@
+{
+  "name": "@stratusagent/plugin-index",
+  "version": "0.1.0",
+  "description": "The curated list of Stratus plugins that `stratus setup` offers under More plugins.",
+  "type": "module",
+  "license": "MIT",
+  "files": [],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "index"
+  },
+  "stratusPluginIndex": {
+    "schemaVersion": 1,
+    "plugins": [
+      { "name": "@stratusagent/plugin-spawn", "description": "Run several tasks at once in short-lived sub-agents" },
+      { "name": "@stratusagent/plugin-peer", "description": "Hand a task to an agent on another Stratus daemon" },
+      { "name": "@stratusagent/plugin-fleet", "description": "Read-only fleet metadata for an agent that reports what needs a person" },
+      { "name": "@stratusagent/plugin-a2ui", "description": "Show a native screen as A2UI, checked against your catalogs" },
+      { "name": "@stratusagent/plugin-dreams", "description": "Overnight experiment runs and a morning report (macOS)" },
+      { "name": "@stratusagent/plugin-sandbox", "description": "An executor that runs agent commands under sandbox-exec (macOS)" }
+    ]
+  }
+}

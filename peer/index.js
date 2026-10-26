@@ -307,6 +307,13 @@ const createListener = ({ secrets, maxDepth, log }) => {
       }
       answer(200, { status: 'result', text: finalText(session), agent: body.to });
     } catch (error) {
+      // The gateway refuses new turns for the whole of its drain, before it
+      // stops this channel. Matched by name, as channel-slack does: the
+      // class lives in the gateway package, which a plugin doesn't import.
+      if (error instanceof Error && error.name === 'GatewayStoppingError') {
+        answer(503, { status: 'refused', reason: 'the peer is stopping' });
+        return;
+      }
       log(`peer: a request from ${body.from.daemon} failed: ${error instanceof Error ? error.message : String(error)}`);
       answer(200, { status: 'failed', error: 'the remote turn failed' });
     } finally {

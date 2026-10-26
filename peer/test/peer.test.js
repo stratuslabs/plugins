@@ -671,3 +671,18 @@ test('a request whose body finishes arriving after stop() began is refused, not 
   const body = JSON.parse(rest.slice(rest.indexOf('{'), rest.lastIndexOf('}') + 1));
   assert.deepEqual([body.status, body.reason, body.re], ['refused', 'the peer is stopping', 'late-1']);
 });
+
+test('a request the gateway refuses because it is draining is refused as stopping, not failed', async (t) => {
+  // The gateway refuses new dispatches for the whole drain, before it stops
+  // the channels; it says so with a GatewayStoppingError, by name.
+  const { tool, gateway } = await twoDaemons(t, {
+    answer: () => {
+      const error = new Error('stratusd is restarting');
+      error.name = 'GatewayStoppingError';
+      throw error;
+    },
+  });
+  const output = await tool.execute({ target: 'studio/nova', prompt: 'x' }, session());
+  assert.equal(gateway.calls.length, 1);
+  assert.deepEqual([output.status, output.reason], ['refused', 'the peer is stopping']);
+});

@@ -85,13 +85,16 @@ const real = (target) => {
  * installed under any name (Xcode_26.6.app on GitHub's macOS runners,
  * Xcode-beta.app). The bundle is read-only, like the rest of the system.
  * Command Line Tools live under /Library, which is already readable, so
- * nothing is added for them, or for a directory outside any bundle.
+ * nothing is added for them, or for a directory that isn't a bundle's
+ * Contents/Developer.
  */
 export const toolchainReads = (developerDir) => {
   if (typeof developerDir !== 'string') return [];
   const dir = developerDir.trim();
   if (!path.isAbsolute(dir)) return [];
-  const bundle = /^(\/.+?\.app)(?=\/|$)/.exec(real(dir));
+  // The bundle whose Contents/Developer this is (or the bundle itself), so
+  // never an outer package Xcode happens to sit in.
+  const bundle = /^(\/.*\.app)(?:\/Contents\/Developer(?:\/.*)?)?$/.exec(real(dir));
   return bundle ? [bundle[1]] : [];
 };
 

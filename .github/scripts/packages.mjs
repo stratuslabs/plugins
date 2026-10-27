@@ -39,6 +39,17 @@ export function osAllows(os, platform) {
   return match || negated === list.length;
 }
 
+/**
+ * The runners a package's tests run on, or why it can't be tested here: no
+ * test script, or an "os" that leaves no runner.
+ */
+export function packageRunners(dir, pkg) {
+  if (!pkg.scripts?.test) return { problem: `${dir}: package.json has no "test" script` };
+  const runners = Object.keys(RUNNERS).filter((name) => osAllows(pkg.os, name)).map((name) => RUNNERS[name]);
+  if (runners.length === 0) return { problem: `${dir}: its "os" (${[pkg.os].flat().join(', ')}) names no runner this workflow has` };
+  return { runners };
+}
+
 export function listPackages(root, { changed } = {}) {
   const include = [];
   const problems = [];
@@ -49,14 +60,9 @@ export function listPackages(root, { changed } = {}) {
   for (const dir of dirs) {
     const manifest = join(root, dir, 'package.json');
     if (!existsSync(manifest)) continue;
-    const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
-    if (!pkg.scripts?.test) {
-      problems.push(`${dir}: package.json has no "test" script`);
-      continue;
-    }
-    const runners = Object.keys(RUNNERS).filter((name) => osAllows(pkg.os, name)).map((name) => RUNNERS[name]);
-    if (runners.length === 0) {
-      problems.push(`${dir}: its "os" (${[pkg.os].flat().join(', ')}) names no runner this workflow has`);
+    const { runners, problem } = packageRunners(dir, JSON.parse(readFileSync(manifest, 'utf8')));
+    if (problem) {
+      problems.push(problem);
       continue;
     }
     for (const runner of runners) include.push({ package: dir, runner });

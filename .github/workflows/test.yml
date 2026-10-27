@@ -24,8 +24,8 @@ jobs:
         with:
           node-version: 22
 
-      - name: Test the package lister
-        run: node --test .github/scripts/packages.test.mjs
+      - name: Test the CI scripts
+        run: node --test .github/scripts/*.test.mjs
 
       # A pull request runs only the packages it touches (all of them when it
       # changes .github/). macOS minutes cost more on a private repository.

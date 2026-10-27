@@ -129,6 +129,51 @@ test('sessions: a DM per user, a thread per thread, and a top-level mention open
   assert.notEqual(sessionIdFor('ava', routeFor(message())), sessionIdFor('bo', routeFor(message())));
 });
 
+test('sessions: a reply to an answer the agent gave in the channel continues where that conversation started', () => {
+  const ANSWER = '909090909090909090';
+  const ROOT = '767676767676767676';
+  const rootOf = (id) => (id === ANSWER ? ROOT : undefined);
+  assert.deepEqual(routeFor(message({ replyToId: ANSWER }), rootOf), { team: GUILD, conversation: CHANNEL, thread: ROOT, startThread: false, inChannel: true });
+  assert.equal(sessionIdFor('ava', routeFor(message({ replyToId: ANSWER }), rootOf)), sessionIdFor('ava', routeFor(message({ id: ROOT }))));
+  // Unknown answers, threads and DMs route as before.
+  assert.equal(routeFor(message({ replyToId: '121212121212121212' }), rootOf).startThread, true);
+  assert.equal(routeFor(message({ replyToId: ANSWER, channelId: THREAD, parentId: CHANNEL }), rootOf).thread, THREAD);
+  assert.equal(routeFor(message({ replyToId: ANSWER, guildId: undefined }), rootOf).thread, undefined);
+});
+
+test('positions: which conversation each in-channel answer belongs to is kept across a restart, up to a limit, and an older file still loads', async () => {
+  const { mkdtemp, readFile, writeFile } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { createPositions, ANSWER_LIMIT } = await import('../lib/positions.js');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'discord-answers-'));
+  const stateDirectory = { prepare: () => dir };
+  const ROOT = '767676767676767676';
+  const answerId = (n) => String(900000000000000000n + BigInt(n));
+
+  const before = createPositions({ stateDirectory, writeDelayMs: 1 });
+  before.answered('ava', [answerId(1), answerId(2)], ROOT);
+  before.flush();
+  const after = createPositions({ stateDirectory });
+  after.load();
+  assert.equal(after.rootOf('ava', answerId(2)), ROOT);
+  assert.equal(after.rootOf('bo', answerId(2)), undefined, 'per agent');
+
+  for (let n = 3; n <= ANSWER_LIMIT + 1; n += 1) after.answered('ava', [answerId(n)], ROOT);
+  assert.equal(after.rootOf('ava', answerId(1)), undefined, 'the oldest goes first');
+  assert.equal(after.rootOf('ava', answerId(2)), ROOT);
+  after.flush();
+  const stored = JSON.parse(await readFile(path.join(dir, 'positions.json'), 'utf8'));
+  assert.equal(stored.answers.ava.length, ANSWER_LIMIT);
+
+  // Written by a version without answers: it loads, with none known.
+  await writeFile(path.join(dir, 'positions.json'), JSON.stringify({ version: 1, agents: { ava: { [CHANNEL]: { last: ROOT, guildId: GUILD } } } }));
+  const older = createPositions({ stateDirectory });
+  older.load();
+  assert.equal(older.tracks('ava', CHANNEL), true);
+  assert.equal(older.rootOf('ava', answerId(2)), undefined);
+});
+
 test('chunk: every piece fits Discord, splits at lines, and code fences stay closed', () => {
   assert.deepEqual(chunk('short'), ['short']);
   const long = Array.from({ length: 300 }, (_, i) => `line ${i} ${'x'.repeat(10)}`).join('\n');

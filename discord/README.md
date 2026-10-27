@@ -27,8 +27,9 @@ the private plans repo (roadmap/20, V1 section).
 4. Invite each bot to its guilds with View Channels, Send Messages, Send
    Messages in Threads, Create Public Threads, Read Message History and
    Attach Files. Without Create Public Threads it answers a mention in the
-   channel, as a reply, and each mention there starts a new conversation
-   (stratuslabs/plugins#21).
+   channel, as a reply. Replying to one of those answers (Discord's Reply)
+   carries that conversation on, after a restart too; a new mention there
+   starts a new one.
 
 Every agent with a stored token is on Discord; one with no approvers in
 either place fails the load with its name.
@@ -56,9 +57,9 @@ either place fails the load with its name.
   privately and the request stays pending. Every ending rewrites the prompt
   without buttons. A request from another surface's conversation is left
   to that surface.
-- Stop: an approver sending `stop` in a DM or thread ends the running turn,
-  which keeps what it said and adds who stopped it. With nothing running,
-  `stop` is an ordinary message.
+- Stop: an approver sending `stop` in a DM or thread, or as a reply to an
+  answer in a channel, ends the running turn, which keeps what it said and
+  adds who stopped it. With nothing running, `stop` is an ordinary message.
 
 - Destinations and reads: `message.send` and schedules post to
   `discord:<channel id>` (with `thread` naming a thread in it, or a message

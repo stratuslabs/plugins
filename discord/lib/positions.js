@@ -15,6 +15,10 @@ import path from 'node:path';
  * again. A repeat of a finished turn is the gateway's to tell apart: it
  * posts that turn's reply from the session rather than running it twice.
  *
+ * It also keeps, for an agent that answers in a channel because it can't
+ * open a thread there, which conversation each of those answers belongs
+ * to, so a reply to one continues it after a restart too.
+ *
  * Stored as `positions.json` under the plugin's state directory, written
  * whole through a rename so a crash leaves the old file or the new one.
  */
@@ -22,6 +26,8 @@ import path from 'node:path';
 const SNOWFLAKE = /^[0-9]{17,20}$/;
 /** Conversations remembered per agent; the least recently moved go first. */
 export const CONVERSATION_LIMIT = 500;
+/** In-channel answers remembered per agent; the least recently written go first. */
+export const ANSWER_LIMIT = 2000;
 const WRITE_DELAY_MS = 500;
 
 const valid = (entry) => entry && SNOWFLAKE.test(entry.last ?? '')
@@ -33,6 +39,8 @@ const max = (a, b) => (a === undefined || BigInt(b) > BigInt(a) ? b : a);
 export const createPositions = ({ stateDirectory, warn = () => {}, writeDelayMs = WRITE_DELAY_MS } = {}) => {
   // agentId -> Map(conversationId -> { seen, guildId?, parentId?, open: Set(messageId) })
   const agents = new Map();
+  // agentId -> Map(answer message id -> id of the message its conversation started from)
+  const answers = new Map();
   let timer;
   let dirty = false;
 
@@ -72,6 +80,15 @@ export const createPositions = ({ stateDirectory, warn = () => {}, writeDelayMs 
       }
       agents.set(agentId, map);
     }
+    for (const [agentId, pairs] of Object.entries(stored?.answers ?? {})) {
+      const map = new Map();
+      for (const pair of Array.isArray(pairs) ? pairs.slice(-ANSWER_LIMIT) : []) {
+        if (Array.isArray(pair) && SNOWFLAKE.test(pair[0] ?? '') && SNOWFLAKE.test(pair[1] ?? '')) {
+          map.set(pair[0], pair[1]);
+        }
+      }
+      answers.set(agentId, map);
+    }
   };
 
   /** The position as stored: just below the oldest message still being answered. */
@@ -99,7 +116,11 @@ export const createPositions = ({ stateDirectory, warn = () => {}, writeDelayMs 
         };
       }
     }
-    return { version: 1, agents: out };
+    const answered = {};
+    for (const [agentId, map] of answers) {
+      answered[agentId] = [...map];
+    }
+    return { version: 1, agents: out, answers: answered };
   };
 
   const flush = () => {
@@ -201,6 +222,29 @@ export const createPositions = ({ stateDirectory, warn = () => {}, writeDelayMs 
         ...(entry.guildId ? { guildId: entry.guildId } : {}),
         ...(entry.parentId ? { parentId: entry.parentId } : {}),
       }));
+    },
+    /**
+     * Messages the agent posted in a channel to answer in the conversation
+     * that started at `root`: a reply to any of them continues it.
+     */
+    answered(agentId, ids, root) {
+      let map = answers.get(agentId);
+      if (!map) {
+        map = new Map();
+        answers.set(agentId, map);
+      }
+      for (const id of ids) {
+        map.delete(id);
+        map.set(id, root);
+        if (map.size > ANSWER_LIMIT) {
+          map.delete(map.keys().next().value);
+        }
+      }
+      changed();
+    },
+    /** Where the conversation an in-channel answer belongs to started, or undefined. */
+    rootOf(agentId, id) {
+      return answers.get(agentId)?.get(id);
     },
     /** Forget a conversation the agent can no longer see. */
     drop(agentId, conversation) {

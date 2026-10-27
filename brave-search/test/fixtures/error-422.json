@@ -1,0 +1,11 @@
+{
+  "type": "ErrorResponse",
+  "error": {
+    "id": "6f0f6ad4-0000-4000-8000-000000000422",
+    "status": 422,
+    "code": "VALIDATION",
+    "detail": "Unable to validate request parameter(s)",
+    "meta": { "errors": [{ "type": "string_too_long", "loc": ["query", "q"], "msg": "String should have at most 600 characters" }] }
+  },
+  "time": 1793068800
+}

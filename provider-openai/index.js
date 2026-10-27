@@ -61,6 +61,10 @@ const readHeaders = (value) => {
  */
 export const createOpenAiProviderPlugin = (config = {}, options = {}) => {
   const baseUrl = readString(config.baseUrl);
+  // The adapter reads a missing endpoint as api.openai.com. A blank one is
+  // not a choice of OpenAI: it was meant for some other server, and reading
+  // it as OpenAI would send that server's key and the conversation there.
+  const blankBaseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() === '';
   const configuredModel = readString(config.model);
   const headers = readHeaders(config.headers);
   const vision = typeof config.vision === 'boolean' ? config.vision : undefined;
@@ -69,6 +73,11 @@ export const createOpenAiProviderPlugin = (config = {}, options = {}) => {
   return {
     name: 'provider-openai',
     setup(context) {
+      if (blankBaseUrl) {
+        throw new Error(
+          'plugins["@stratusagent/provider-openai"].baseUrl is blank. Set it to the endpoint\'s URL, or remove it to use the OpenAI API.',
+        );
+      }
       if (!context.providers) {
         throw new Error(
           `This host hands plugins no provider handle, so @stratusagent/provider-openai cannot register ${OPENAI_COMPATIBLE_PROVIDER_NAME}.`,

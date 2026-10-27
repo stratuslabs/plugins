@@ -139,6 +139,19 @@ test('a host with no provider handle is refused at setup, naming the package', a
   );
 });
 
+test('a blank baseUrl is refused at setup, not read as "use api.openai.com"', async () => {
+  // A blank endpoint meant for a local or private server must not send the
+  // request, and the key, to OpenAI instead.
+  for (const baseUrl of ['', '  ']) {
+    const { fetchImpl, calls } = fakeFetch();
+    await assert.rejects(
+      async () => registered({ baseUrl, model: 'llama3' }, fetchImpl, fakeCredentials({ ava: 'sk-ava' })),
+      /plugins\["@stratusagent\/provider-openai"\]\.baseUrl is blank/,
+    );
+    assert.equal(calls.length, 0);
+  }
+});
+
 test('it serves as a fallback target behind a failing built-in primary', async () => {
   const { fetchImpl, calls } = fakeFetch();
   const contribution = await registered({ baseUrl: 'http://127.0.0.1:11434/v1' }, fetchImpl, fakeCredentials({ ava: 'sk-ava' }));

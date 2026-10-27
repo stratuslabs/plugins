@@ -49,7 +49,7 @@ stratus credential set openai.apiKey --agent blair  # blair's own account
 
 | Key | What it sets |
 | --- | --- |
-| `baseUrl` | The endpoint. Default: the OpenAI API |
+| `baseUrl` | The endpoint. Default: the OpenAI API. A blank value is refused at load, never read as the default |
 | `model` | The model when a soul names none. A run with neither is refused, naming both places |
 | `headers` | Extra request headers, name to value |
 | `vision` | Whether the model takes images. Default `true`; `false` for a text-only model |

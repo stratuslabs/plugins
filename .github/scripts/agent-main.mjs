@@ -20,7 +20,7 @@
 //    (index, backup) and gets only the tests.
 
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -71,24 +71,53 @@ export function closure(names, packs) {
 }
 
 /**
+ * Overrides that force main's copy of every packed package wherever it sits
+ * in the tree, not only at the top: a dependency whose range shuts main's
+ * version out would otherwise get its own copy from npm. A package the root
+ * names itself is overridden with `$name`, npm's reference to that entry,
+ * since an override that differs from a direct dependency is refused.
+ */
+export function mainOverrides(direct, packs) {
+  const overrides = {};
+  for (const name of [...packs.keys()].sort()) overrides[name] = direct.includes(name) ? `$${name}` : `file:${packs.get(name).file}`;
+  return overrides;
+}
+
+/**
  * The package.json pointed at agent main: each @stratusagent/* dependency it
- * names becomes main's tarball in the same field, and every other package
- * those need is forced to main's through overrides, so no copy from npm can
- * end up in the tree beside it.
+ * names becomes main's tarball in the same field, and overrides force
+ * main's copy of every package everywhere else in the tree.
  */
 export function pointAtMain(pkg, packs) {
   const direct = stratusDependencies(pkg);
-  const needed = closure(direct, packs);
+  closure(direct, packs);
+  if (direct.length === 0) return pkg;
   const out = structuredClone(pkg);
   for (const field of DEPENDENCY_FIELDS) {
     for (const name of Object.keys(out[field] ?? {})) {
       if (name.startsWith(SCOPE)) out[field][name] = `file:${packs.get(name).file}`;
     }
   }
-  const overrides = { ...out.overrides };
-  for (const name of needed) if (!direct.includes(name)) overrides[name] = `file:${packs.get(name).file}`;
-  if (Object.keys(overrides).length > 0) out.overrides = overrides;
+  out.overrides = { ...out.overrides, ...mainOverrides(direct, packs) };
   return out;
+}
+
+/**
+ * Every @stratusagent/* package npm installed that is not main's, from the
+ * hidden lockfile npm writes into node_modules: a copy from the registry (a
+ * plugin whose range shuts main's version out gets its own) would mean the
+ * check ran partly against npm's code.
+ */
+export function strayCopies(installedLock, packs) {
+  const stray = [];
+  for (const [path, entry] of Object.entries(installedLock.packages ?? {})) {
+    const at = path.lastIndexOf('node_modules/');
+    if (at === -1) continue;
+    const name = path.slice(at + 'node_modules/'.length);
+    if (!packs.has(name)) continue;
+    if (!String(entry.resolved ?? '').startsWith('file:')) stray.push(`${path} ${entry.version} from ${entry.resolved ?? 'nowhere'}`);
+  }
+  return stray;
 }
 
 /** The host project the loader check runs in: the packed plugin and main. */
@@ -97,10 +126,8 @@ export function hostManifest(pluginName, pluginTarball, packs) {
   const dependencies = { [pluginName]: `file:${pluginTarball}` };
   for (const name of needed) dependencies[name] = `file:${packs.get(name).file}`;
   // The plugin's own @stratusagent/* ranges may not admit main's version
-  // (a release in between); the overrides make it get main's anyway.
-  const overrides = {};
-  for (const name of [...packs.keys()].sort()) if (!needed.includes(name)) overrides[name] = `file:${packs.get(name).file}`;
-  return { name: 'agent-main-host', private: true, type: 'module', dependencies, overrides };
+  // (sandbox still asks for ^0.11.8); the overrides make it get main's anyway.
+  return { name: 'agent-main-host', private: true, type: 'module', dependencies, overrides: mainOverrides(needed, packs) };
 }
 
 /**
@@ -121,6 +148,15 @@ const run = (command, args, cwd) => {
 
 const NPM_INSTALL = ['install', '--no-audit', '--no-fund', '--no-package-lock'];
 
+const installMain = (dir, packs) => {
+  run('npm', NPM_INSTALL, dir);
+  // npm writes no hidden lockfile when there was nothing to install.
+  const installed = join(dir, 'node_modules', '.package-lock.json');
+  if (!existsSync(installed)) return;
+  const stray = strayCopies(JSON.parse(readFileSync(installed, 'utf8')), packs);
+  if (stray.length > 0) throw new Error(`npm installed packages that are not agent main's:\n  ${stray.join('\n  ')}`);
+};
+
 export function testAgainstMain(packageDir, { packs, work }) {
   const pkg = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
   // The whole repository is copied, not just the package, because some
@@ -133,7 +169,7 @@ export function testAgainstMain(packageDir, { packs, work }) {
   // The lockfile pins npm's copies; the point here is main's.
   rmSync(join(testDir, 'package-lock.json'), { force: true });
   writeFileSync(join(testDir, 'package.json'), `${JSON.stringify(pointAtMain(pkg, packs), null, 2)}\n`);
-  run('npm', NPM_INSTALL, testDir);
+  installMain(testDir, packs);
   run('npm', ['test'], testDir);
 }
 
@@ -149,7 +185,7 @@ export function loadThroughMain(packageDir, { packs, work, configTable }) {
     .split('\n')
     .pop();
   writeFileSync(join(hostDir, 'package.json'), `${JSON.stringify(hostManifest(pkg.name, join(hostDir, tarball), packs), null, 2)}\n`);
-  run('npm', NPM_INSTALL, hostDir);
+  installMain(hostDir, packs);
   // Copied in, so its imports resolve from the host's node_modules the way
   // the daemon's do from its own install.
   const here = dirname(fileURLToPath(import.meta.url));

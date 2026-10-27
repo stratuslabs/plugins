@@ -44,6 +44,7 @@ const result = await loadPlugins({
   workspaces: {
     forAgent: (agentId) => join(stateDir, 'workspaces', agentId),
     prepare: (agentId) => prepared(join(stateDir, 'workspaces', agentId)),
+    all: async () => [],
   },
   stateDirectories: (packageName) => ({ prepare: () => prepared(join(stateDir, 'plugins', packageName)) }),
   protectedPaths: { all: async () => [], exempt: async () => [] },
@@ -78,6 +79,9 @@ if (!loaded) {
   for (const kind of ['providers', 'memory', 'executors']) {
     missing(kind, (declared[kind] ?? []).map((item) => item.name), loaded.contributions[kind]);
   }
+  // A channel registers for the agents it serves, which can be none here
+  // (no secrets are stored); the kind is what has to be there.
+  missing('channel', (declared.channels ?? []).map((item) => item.name), loaded.contributions.channels.map((channel) => channel.kind));
   console.log(
     `${name}: loaded through agent main's loader; tools [${loaded.tools.map((tool) => tool.name).join(', ')}], ` +
       `skills [${loaded.skills.map((skill) => skill.id).join(', ')}], contributions ${JSON.stringify(loaded.contributions)}`,

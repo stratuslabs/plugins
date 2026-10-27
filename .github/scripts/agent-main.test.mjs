@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { closure, HOST_PACKAGES, hostManifest, loaderConfig, pointAtMain, readPacks, stratusDependencies } from './agent-main.mjs';
+import { closure, HOST_PACKAGES, hostManifest, loaderConfig, mainOverrides, pointAtMain, readPacks, strayCopies, stratusDependencies } from './agent-main.mjs';
 
 // What `pnpm pack` makes from agent main, cut down: plugins needs core and
 // agents, executor-local needs core and executors, providers needs core.
@@ -39,7 +39,19 @@ test('the closure follows main\'s own dependencies, and a package main dropped i
   assert.throws(() => closure(['@stratusagent/plugins', '@stratusagent/memory-sqlite'], PACKS), /agent main has no package @stratusagent\/memory-sqlite/);
 });
 
-test('a package is pointed at main: its own entries in place, everything they pull in through overrides', () => {
+test('main\'s copy is forced for every packed package; one the root names itself is a $ reference to that entry', () => {
+  assert.deepEqual(mainOverrides(['@stratusagent/core', '@stratusagent/plugins'], PACKS), {
+    '@stratusagent/agents': file('agents'),
+    '@stratusagent/cli': file('cli'),
+    '@stratusagent/core': '$@stratusagent/core',
+    '@stratusagent/executor-local': file('executor-local'),
+    '@stratusagent/executors': file('executors'),
+    '@stratusagent/plugins': '$@stratusagent/plugins',
+    '@stratusagent/providers': file('providers'),
+  });
+});
+
+test('a package is pointed at main: its own entries in place, every package forced to main\'s through overrides', () => {
   const pkg = {
     name: '@stratusagent/plugin-sandbox',
     dependencies: { '@stratusagent/executor-local': '^0.11.8', '@stratusagent/plugins': '^0.11.8', ajv: '^8.17.1' },
@@ -49,9 +61,11 @@ test('a package is pointed at main: its own entries in place, everything they pu
   const out = pointAtMain(pkg, PACKS);
   assert.deepEqual(out.dependencies, { '@stratusagent/executor-local': file('executor-local'), '@stratusagent/plugins': file('plugins'), ajv: '^8.17.1' });
   assert.deepEqual(out.devDependencies, { '@stratusagent/core': file('core') });
-  // core is a direct entry, so it is not overridden as well (npm refuses an
-  // override that disagrees with a direct dependency).
-  assert.deepEqual(out.overrides, { '@stratusagent/agents': file('agents'), '@stratusagent/executors': file('executors') });
+  // Direct entries are overridden by reference (npm refuses an override that
+  // disagrees with a direct dependency); the rest by file.
+  assert.deepEqual(out.overrides, mainOverrides(['@stratusagent/core', '@stratusagent/executor-local', '@stratusagent/plugins'], PACKS));
+  assert.equal(out.overrides['@stratusagent/core'], '$@stratusagent/core');
+  assert.equal(out.overrides['@stratusagent/agents'], file('agents'));
   assert.equal(pkg.dependencies['@stratusagent/plugins'], '^0.11.8', 'the original is left alone');
 });
 
@@ -72,12 +86,9 @@ test('the loader host installs the plugin beside main\'s core and plugins, and f
     '@stratusagent/core': file('core'),
     '@stratusagent/plugins': file('plugins'),
   });
-  assert.deepEqual(host.overrides, {
-    '@stratusagent/cli': file('cli'),
-    '@stratusagent/executor-local': file('executor-local'),
-    '@stratusagent/executors': file('executors'),
-    '@stratusagent/providers': file('providers'),
-  });
+  // Including core/plugins/agents by reference: a plugin asking for
+  // ^0.11.8 (sandbox) would otherwise get its own copies from npm.
+  assert.deepEqual(host.overrides, mainOverrides(['@stratusagent/agents', '@stratusagent/core', '@stratusagent/plugins'], PACKS));
   for (const name of HOST_PACKAGES) assert.ok(host.dependencies[name]);
   assert.equal(host.type, 'module');
 });
@@ -118,4 +129,24 @@ test('readPacks reads each tarball\'s name, version and @stratusagent run-time d
     dependencies: ['@stratusagent/core', '@stratusagent/agents'],
   });
   assert.deepEqual(packs.get('@stratusagent/core').dependencies, []);
+});
+
+test('a copy of a main package from anywhere but main\'s tarball is reported, wherever it is nested', () => {
+  const lock = {
+    packages: {
+      '': { name: 'agent-main-host' },
+      'node_modules/@stratusagent/core': { version: '0.13.6', resolved: 'file:../packs/stratusagent-core-0.13.6.tgz' },
+      'node_modules/@stratusagent/plugin-sandbox': { version: '0.1.0', resolved: 'file:stratusagent-plugin-sandbox-0.1.0.tgz' },
+      'node_modules/@stratusagent/plugin-sandbox/node_modules/@stratusagent/plugins': {
+        version: '0.11.10',
+        resolved: 'https://registry.npmjs.org/@stratusagent/plugins/-/plugins-0.11.10.tgz',
+      },
+      'node_modules/ajv': { version: '8.17.1', resolved: 'https://registry.npmjs.org/ajv/-/ajv-8.17.1.tgz' },
+    },
+  };
+  assert.deepEqual(strayCopies(lock, PACKS), [
+    'node_modules/@stratusagent/plugin-sandbox/node_modules/@stratusagent/plugins 0.11.10 from https://registry.npmjs.org/@stratusagent/plugins/-/plugins-0.11.10.tgz',
+  ]);
+  delete lock.packages['node_modules/@stratusagent/plugin-sandbox/node_modules/@stratusagent/plugins'];
+  assert.deepEqual(strayCopies(lock, PACKS), []);
 });

@@ -4,9 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Every package on every runner its "os" allows: weekly, and by hand from
+  # the Actions tab for a branch whose change is platform-specific.
+  schedule:
+    - cron: '41 9 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels the run it supersedes. Runs on main
+# are never cancelled.
+concurrency:
+  group: test-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   packages:
@@ -28,7 +39,7 @@ jobs:
         run: node --test .github/scripts/*.test.mjs
 
       # A pull request runs only the packages it touches (all of them when it
-      # changes .github/). macOS minutes cost more on a private repository.
+      # changes .github/).
       - name: Files this pull request changes
         if: github.event_name == 'pull_request'
         env:
@@ -36,13 +47,23 @@ jobs:
         # --no-renames: a file moved out of a package counts for that package too.
         run: git diff --name-only --no-renames "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/changed.txt"
 
+      # Pull requests and pushes run each package on one runner: Linux when its
+      # "os" allows it, so only a macOS-only package uses macOS. On a private
+      # repository macOS minutes count about 10 times Linux minutes. The
+      # weekly and manual runs, and the Release workflow, use every runner.
       - name: List packages and their runners
         id: list
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
+          case "$EVENT" in
+            schedule|workflow_dispatch) one= ;;
+            *) one=--one-runner ;;
+          esac
           if [ -f "$RUNNER_TEMP/changed.txt" ]; then
-            node .github/scripts/packages.mjs . --changed "$RUNNER_TEMP/changed.txt"
+            node .github/scripts/packages.mjs . --changed "$RUNNER_TEMP/changed.txt" $one
           else
-            node .github/scripts/packages.mjs .
+            node .github/scripts/packages.mjs . $one
           fi
 
   test:
@@ -73,3 +94,37 @@ jobs:
 
       - name: Test
         run: npm test
+
+  # Nobody watches a scheduled run, so a failing weekly run opens an issue (or
+  # comments on the open one) and the next passing one closes it.
+  report:
+    name: Report
+    needs: [packages, test]
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Weekly test on every runner is failing
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      LISTED: ${{ needs.packages.result }}
+      TESTED: ${{ needs.test.result }}
+    steps:
+      - name: Open, update or close the issue
+        run: |
+          open=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")
+          if [ "$LISTED" = success ] && [ "$TESTED" = success ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "Passing again on every runner at $GITHUB_SHA: $RUN"
+            fi
+            exit 0
+          fi
+          body="At least one package fails on one of its runners at $GITHUB_SHA (listing: $LISTED, tests: $TESTED). The failing jobs name the package and the runner: $RUN"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

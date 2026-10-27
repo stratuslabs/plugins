@@ -133,3 +133,23 @@ test('one runner per package: Linux where it can run there, macOS only for a pac
     { package: 'spawn', runner: 'ubuntu-latest' },
   ]);
 });
+
+test('one runner per package on a pull request: only the touched packages, macOS only where needed', () => {
+  const packages = { spawn: tested(), sandbox: tested({ os: ['darwin'] }), peer: tested() };
+  const { include, problems } = listPackages(repo(packages), {
+    changed: ['spawn/index.js', 'sandbox/index.js'],
+    oneRunner: true,
+  });
+  assert.deepEqual(problems, []);
+  assert.deepEqual(include, [
+    { package: 'sandbox', runner: 'macos-latest' },
+    { package: 'spawn', runner: 'ubuntu-latest' },
+  ]);
+  rmSync(root, { recursive: true, force: true });
+  // A change to CI itself runs every package, still on one runner each.
+  assert.deepEqual(listPackages(repo(packages), { changed: ['.github/workflows/test.yml'], oneRunner: true }).include, [
+    { package: 'peer', runner: 'ubuntu-latest' },
+    { package: 'sandbox', runner: 'macos-latest' },
+    { package: 'spawn', runner: 'ubuntu-latest' },
+  ]);
+});

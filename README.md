@@ -87,7 +87,14 @@ never changes a soul or a skill.
 
 ## Tested against agent main
 
-Pull requests test each package against the core packages on npm. The
+Pull requests test each package against the core packages on npm. Pull
+requests and pushes to main run each package on one runner, Linux when its
+`os` allows it, so only a macOS-only package uses macOS: on a private
+repository a macOS minute counts about 10 Linux minutes. Every package runs on every runner its `os` allows
+once a week, when a tag releases it, and when someone runs the
+[Test workflow](.github/workflows/test.yml) by hand from the Actions tab,
+which is worth doing on a branch whose change is platform-specific. A
+failing weekly run opens an issue here. The
 [Nightly workflow](.github/workflows/nightly.yml) also tests every package
 against [agent main](https://github.com/stratuslabs/agent), so a change there
 that breaks a plugin shows up before it's released. It builds and packs main,

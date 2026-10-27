@@ -10,7 +10,9 @@
 // Given the files a pull request changes, only the packages it touches run,
 // and every package runs when it changes CI itself (.github/). Pushes to
 // main run everything. Every package is still checked, touched or not.
-// --one-runner keeps one runner per package (the nightly run's choice).
+// --one-runner keeps one runner per package, Linux when it can run there:
+// pull requests, pushes to main and the nightly run use it. The weekly and
+// manual Test runs and the Release workflow leave it off.
 
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -53,8 +55,8 @@ export function packageRunners(dir, pkg) {
 
 /**
  * oneRunner: each package on one runner only, Linux when it can run there,
- * for the nightly run, which checks agent main rather than the platforms
- * (and macOS minutes cost more).
+ * since macOS minutes cost about 10 times Linux minutes on a private
+ * repository. Every runner is still covered weekly and at release.
  */
 export function listPackages(root, { changed, oneRunner = false } = {}) {
   const include = [];

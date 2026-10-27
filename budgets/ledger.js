@@ -57,14 +57,16 @@ const parseLine = (line) => {
 
 export class UsageLedger {
   /**
-   * @param {{ directory: () => string, now?: () => Date, warn?: (line: string) => void }} options
+   * @param {{ directory: () => string, now?: () => Date, warn?: (line: string) => void, writeSync?: typeof writeSync }} options
    *   `directory` is asked on every read and write, the way the host's
-   *   `PluginStateDirectory.prepare()` wants to be.
+   *   `PluginStateDirectory.prepare()` wants to be. `writeSync` is
+   *   `fs.writeSync`; a test passes one that stops short.
    */
-  constructor({ directory, now = () => new Date(), warn = () => {} }) {
+  constructor({ directory, now = () => new Date(), warn = () => {}, writeSync: writeBytes = writeSync }) {
     this.directory = directory;
     this.now = now;
     this.warn = warn;
+    this.writeBytes = writeBytes;
     this.month = undefined;
     this.reset(monthOf(now().toISOString()));
   }
@@ -163,10 +165,21 @@ export class UsageLedger {
     }
   }
 
+  /**
+   * Append one whole line, or throw. A full disk or a file size limit can
+   * make the write take only part of the line without an error, so a short
+   * count throws too. The rest is not written after it: another process's
+   * line could land in between. The piece left behind is a torn line, and
+   * the next line appended onto it is still read.
+   */
   append(month, text) {
+    const bytes = Buffer.from(text, 'utf8');
     const fd = openSync(this.fileFor(month), 'a', 0o600);
     try {
-      writeSync(fd, text);
+      const written = this.writeBytes(fd, bytes);
+      if (written !== bytes.length) {
+        throw new Error(`wrote ${written} of ${bytes.length} bytes of a ledger line; the disk or a file size limit may be full`);
+      }
       fsyncSync(fd);
     } finally {
       closeSync(fd);

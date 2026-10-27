@@ -128,8 +128,8 @@ call an agent's limits cover is refused until it can, with an error naming
 the directory. Usage that couldn't be written is kept in memory and written
 before the next call. An agent no limit covers isn't stopped.
 
-A line torn by a crash mid-write is skipped, the daemon log says so, and the
-line written after it is still read.
+A line torn by a crash mid-write, or cut short by a full disk, is skipped,
+the daemon log says so, and the line written after it is still read.
 
 ## What it doesn't do
 

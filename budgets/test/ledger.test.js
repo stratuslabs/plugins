@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, writeSync as realWriteSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -157,6 +157,30 @@ describe('UsageLedger', () => {
     appendFileSync(file, `${line.slice(20)}\n`);
     ledger.refresh();
     assert.equal(ledger.spend({ since: MONTH }), 9);
+  });
+
+  it('a write that stops short throws and counts nothing, and the line written after it is still read', () => {
+    // A full disk or a file size limit can make write(2) take only part of
+    // a line without an error; fs.writeSync then returns the bytes taken.
+    const directory = fresh();
+    let cut = 30;
+    const writeSync = (fd, text) => {
+      const bytes = Buffer.from(text);
+      return realWriteSync(fd, cut === undefined ? bytes : bytes.subarray(0, cut));
+    };
+    const ledger = open(directory, { writeSync });
+    assert.throws(() => ledger.record({ agentId: 'ava', sessionId: 's', record: call('a') }), /wrote 30 of \d+ bytes/);
+    assert.throws(() => ledger.reserve({ agentId: 'ava', sessionId: 's', provider: 'p' }), /wrote 30 of \d+ bytes/);
+    assert.equal(ledger.spend({ since: MONTH, reservePerCall: 1000 }), 0);
+    // The disk has room again and the caller writes the usage it kept.
+    cut = undefined;
+    ledger.record({ agentId: 'ava', sessionId: 's', record: call('a') });
+    assert.equal(ledger.spend({ since: MONTH, reservePerCall: 1000 }), 110);
+    const warnings = [];
+    const other = open(directory, { warn: (line) => warnings.push(line) });
+    other.refresh();
+    assert.equal(other.spend({ since: MONTH, reservePerCall: 1000 }), 110);
+    assert.equal(warnings.length, 1, warnings.join('\n'));
   });
 
   it('a write that cannot reach the disk throws, so the caller can refuse', { skip: process.getuid?.() === 0 }, () => {

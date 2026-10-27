@@ -1,0 +1,5 @@
+{
+  "@stratusagent/memory-sqlite": { "path": "{state}/memory.sqlite" },
+  "@stratusagent/plugin-a2ui": { "catalogs": [{ "path": "{package}/test/fixtures/basic_catalog.json" }] },
+  "@stratusagent/plugin-peer": { "self": "ava" }
+}

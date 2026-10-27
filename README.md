@@ -85,6 +85,31 @@ the shared contract in
 and read the key from the `search.apiKey` credential, so switching vendors
 never changes a soul or a skill.
 
+## Tested against agent main
+
+Pull requests test each package against the core packages on npm. The
+[Nightly workflow](.github/workflows/nightly.yml) also tests every package
+against [agent main](https://github.com/stratuslabs/agent), so a change there
+that breaks a plugin shows up before it's released. It builds and packs main,
+runs each package's tests with main's packages in place of npm's, then packs
+each plugin as npm would publish it and loads it by name through main's
+loader. A plugin passes only if it loads whole and registers everything its
+manifest declares. A failing scheduled run opens an issue here, and the next
+passing one closes it.
+
+A plugin whose config has required settings needs an entry in
+[`.github/scripts/load-config.json`](.github/scripts/load-config.json), or
+the loader refuses it. `{package}` in a value is the package's directory and
+`{state}` is a scratch directory. To run the check locally against a checkout
+of agent main:
+
+```sh
+# in the agent checkout, after pnpm install && pnpm build
+pnpm -r --filter './packages/*' pack --pack-destination /tmp/agent-main-packs
+# here
+node .github/scripts/agent-main.mjs <dir> --packs /tmp/agent-main-packs --work /tmp/agent-main-work
+```
+
 ## Releasing a plugin
 
 Each package has its own version and is released on its own. A release is

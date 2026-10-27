@@ -99,6 +99,15 @@ test('closing while Discord is unreachable stops reconnecting, so the process ca
   for (const result of abandoned) {
     assert.equal(result.out, 'given up\n', `connect() rejected with the signal's reason (delay ${result.delay}ms)`);
     assert.equal(result.exited, true, `the process exited on its own after giving up (delay ${result.delay}ms)`);
+    assert.equal(result.code, 0, `nothing crashed after giving up (delay ${result.delay}ms)`);
+  }
+  // Given up while the gateway socket is still opening: that socket's later
+  // failure must not reach the process as an unhandled 'error' event.
+  const held = await Promise.all([0, 50].map((delay) => run(delay, 'held')));
+  for (const result of held) {
+    assert.equal(result.out, 'given up\n', `connect() rejected with the signal's reason (held, delay ${result.delay}ms)`);
+    assert.equal(result.exited, true, `the process exited on its own (held, delay ${result.delay}ms)`);
+    assert.equal(result.code, 0, `the opening socket's failure didn't crash the process (held, delay ${result.delay}ms)`);
   }
 });
 

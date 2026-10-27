@@ -82,9 +82,12 @@ export const createPlugin = (config = {}) => {
           return;
         }
         if (!limited) return;
-        const spend = (since, forAgent) => ledger.spend({ since, agentId: forAgent, weights: budget.weights, reservePerCall: budget.reservePerCall });
-        const breach = findBreach(budget, agentId, spend, new Date());
+        const spendExcept = (except) => (since, forAgent) => ledger.spend({ since, agentId: forAgent, weights: budget.weights, reservePerCall: budget.reservePerCall, except });
+        const breach = findBreach(budget, agentId, spendExcept(undefined), new Date());
         if (breach) throw new BudgetExceededError(breach);
+        // Another process can be between its check and its reserve right
+        // now. Reserve first, then judge by what is above the reserve in the
+        // file: of two that checked at once, the earlier reserve goes ahead.
         let reserve;
         try {
           reserve = ledger.reserve({ agentId, sessionId, provider });
@@ -94,6 +97,20 @@ export const createPlugin = (config = {}) => {
         const reserves = open.get(sessionId) ?? [];
         reserves.push(reserve);
         open.set(sessionId, reserves);
+        try {
+          ledger.refresh({ through: reserve.id });
+        } catch (error) {
+          throw cannotWrite(error);
+        }
+        const lost = findBreach(budget, agentId, spendExcept(reserve.id), new Date());
+        if (lost) {
+          try {
+            settle(sessionId);
+          } catch {
+            // Still open; settled with this session's next call or event.
+          }
+          throw new BudgetExceededError(lost);
+        }
       });
 
       context.log?.(`${PACKAGE_NAME}: usage ledger in ${directory()}`);

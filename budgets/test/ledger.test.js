@@ -66,6 +66,23 @@ describe('UsageLedger', () => {
     assert.equal(restarted.spend({ since: DAY, reservePerCall: 500 }), 610);
   });
 
+  it('reads only through a given reserve when asked, leaves later lines for the next read, and can leave one reserve out of spend', () => {
+    const directory = fresh();
+    const a = open(directory);
+    const b = open(directory);
+    a.refresh();
+    b.refresh();
+    const mine = a.reserve({ agentId: 'ava', sessionId: 's1', provider: 'anthropic' });
+    const theirs = b.reserve({ agentId: 'bob', sessionId: 's2', provider: 'anthropic' });
+    a.refresh({ through: mine.id });
+    assert.equal(a.spend({ since: DAY, reservePerCall: 600, except: mine.id }), 0, 'their reserve is after mine in the file');
+    assert.equal(a.spend({ since: DAY, reservePerCall: 600 }), 600);
+    b.refresh({ through: theirs.id });
+    assert.equal(b.spend({ since: DAY, reservePerCall: 600, except: theirs.id }), 600, 'mine is before theirs');
+    a.refresh();
+    assert.equal(a.spend({ since: DAY, reservePerCall: 600 }), 1200, 'the next read takes the rest');
+  });
+
   it('a settle another process wrote releases the reserve here too', () => {
     const directory = fresh();
     const a = open(directory);

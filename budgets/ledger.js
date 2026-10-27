@@ -21,8 +21,13 @@ import { PACKAGE_NAME as PACKAGE_LABEL, foldAgentId, weightedTokens } from './bu
  * Every process that loads the plugin (the daemon, a `stratus run`) appends
  * to the same file and reads what the others wrote before each check, so a
  * limit holds across them. Lines are small single appends, so they arrive
- * whole; a line torn by a crash is skipped and reported, and the line
- * appended after it is still read.
+ * whole and in one order every process sees; a line torn by a crash is
+ * skipped and reported, and the line appended after it is still read.
+ *
+ * That order is the lock. A call's reserve is appended before its check is
+ * final, and the check counts only what is above it in the file
+ * (`refresh({ through })`, `spend({ except })`), so of two processes that
+ * check at the same moment the one whose reserve landed first goes ahead.
  */
 
 const LINE_VERSION = 1;
@@ -77,8 +82,14 @@ export class UsageLedger {
     return path.join(this.directory(), `usage-${month}.jsonl`);
   }
 
-  /** Read whatever every process has appended to this month's file since the last read. */
-  refresh() {
+  /**
+   * Read whatever every process has appended to this month's file since the
+   * last read. With `through`, stop after that reserve's line and leave the
+   * lines after it for the next read: the view is then the ledger as it
+   * stood when that reserve landed, which is what decides whether its call
+   * may go ahead.
+   */
+  refresh({ through } = {}) {
     const month = monthOf(this.now().toISOString());
     if (month !== this.month) this.reset(month);
     const file = this.fileFor(month);
@@ -104,16 +115,21 @@ export class UsageLedger {
     } finally {
       closeSync(fd);
     }
+    // A last line still being written waits for the next read.
     const end = bytes.lastIndexOf(NEWLINE) + 1;
     let skipped = 0;
-    for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+    let next = 0;
+    while (next < end) {
+      const newline = bytes.indexOf(NEWLINE, next);
+      const line = bytes.subarray(next, newline).toString('utf8');
+      next = newline + 1;
       if (line === '') continue;
       const entry = parseLine(line);
       if (entry === undefined || entry.torn) skipped += 1;
       if (entry !== undefined && !this.apply(entry.value)) skipped += 1;
+      if (through !== undefined && entry?.value?.type === 'reserve' && entry.value.id === through) break;
     }
-    // A last line still being written waits for the next read.
-    this.offset += end;
+    this.offset += next;
     if (skipped > 0) {
       this.warn(`${PACKAGE_LABEL}: skipped ${skipped} line${skipped === 1 ? '' : 's'} of ${file} that could not be read; a crash mid-write leaves one. Spend on them is not counted.`);
     }
@@ -167,14 +183,15 @@ export class UsageLedger {
 
   /**
    * Weighted spend since `since` (ISO), for one agent or the install: the
-   * usage recorded, plus `reservePerCall` for every reserve still open.
+   * usage recorded, plus `reservePerCall` for every reserve still open
+   * other than `except`, the caller's own.
    */
-  spend({ since, agentId, weights = {}, reservePerCall = 0 }) {
+  spend({ since, agentId, weights = {}, reservePerCall = 0, except }) {
     const agentKey = agentId === undefined ? undefined : foldAgentId(agentId);
     const counts = (row) => row.at >= since && (agentKey === undefined || row.agentKey === agentKey);
     let total = 0;
     for (const row of this.usage.values()) if (counts(row)) total += weightedTokens(row.usage, weights);
-    for (const row of this.reserves.values()) if (row.open && counts(row)) total += reservePerCall;
+    for (const [id, row] of this.reserves) if (row.open && id !== except && counts(row)) total += reservePerCall;
     return total;
   }
 

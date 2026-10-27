@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -12,14 +12,14 @@ import { UsageLedger } from '../ledger.js';
 const fresh = () => mkdtempSync(path.join(tmpdir(), 'budgets-plugin-'));
 
 /** The seams the daemon hands a plugin, over a temp directory. */
-const host = async (config, { directory = fresh(), omit = [] } = {}) => {
+const host = async (config, { directory = fresh(), omit = [], prepare = () => directory } = {}) => {
   const bus = new EventBus();
   const guards = [];
   const context = {
     bus,
     tools: undefined,
     providerCalls: { register: (guard) => guards.push(guard) },
-    stateDirectory: { prepare: () => directory },
+    stateDirectory: { prepare },
     log: () => {},
     warn: () => {},
   };
@@ -35,6 +35,12 @@ const host = async (config, { directory = fresh(), omit = [] } = {}) => {
   });
   return { plugin, bus, guards, ask, spent, directory };
 };
+
+/** True when the call went ahead, false when the budget refused it. */
+const allowed = (promise) => promise.then(() => true, (error) => {
+  if (!(error instanceof HostRefusalError)) throw error;
+  return false;
+});
 
 const refused = async (promise, pattern) => {
   await assert.rejects(promise, (error) => {
@@ -77,6 +83,54 @@ describe('budgets plugin', () => {
     const { ask } = await host({ home: { daily: 600 }, reservePerCall: 600 });
     await ask('ava', 's1');
     await refused(ask('bob', 's2'), /^This Stratus install has used its daily model budget \(600 of 600/);
+  });
+
+  it('lets exactly one of two processes through when both check the last of a limit at once', async () => {
+    // Process B makes its whole check at each point inside A's, the way the
+    // daemon and a `stratus run` can interleave on one ledger.
+    const config = { home: { daily: 600 }, reservePerCall: 600 };
+    for (let point = 1; point <= 5; point += 1) {
+      const directory = fresh();
+      const b = await host(config, { directory });
+      let calls = 0;
+      let bAllowed;
+      const a = await host(config, {
+        directory,
+        prepare: () => {
+          calls += 1;
+          if (calls === point && bAllowed === undefined) bAllowed = allowed(b.ask('bob', 's-b'));
+          return directory;
+        },
+      });
+      calls = 0;
+      const aAllowed = await allowed(a.ask('ava', 's-a'));
+      bAllowed = await (bAllowed ?? allowed(b.ask('bob', 's-b')));
+      assert.equal([aAllowed, bAllowed].filter(Boolean).length, 1, `B checking at A's directory read ${point}: A ${aAllowed}, B ${bAllowed}`);
+      const after = new UsageLedger({ directory: () => directory });
+      after.refresh();
+      assert.equal(after.spend({ since: '1970-01-01T00:00:00.000Z', reservePerCall: 600 }), 600, `only the call that went ahead holds a reserve (point ${point})`);
+    }
+  });
+
+  it('goes ahead when another process\'s reserve lands just after its own, because that process sees this one first', async () => {
+    const directory = fresh();
+    const other = new UsageLedger({ directory: () => directory });
+    const lines = () => readdirSync(directory).flatMap((file) => readFileSync(path.join(directory, file), 'utf8').trim().split('\n')).filter(Boolean).map((line) => JSON.parse(line));
+    let theirs;
+    const a = await host({ home: { daily: 600 }, reservePerCall: 600 }, {
+      directory,
+      prepare: () => {
+        // The other process checked before our reserve, and its reserve
+        // lands as soon as ours is in the file.
+        if (theirs === undefined && lines().some((line) => line.type === 'reserve' && line.agentId === 'ava')) {
+          theirs = other.reserve({ agentId: 'bob', sessionId: 's-b', provider: 'anthropic' });
+        }
+        return directory;
+      },
+    });
+    await a.ask('ava', 's-a');
+    assert.ok(theirs, 'the other reserve was written');
+    assert.deepEqual(lines().filter((line) => line.type === 'reserve').map((line) => line.agentId), ['ava', 'bob']);
   });
 
   it('settles the reserve with the call\'s usage, a stopped or parked turn, or the session\'s next call', async () => {

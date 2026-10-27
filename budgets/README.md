@@ -105,7 +105,10 @@ jq -s 'map(select(.type=="usage")) | group_by(.agentId)
 
 The daemon and every `stratus run` that loads the plugin write to the same
 file and read each other's lines before every check, so one limit holds
-across them.
+across them. When two of them check the last of a limit at the same moment,
+each writes its reserve first and reads the file again, and the one whose
+reserve landed first goes ahead. The other closes its reserve at nothing and
+refuses. There is no lock file to leave behind.
 
 ## Reserves, and what a crash costs
 

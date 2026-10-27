@@ -16,7 +16,9 @@ credentials: [openai.apiKey]
 It used to ship from the [agent repository](https://github.com/stratuslabs/agent)
 in lockstep with the CLI (up to 0.13.x). From 0.14.0 it releases from here, on
 its own version, under the same name, so an existing install keeps updating
-with `stratus update`.
+with `stratus update`. One change in 0.14.0: a blank `baseUrl` is refused at
+load instead of being read as the OpenAI API, so a config with
+`"baseUrl": ""` needs the endpoint filled in or the key removed.
 
 ## Install and enable
 

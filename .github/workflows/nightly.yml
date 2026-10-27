@@ -1,0 +1,149 @@
+name: Nightly against agent main
+
+# The Test workflow checks every plugin against the core packages already on
+# npm. This one checks them against stratuslabs/agent main, so a change there
+# that breaks a plugin shows up before it is released, not after. Each
+# package's tests run against main's packages, and each plugin is loaded
+# through main's loader (.github/scripts/agent-main.mjs).
+#
+# A scheduled run that fails opens an issue here, or comments on the one
+# already open; the next scheduled run that passes closes it.
+
+on:
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+  # A pull request that changes this check runs it too, so it is tested
+  # before it is trusted. Only a scheduled run reports.
+  pull_request:
+    paths:
+      - .github/workflows/nightly.yml
+      - .github/scripts/agent-main.mjs
+      - .github/scripts/load-plugin.mjs
+      - .github/scripts/load-config.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-agent-main
+  cancel-in-progress: false
+
+jobs:
+  agent-main:
+    name: Pack agent main
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pack.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: stratuslabs/agent
+          ref: main
+          path: agent
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: agent/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build
+        working-directory: agent
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Pack every package
+        id: pack
+        working-directory: agent
+        run: |
+          mkdir -p "$RUNNER_TEMP/packs"
+          pnpm -r --filter './packages/*' pack --pack-destination "$RUNNER_TEMP/packs"
+          ls "$RUNNER_TEMP/packs"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-main-packs
+          path: ${{ runner.temp }}/packs/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  packages:
+    name: List packages
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: List packages and their runners
+        id: list
+        # One runner each: this checks agent main, not the platforms.
+        run: node .github/scripts/packages.mjs . --one-runner
+
+  test:
+    name: ${{ matrix.package }} (${{ matrix.runner }})
+    needs: [agent-main, packages]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.packages.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-main-packs
+          path: ${{ runner.temp }}/packs
+
+      - name: Test and load against agent main ${{ needs.agent-main.outputs.sha }}
+        run: node .github/scripts/agent-main.mjs "${{ matrix.package }}" --packs "$RUNNER_TEMP/packs" --work "$RUNNER_TEMP/work"
+
+  report:
+    name: Report
+    needs: [agent-main, test]
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Nightly against agent main is failing
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SHA: ${{ needs.agent-main.outputs.sha }}
+      PACKED: ${{ needs.agent-main.result }}
+      TESTED: ${{ needs.test.result }}
+    steps:
+      - name: Open, update or close the issue
+        run: |
+          open=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")
+          if [ "$PACKED" = success ] && [ "$TESTED" = success ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "Passing again against agent main ${SHA:-(unknown)}: $RUN"
+            fi
+            exit 0
+          fi
+          if [ "$PACKED" != success ]; then
+            body="Agent main didn't build or pack ($PACKED), so no plugin was checked: $RUN"
+          else
+            body="At least one plugin fails against agent main $SHA ($TESTED). The failing jobs name the package and the check: $RUN"
+          fi
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi

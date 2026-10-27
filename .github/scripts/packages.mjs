@@ -10,6 +10,7 @@
 // Given the files a pull request changes, only the packages it touches run,
 // and every package runs when it changes CI itself (.github/). Pushes to
 // main run everything. Every package is still checked, touched or not.
+// --one-runner keeps one runner per package (the nightly run's choice).
 
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,7 +51,12 @@ export function packageRunners(dir, pkg) {
   return { runners };
 }
 
-export function listPackages(root, { changed } = {}) {
+/**
+ * oneRunner: each package on one runner only, Linux when it can run there,
+ * for the nightly run, which checks agent main rather than the platforms
+ * (and macOS minutes cost more).
+ */
+export function listPackages(root, { changed, oneRunner = false } = {}) {
   const include = [];
   const problems = [];
   const dirs = readdirSync(root, { withFileTypes: true })
@@ -65,7 +71,8 @@ export function listPackages(root, { changed } = {}) {
       problems.push(problem);
       continue;
     }
-    for (const runner of runners) include.push({ package: dir, runner });
+    const picked = oneRunner ? [runners.includes(RUNNERS.linux) ? RUNNERS.linux : runners[0]] : runners;
+    for (const runner of picked) include.push({ package: dir, runner });
   }
   if (problems.length === 0 && include.length === 0) problems.push('no packages found');
   if (changed === undefined || changed.some((file) => file.startsWith('.github/'))) return { include, problems };
@@ -83,7 +90,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     ? undefined
     : readFileSync(changedFile, 'utf8').split('\n').map((line) => line.trim()).filter(Boolean);
   const root = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.';
-  const { include, problems } = listPackages(root, { changed });
+  const { include, problems } = listPackages(root, { changed, oneRunner: process.argv.includes('--one-runner') });
   if (problems.length > 0) {
     for (const problem of problems) console.error(problem);
     process.exit(1);

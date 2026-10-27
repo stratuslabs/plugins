@@ -37,26 +37,55 @@ export const isRetryable = (error) => {
  * a no-op first, then the manager is destroyed, then any attempt that was
  * already underway is destroyed too.
  *
+ * Destroying a shard whose socket is still opening clears the socket's
+ * error handler but leaves it opening. When that socket later fails (refused,
+ * reset, timed out), the error has no listener and crashes the process. So
+ * every socket a shard holds gets a listener of its own before it is
+ * destroyed, and one still opening at the end is terminated.
+ *
  * This reaches into the library (`strategy.shards`, `internalConnect`,
- * `status`), which is why the dependency is pinned; the "closing while
- * Discord is unreachable" test fails if a new version moves them.
+ * `status`, `connection`), which is why the dependency is pinned; the
+ * "closing while Discord is unreachable" test fails if a new version moves
+ * them.
  */
 const IDLE = 0;
+const OPENING = 0;
 export const stopManager = async (manager, options) => {
   const shards = [...(manager.strategy?.shards?.values() ?? [])];
+  const sockets = new Set();
+  const hold = () => {
+    for (const shard of shards) {
+      const socket = shard.connection;
+      if (socket && !sockets.has(socket)) {
+        sockets.add(socket);
+        socket.addEventListener?.('error', () => {});
+      }
+    }
+  };
   for (const shard of shards) {
     shard.internalConnect = async () => {};
   }
-  await manager.destroy(options);
-  // An attempt already past internalConnect's first line only gets as far
-  // as Connecting, within microtasks; a turn of the event loop shows it.
-  for (let pass = 0; pass < 10; pass += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-    const live = shards.filter((shard) => shard.status !== IDLE);
-    if (live.length === 0) {
-      return;
+  hold();
+  try {
+    await manager.destroy(options);
+    hold();
+    // An attempt already past internalConnect's first line only gets as far
+    // as Connecting, within microtasks; a turn of the event loop shows it.
+    for (let pass = 0; pass < 10; pass += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+      hold();
+      const live = shards.filter((shard) => shard.status !== IDLE);
+      if (live.length === 0) {
+        return;
+      }
+      await Promise.all(live.map((shard) => shard.destroy(options).catch(() => {})));
     }
-    await Promise.all(live.map((shard) => shard.destroy(options).catch(() => {})));
+  } finally {
+    for (const socket of sockets) {
+      if (socket.readyState === OPENING) {
+        socket.terminate?.();
+      }
+    }
   }
 };
 

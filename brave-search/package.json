@@ -4,10 +4,19 @@
   "description": "web.search through the Brave Search API, behind the shared @stratusagent/search contract, so another backend can replace it with no soul edit.",
   "type": "module",
   "exports": "./index.js",
-  "files": ["index.js", "README.md"],
+  "files": [
+    "index.js",
+    "README.md"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "brave-search" },
-  "engines": { "node": ">=22" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "brave-search"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test test/*.test.js"
   },
@@ -16,20 +25,37 @@
     "@stratusagent/search": "^0.13.6"
   },
   "devDependencies": {
+    "@stratusagent/core": "^0.13.6",
     "@stratusagent/plugins": "^0.13.6"
   },
   "stratus": {
     "pluginVersion": 1,
     "contributes": {
-      "tools": [{ "name": "web.search", "risk": "safe" }]
+      "tools": [
+        {
+          "name": "web.search",
+          "risk": "safe"
+        }
+      ]
     },
-    "credentials": ["search.apiKey"],
+    "credentials": [
+      "search.apiKey"
+    ],
     "config": {
       "type": "object",
       "properties": {
-        "maxSearchesPerDay": { "type": "integer" },
-        "allowedHosts": { "type": "array", "items": { "type": "string" } },
-        "allowPrivateAddresses": { "type": "boolean" }
+        "maxSearchesPerDay": {
+          "type": "integer"
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowPrivateAddresses": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     }

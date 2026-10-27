@@ -1,11 +1,15 @@
 {
   "name": "@stratusagent/plugin-discord",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "Discord channel for Stratus: each agent answers as its own bot in DMs and allowlisted guild channels.",
   "type": "module",
   "exports": "./index.js",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "discord"
+  },
   "engines": {
     "node": ">=22"
   },

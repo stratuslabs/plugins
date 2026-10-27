@@ -119,3 +119,17 @@ test('a repository with no packages fails the listing', () => {
   const { problems } = listPackages(repo({ docs: null }));
   assert.deepEqual(problems, ['no packages found']);
 });
+
+test('one runner per package: Linux where it can run there, macOS only for a package that needs it', () => {
+  const { include, problems } = listPackages(repo({
+    spawn: tested(),
+    sandbox: tested({ os: ['darwin'] }),
+    server: tested({ os: ['linux'] }),
+  }), { oneRunner: true });
+  assert.deepEqual(problems, []);
+  assert.deepEqual(include, [
+    { package: 'sandbox', runner: 'macos-latest' },
+    { package: 'server', runner: 'ubuntu-latest' },
+    { package: 'spawn', runner: 'ubuntu-latest' },
+  ]);
+});

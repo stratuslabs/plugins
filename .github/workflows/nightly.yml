@@ -86,7 +86,8 @@ jobs:
 
       - name: List packages and their runners
         id: list
-        run: node .github/scripts/packages.mjs .
+        # One runner each: this checks agent main, not the platforms.
+        run: node .github/scripts/packages.mjs . --one-runner
 
   test:
     name: ${{ matrix.package }} (${{ matrix.runner }})

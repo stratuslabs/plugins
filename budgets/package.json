@@ -1,0 +1,62 @@
+{
+  "name": "@stratusagent/plugin-budgets",
+  "version": "0.1.0",
+  "description": "Token budgets per UTC day and month, for the install and each agent, checked before every model call, with a usage ledger of every call.",
+  "type": "module",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "budget.js",
+    "ledger.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "budgets"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@stratusagent/core": "^0.13.7"
+  },
+  "devDependencies": {
+    "@stratusagent/plugins": "^0.13.7"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {},
+    "config": {
+      "type": "object",
+      "properties": {
+        "home": {
+          "type": "object",
+          "properties": {
+            "daily": { "type": "integer" },
+            "monthly": { "type": "integer" }
+          },
+          "additionalProperties": false
+        },
+        "daily": { "type": "integer" },
+        "monthly": { "type": "integer" },
+        "weights": {
+          "type": "object",
+          "properties": {
+            "inputTokens": { "type": "number" },
+            "outputTokens": { "type": "number" },
+            "cacheReadTokens": { "type": "number" },
+            "cacheWriteTokens": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "reservePerCall": { "type": "integer" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -79,7 +79,7 @@ describe('budgets plugin', () => {
     await refused(ask('bob', 's2'), /^This Stratus install has used its daily model budget \(600 of 600/);
   });
 
-  it('settles the reserve with the call\'s usage, a failed turn, or the session\'s next call', async () => {
+  it('settles the reserve with the call\'s usage, a stopped or parked turn, or the session\'s next call', async () => {
     // Any reserve left open other than the asker's own reaches this limit.
     const { ask, spent, bus } = await host({ home: { daily: 600 }, reservePerCall: 600 });
     await ask('ava', 's1');
@@ -90,6 +90,10 @@ describe('budgets plugin', () => {
     await ask('ava', 's3');
     await bus.emit({ type: 'session.completed', sessionId: 's3', agentId: 'ava', output: '' });
     await ask('cal', 's4');
+    await bus.emit({ type: 'session.updated', sessionId: 's4', status: 'running' });
+    await refused(ask('dee', 's5'), /610 of 600/);
+    await bus.emit({ type: 'session.updated', sessionId: 's4', status: 'pending_approval' });
+    await ask('dee', 's5');
   });
 
   it('charges a reserve a crashed process left open, so a restart cannot spend it again', async () => {
@@ -123,7 +127,7 @@ describe('budgets plugin', () => {
     await ask('ava');
   });
 
-  it('keeps usage it could not write, counts it, and refuses a covered call until it is written', { skip: process.getuid?.() === 0 }, async () => {
+  it('keeps usage it could not write, refuses a covered call until it is written, then writes it first', { skip: process.getuid?.() === 0 }, async () => {
     const directory = fresh();
     const { ask, spent } = await host({ daily: 100, reservePerCall: 0 }, { directory });
     await ask('ava');
@@ -131,11 +135,14 @@ describe('budgets plugin', () => {
     chmodSync(path.join(directory, file), 0o400);
     try {
       await spent('ava', 's-ava', 30, 'u1');
-      await assert.rejects(ask('ava'), /could not write/);
+      await assert.rejects(ask('ava', 's-other'), /could not write/);
     } finally {
       chmodSync(path.join(directory, file), 0o600);
     }
-    await ask('ava');
+    await ask('ava', 's-other');
+    const onDisk = new UsageLedger({ directory: () => directory });
+    onDisk.refresh();
+    assert.equal(onDisk.spend({ since: '1970-01-01T00:00:00.000Z' }), 30, 'the guard wrote the kept usage before allowing the call');
     await spent('ava', 's-ava', 70, 'u2');
     await refused(ask('ava'), /100 of 100/);
   });

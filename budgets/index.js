@@ -56,10 +56,12 @@ export const createPlugin = (config = {}) => {
       unsubscribe = context.bus.subscribe((event) => {
         if (event.type === 'session.usage') {
           for (const record of event.records) unwritten.push({ agentId: event.agentId, sessionId: event.sessionId, record });
-        } else if (event.type !== 'session.completed' && event.type !== 'session.failed') {
+        } else if (!(event.type === 'session.updated' && event.status !== 'running')
+          && event.type !== 'session.completed' && event.type !== 'session.failed') {
           return;
         }
-        // The call's usage is in (or the turn is over), so its reserve is done.
+        // The call's usage is in, or the turn has stopped (done, failed,
+        // cancelled, or parked for an approval), so its reserve is done.
         try {
           flush();
           settle(event.sessionId);

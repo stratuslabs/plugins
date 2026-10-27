@@ -16,9 +16,12 @@ agent's core any bigger.
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
 | [`plugin-budgets`](./budgets) | Token budgets per UTC day and month, for the install and each agent, checked before every model call, plus a ledger of every call's usage | Needs Stratus 0.13.7 or later. Tokens, not money |
+| [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
 
 Each is released to npm as `@stratusagent/plugin-<name>` from the directory
 of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).
+A package that moved here from the agent repository keeps its npm name, so
+`provider-openai` is still `@stratusagent/provider-openai`.
 Each directory's README covers setup and configuration.
 
 [`index`](./index) isn't a plugin. It's the curated list `stratus setup`
@@ -114,6 +117,12 @@ package needs this once:
   add GitHub Actions: organization `stratuslabs`, repository `plugins`,
   workflow `release.yml`, environment `release`, allowed action stage publish
   only. Then set the package to disallow publishing with tokens.
+- **A package that moved here from the agent repository** is already on npm,
+  so it skips the hand-staged first release. Its first tag here must be a
+  version above the last one the agent repository published (`stratus update`
+  only moves a plugin to a newer release, so a lower one would never reach an
+  existing install), and its Trusted publishing settings need this
+  repository's entry, as above.
 
 ## Built into the agent
 

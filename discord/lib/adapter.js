@@ -507,8 +507,10 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
 
     if (entry.halted) {
       // Settled after stop() gave up waiting: this channel has stopped, so
-      // nothing is posted and the message stays held. The next start reads
-      // it again, and the gateway repeats the finished turn's reply.
+      // nothing is posted and the message stays held. With a state
+      // directory the next start reads it again, and the gateway repeats
+      // the finished turn's reply; without one it goes unanswered, as
+      // stop() warned.
       return 'kept';
     }
     if (entry.stoppedBy !== undefined) {
@@ -702,7 +704,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       if (stateDirectory) {
         positions.load();
       } else {
-        warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down will not be answered when it is back.');
+        warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down, or still being answered when it stops, will not be answered when it is back.');
       }
       const roster = new Set(host.agents().map((agent) => agent.id));
       const attempts = [];
@@ -743,14 +745,18 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       if (!drained) {
         // What is left stays as it is in Discord; its typing stops, and
         // nothing more is sent for it from a channel that has stopped. Its
-        // message stays held, so the next start answers it.
+        // message stays held, so the next start answers it, when there is
+        // a state directory to read it again from.
         for (const queue of renderers.values()) {
           for (const entry of queue) {
             entry.halted = true;
             entry.renderer.halt();
           }
         }
-        warn(`discord: stopped with ${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'} unfinished after ${drainTimeoutMs}ms`);
+        const unfinished = `${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'}`;
+        warn(stateDirectory
+          ? `discord: stopped with ${unfinished} unfinished after ${drainTimeoutMs}ms; held for the next start to answer`
+          : `discord: stopped with ${unfinished} unfinished after ${drainTimeoutMs}ms; this host gives plugins no state directory, so ${inFlight.size === 1 ? 'it' : 'they'} will not be answered`);
       }
       positions.flush();
       unsubscribe?.();

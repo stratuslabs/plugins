@@ -75,8 +75,10 @@ either place fails the load with its name.
   is out, and one that reached a daemon on its way down is told so and
   kept. A turn still running when the channel stops gives up its reply
   there: nothing more is posted for it, and the next start answers it from
-  the session. Only conversations the agent has answered in are read,
-  back at most a day and 200 messages each.
+  the session. A host that gives plugins no state directory keeps no read
+  position, so neither kind is answered later, and the plugin warns that
+  it isn't. Only conversations the agent has answered in are read, back at
+  most a day and 200 messages each.
 
 - Attachments sent to the agent: an image the model can take (PNG, JPEG,
   GIF, WebP, within core's size, pixel and count limits) goes with the

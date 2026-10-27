@@ -1,0 +1,24 @@
+{
+  "name": "@stratusagent/plugin-fleet",
+  "version": "0.1.0",
+  "description": "fleet.*: read-only tools for an agent that reports on a Stratus fleet: agents, sessions, schedules, waiting approvals.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "fleet" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        { "name": "fleet.agents", "risk": "safe" },
+        { "name": "fleet.sessions", "risk": "safe" },
+        { "name": "fleet.schedules", "risk": "safe" },
+        { "name": "fleet.approvals", "risk": "safe" }
+      ]
+    }
+  }
+}

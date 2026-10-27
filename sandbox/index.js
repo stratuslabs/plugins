@@ -1,4 +1,4 @@
-import { spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process';
 import { mkdirSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -78,6 +78,35 @@ const real = (target) => {
   }
 };
 
+/**
+ * The Xcode bundle a command's tools come from, when the active developer
+ * directory is inside one. /usr/bin/git, clang, make and the other shims run
+ * xcrun, which loads its library from that directory, and Xcode can be
+ * installed under any name (Xcode_26.6.app on GitHub's macOS runners,
+ * Xcode-beta.app). The bundle is read-only, like the rest of the system.
+ * Command Line Tools live under /Library, which is already readable, so
+ * nothing is added for them, or for a directory that isn't a bundle's
+ * Contents/Developer.
+ */
+export const toolchainReads = (developerDir) => {
+  if (typeof developerDir !== 'string') return [];
+  const dir = developerDir.trim();
+  if (!path.isAbsolute(dir)) return [];
+  // The bundle whose Contents/Developer this is (or the bundle itself), so
+  // never an outer package Xcode happens to sit in.
+  const bundle = /^(\/.*\.app)(?:\/Contents\/Developer(?:\/.*)?)?$/.exec(real(dir));
+  return bundle ? [bundle[1]] : [];
+};
+
+/** Where xcode-select points (DEVELOPER_DIR included), or nothing if it can't say. */
+const activeDeveloperDir = () => {
+  try {
+    return execFileSync('/usr/bin/xcode-select', ['-p'], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return undefined;
+  }
+};
+
 const strings = (value) => (Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : []);
 
 const expandHome = (target, home) => (target === '~' ? home : target.startsWith('~/') ? path.join(home, target.slice(2)) : target);
@@ -87,9 +116,9 @@ const expandHome = (target, home) => (target === '~' ? home : target.startsWith(
  * programs, reading the system and the listed paths, writing the workspace
  * and its temporary directory, and (unless turned off) the network.
  */
-export const sandboxProfile = ({ write, read, network }) => {
+export const sandboxProfile = ({ write, read, network, toolchains = [] }) => {
   const mach = [...MACH_SERVICES, ...(network ? NETWORK_MACH_SERVICES : [])];
-  const readRules = [...SYSTEM_READ, ...read, ...write].map((target) => `(subpath ${sbplString(target)})`).join(' ');
+  const readRules = [...SYSTEM_READ, ...toolchains, ...read, ...write].map((target) => `(subpath ${sbplString(target)})`).join(' ');
   const writeRules = write.map((target) => `(subpath ${sbplString(target)})`).join(' ');
   return [
     '(version 1)',
@@ -174,7 +203,7 @@ export const sandboxSettings = (config, agentId, workspace, cwd, home = os.homed
   };
 };
 
-export const createPlugin = (config = {}) => ({
+export const createPlugin = (config = {}, { developerDir = activeDeveloperDir, spawn = nodeSpawn } = {}) => ({
   name: '@stratusagent/plugin-sandbox',
   setup(context) {
     if (process.platform !== 'darwin') {
@@ -187,6 +216,8 @@ export const createPlugin = (config = {}) => ({
       throw new Error('This host hands plugins no executor handle, so @stratusagent/plugin-sandbox cannot register one.');
     }
     const workspaces = context.workspaces;
+    // Read once: switching Xcode with xcode-select takes a daemon restart.
+    const toolchains = toolchainReads(developerDir());
     const spawnFor = (settings) => (command, args, options) => {
       if (!settings.workspace) {
         // No workspace was named for this agent: refuse rather than guess
@@ -197,8 +228,8 @@ export const createPlugin = (config = {}) => ({
       // than to a shared directory, which isn't.
       const tmp = path.join(settings.workspace, '.tmp');
       mkdirSync(tmp, { recursive: true });
-      const profile = sandboxProfile(settings);
-      return nodeSpawn(SANDBOX_EXEC, ['-p', profile, command, ...args], {
+      const profile = sandboxProfile({ ...settings, toolchains });
+      return spawn(SANDBOX_EXEC, ['-p', profile, command, ...args], {
         ...options,
         env: { ...(options.env ?? {}), TMPDIR: tmp },
       });

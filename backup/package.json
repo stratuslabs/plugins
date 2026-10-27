@@ -13,6 +13,7 @@
     "README.md"
   ],
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "backup" },
   "engines": {
     "node": ">=22.13"
   },

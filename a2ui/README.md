@@ -49,6 +49,11 @@ validation error as a JSON string, so the model can fix its own output:
   nested in another call's args) must name a function the catalog defines, or
   the `@index` system function, and match that function's own schema. A call
   may not name a different catalog.
+- `@index` is only accepted inside a list template: in the component a
+  `ChildList` template names, or under it. It is refused in a component this
+  call's own components reach from `root` without going through a template.
+  In an update, a component whose place isn't known from the call may sit
+  under a template already on the device, so it is accepted.
 - One call is one surface. `createSurface` must come first and name the
   call's `catalogId`. Nothing may follow `deleteSurface`. A component may not
   name a different catalog.

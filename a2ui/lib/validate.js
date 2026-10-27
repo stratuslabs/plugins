@@ -101,7 +101,7 @@ const childReferences = (component, slots) => {
       } else if (kind === 'list' && Array.isArray(value)) {
         value.forEach((id, index) => typeof id === 'string' && found.push({ id, at: `${at}/${index}` }));
       } else if (kind === 'list' && isObject(value) && typeof value.componentId === 'string') {
-        found.push({ id: value.componentId, at: `${at}/componentId` });
+        found.push({ id: value.componentId, at: `${at}/componentId`, template: true });
       }
       return;
     }
@@ -522,28 +522,94 @@ const checkTree = (compiled, tree, { surfaceId, complete }) => {
   const DONE = 2;
   const ACTIVE = 1;
   const state = new Map();
-  const visit = (id) => {
-    state.set(id, ACTIVE);
-    for (const reference of edges.get(id) ?? []) {
+  // Depth first with an explicit stack: a flat list within the byte limit
+  // can chain thousands of components, too deep for recursion.
+  const visit = (start) => {
+    state.set(start, ACTIVE);
+    const stack = [{ id: start, next: 0 }];
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const references = edges.get(frame.id) ?? [];
+      if (frame.next === references.length) {
+        state.set(frame.id, DONE);
+        stack.pop();
+        continue;
+      }
+      const reference = references[frame.next];
+      frame.next += 1;
       if (!tree.has(reference.id)) {
         continue;
       }
       if (state.get(reference.id) === ACTIVE) {
         throw new A2uiValidationError({
           surfaceId,
-          path: `${tree.get(id).at}${reference.at}`,
-          message: `"${id}" refers to "${reference.id}", which contains "${id}": the tree has a cycle.`,
+          path: `${tree.get(frame.id).at}${reference.at}`,
+          message: `"${frame.id}" refers to "${reference.id}", which contains "${frame.id}": the tree has a cycle.`,
         });
       }
       if (state.get(reference.id) !== DONE) {
-        visit(reference.id);
+        state.set(reference.id, ACTIVE);
+        stack.push({ id: reference.id, next: 0 });
       }
     }
-    state.set(id, DONE);
   };
   for (const id of tree.keys()) {
     if (!state.has(id)) {
       visit(id);
     }
   }
+
+  // @index has a value only while a list template is evaluated: in the
+  // component a template names, and under it. It is refused in a component
+  // this call's own components render outside one: reachable from root
+  // without passing through a template. Any other component may sit under
+  // a template already on the device.
+  const outside = new Set();
+  const queue = ['root'];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (outside.has(id) || !tree.has(id)) {
+      continue;
+    }
+    outside.add(id);
+    for (const reference of edges.get(id) ?? []) {
+      if (!reference.template) {
+        queue.push(reference.id);
+      }
+    }
+  }
+  for (const [id, { component, at }] of tree) {
+    if (!outside.has(id)) {
+      continue;
+    }
+    const call = indexCallIn(component);
+    if (call !== undefined) {
+      throw new A2uiValidationError({
+        surfaceId,
+        path: `${at}${call}`,
+        message: `${component.component} "${id}": @index is the item's position in a list template, and this component is not in one. Use it in the component a ChildList template names ({ "componentId", "path" }) or in a component under it.`,
+      });
+    }
+  }
+};
+
+/** The pointer, relative to `value`, of the first `@index` call in it, nested calls included. */
+const indexCallIn = (value) => {
+  const stack = [{ value, at: '' }];
+  while (stack.length > 0) {
+    const { value: here, at } = stack.pop();
+    if (Array.isArray(here)) {
+      for (let index = here.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: here[index], at: `${at}/${index}` });
+      }
+    } else if (isObject(here)) {
+      if (here['@call'] === SYSTEM_INDEX_FUNCTION) {
+        return at;
+      }
+      for (const key of Object.keys(here).reverse()) {
+        stack.push({ value: here[key], at: `${at}${pointer(key)}` });
+      }
+    }
+  }
+  return undefined;
 };

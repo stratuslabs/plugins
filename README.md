@@ -9,13 +9,25 @@ agent's core any bigger.
 | Package | What it adds | Notes |
 | --- | --- | --- |
 | [`plugin-spawn`](./spawn) | `agent.spawn`: run several tasks at once in short-lived sub-agents, each with only the tools you hand it | Each sub-agent's calls are judged again |
+| [`plugin-fleet`](./fleet) | `fleet.agents`, `fleet.sessions`, `fleet.schedules`, `fleet.approvals`: read-only fleet metadata for an agent that reports what needs a person | Needs `PluginContext.fleet` (agent#412). No messages, prompts or approval inputs |
 | [`plugin-peer`](./peer) | `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | Signed HTTP, a secret per pair of agents, one hop limit across daemons |
 | [`plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`: an agent shows a native screen as A2UI v1.0, validated against your catalogs | Comes with the `a2ui-screens` skill |
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
+| [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
+| [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
+| [`memory-sqlite`](./memory-sqlite) | A memory store named `sqlite`: every agent's memory in one owner-only SQLite file, selected with `"memoryStore": "sqlite"` | Moved here from the agent repository; keeps its name |
 
-All are published as `@stratusagent/plugin-<name>` from the directory of the
-same name. Each directory's README covers setup and configuration.
+Each is released to npm as `@stratusagent/plugin-<name>` from the directory
+of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).
+A package that moved here from the agent repository keeps its npm name, so
+`provider-openai` is still `@stratusagent/provider-openai` and `memory-sqlite`
+is still `@stratusagent/memory-sqlite`.
+Each directory's README covers setup and configuration.
+
+[`index`](./index) isn't a plugin. It's the curated list `stratus setup`
+offers under Plugins → More plugins, published as `@stratusagent/plugin-index`.
+To list a plugin there, add it to that package's `stratusPluginIndex`.
 
 ## Installing one grants nothing
 
@@ -72,6 +84,71 @@ the shared contract in
 [`packages/search`](https://github.com/stratuslabs/agent/tree/main/packages/search)
 and read the key from the `search.apiKey` credential, so switching vendors
 never changes a soul or a skill.
+
+## Tested against agent main
+
+Pull requests test each package against the core packages on npm. The
+[Nightly workflow](.github/workflows/nightly.yml) also tests every package
+against [agent main](https://github.com/stratuslabs/agent), so a change there
+that breaks a plugin shows up before it's released. It builds and packs main,
+runs each package's tests with main's packages in place of npm's, then packs
+each plugin as npm would publish it and loads it by name through main's
+loader. A plugin passes only if it loads whole and registers everything its
+manifest declares. A failing scheduled run opens an issue here, and the next
+passing one closes it.
+
+A plugin whose config has required settings needs an entry in
+[`.github/scripts/load-config.json`](.github/scripts/load-config.json), or
+the loader refuses it. `{package}` in a value is the package's directory and
+`{state}` is a scratch directory. To run the check locally against a checkout
+of agent main:
+
+```sh
+# in the agent checkout, after pnpm install && pnpm build
+pnpm -r --filter './packages/*' pack --pack-destination /tmp/agent-main-packs
+# here
+node .github/scripts/agent-main.mjs <dir> --packs /tmp/agent-main-packs --work /tmp/agent-main-work
+```
+
+## Releasing a plugin
+
+Each package has its own version and is released on its own. A release is
+staged on npm by CI and goes public only when a maintainer approves it.
+
+1. Merge a pull request that bumps `version` in the package's `package.json`.
+2. Tag that commit on main `<dir>/v<version>` and push the tag, for example
+   `git tag peer/v0.2.0 <sha> && git push origin peer/v0.2.0`.
+3. The [Release workflow](.github/workflows/release.yml) refuses a tag whose
+   commit isn't on main, whose version isn't the one in `package.json`, or
+   whose package isn't a public `@stratusagent/` one. Then it runs that
+   package's tests on its runners and stages it with `npm stage publish`.
+4. Approve the staged version on npmjs.com (the Staged Packages tab) or with
+   `npm stage approve <id>`. npm asks for 2FA. Until then nothing is public.
+
+CI holds no npm token. It stages through npm
+[trusted publishing](https://docs.npmjs.com/trusted-publishers), which npm
+sets up in an existing package's settings. npm also checks that the
+package's `repository.url` is this repository, and the Release workflow
+refuses a tag whose package says otherwise. Provenance is added by npm once
+this repository is public; it isn't generated from a private one. Each
+package needs this once:
+
+- **A package that was never published** is staged by hand the first time:
+  from a clean checkout of its tag, run
+  `npx npm@11.19.1 stage publish --access public` (staging needs npm 11.15.0
+  or later and Node 22.14.0 or later; Node 22 ships npm 10), then approve it.
+  Staging a package npm has never seen also publishes a `0.0.0-stage`
+  placeholder version.
+- **Then, on npmjs.com**, open the package's Settings, Trusted publishing, and
+  add GitHub Actions: organization `stratuslabs`, repository `plugins`,
+  workflow `release.yml`, environment `release`, allowed action stage publish
+  only. Then set the package to disallow publishing with tokens.
+- **A package that moved here from the agent repository** is already on npm,
+  so it skips the hand-staged first release. Its first tag here must be a
+  version above the last one the agent repository published (`stratus update`
+  only moves a plugin to a newer release, so a lower one would never reach an
+  existing install), and its Trusted publishing settings need this
+  repository's entry, as above.
 
 ## Built into the agent
 

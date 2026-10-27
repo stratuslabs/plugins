@@ -89,6 +89,17 @@ test('admission: a message aimed at someone else, or @everyone, is not for the a
   assert.equal(admit(message({ mentions: [BOT, OTHER] }), ava, BOT).admit, true, 'a mention of the bot still wins');
 });
 
+test('admission: in a thread the agent works in, a reply needs no mention, but is still not for it when aimed elsewhere', () => {
+  const ava = config().agents.get('ava');
+  const reply = { channelId: THREAD, parentId: CHANNEL, mentions: [], content: 'and then?' };
+  assert.equal(admit(message(reply), ava, BOT).reason, 'not addressed', 'a thread it is not in still needs one');
+  assert.deepEqual(admit(message(reply), ava, BOT, { engaged: true }), { admit: true, addressed: false, kind: 'channel', principal: true });
+  assert.equal(admit(message({ ...reply, mentions: [OTHER] }), ava, BOT, { engaged: true }).reason, 'addressed to someone else');
+  assert.equal(admit(message({ ...reply, mentionsRoleOrEveryone: true }), ava, BOT, { engaged: true }).reason, 'addressed to someone else');
+  assert.equal(admit(message({ ...reply, parentId: '121212121212121212' }), ava, BOT, { engaged: true }).reason, 'channel not allowed', 'the allowlist still decides');
+  assert.equal(admit(message({ mentions: [], content: 'top level' }), ava, BOT, { engaged: true }).reason, 'not addressed', 'only a thread');
+});
+
 test('admission: senders in a guild channel are anyone who can post there, but only principals are trusted', () => {
   const ava = config().agents.get('ava');
   const fromOther = admit(message({ authorId: OTHER }), ava, BOT);

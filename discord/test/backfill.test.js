@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createPlugin } from '../index.js';
-import { fakeDiscord } from './fake-discord.js';
+import { BOT, fakeDiscord } from './fake-discord.js';
 
 const OWNER = '222222222222222222';
 const STRANGER = '222222222222222223';
 const GUILD = '333333333333333333';
 const CHANNEL = '444444444444444444';
+const QUIET = '444444444444444445';
 const THREAD = '555555555555555555';
 const DM = '777777777777777777';
 
@@ -27,7 +28,7 @@ const idAt = (agoMs, n = 0) => String(((BigInt(Date.now() - agoMs) - 14200704000
 const config = {
   approvers: [OWNER],
   allowFrom: [OWNER],
-  guilds: { [GUILD]: { channels: { [CHANNEL]: { requireMention: false } } } },
+  guilds: { [GUILD]: { channels: { [CHANNEL]: { requireMention: false }, [QUIET]: {} } } },
 };
 
 /**
@@ -179,7 +180,8 @@ test('chatter the agent does not answer moves a tracked channel on; a stranger n
   const positions = await stored(stateDir);
   assert.equal(positions[CHANNEL].last, chatter);
   assert.equal(positions[CHANNEL].guildId, GUILD);
-  assert.deepEqual(Object.keys(positions), [CHANNEL], 'an unlisted channel is never tracked');
+  assert.deepEqual(Object.keys(positions).sort(), [CHANNEL, asked].sort(), 'the channel and the thread opened on the answered message; an unlisted channel is never tracked');
+  assert.equal(positions[asked].parentId, CHANNEL);
 });
 
 test('a thread is read again under its parent, so a listed channel\'s thread still admits it', async (t) => {
@@ -201,6 +203,25 @@ test('a thread is read again under its parent, so a listed channel\'s thread sti
   await until(() => gateway.turns.length === 1, 'the thread message dispatched');
   assert.equal(gateway.turns[0].metadata.discordThread, THREAD);
   assert.equal(gateway.turns[0].metadata.team, GUILD);
+});
+
+test('a reply with no mention sent while it was down, in the thread a mention opened, is answered at the next start', async (t) => {
+  const env = await setUp(t);
+  const { discord, stateDir } = env;
+  const first = idAt(60_000);
+  const one = await startAdapter(env, fakeGateway());
+  discord.dispatch('MESSAGE_CREATE', raw(first, { channel_id: QUIET, guild_id: GUILD, content: `<@${BOT}> start`, mentions: [{ id: BOT }] }));
+  await until(() => discord.state.posts.some((p) => p.channelId === first), 'the answer in the new thread');
+  await one.stop();
+  assert.equal((await stored(stateDir))[first]?.parentId, QUIET, 'the thread is a conversation it works in');
+
+  const missed = idAt(5_000);
+  discord.state.history[first] = [raw(missed, { content: 'while you were out' })];
+  const gateway = fakeGateway();
+  await startAdapter(env, gateway);
+  await until(() => gateway.turns.length === 1, 'the follow-up dispatched');
+  assert.equal(gateway.turns[0].idempotencyKey, `discord:${missed}`);
+  assert.equal(gateway.turns[0].metadata.discordThread, first);
 });
 
 test('a restart does not answer what is more than a day old, and forgets a conversation that is gone', async (t) => {

@@ -303,7 +303,8 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         }
       }
     }
-    const verdict = admit(message, agent, bot.botId);
+    const engaged = message.parentId !== undefined && positions.tracks(agentId, message.channelId);
+    const verdict = admit(message, agent, bot.botId, { engaged });
     if (!verdict.admit) {
       positions.passed(agentId, message);
       return;
@@ -393,6 +394,13 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
           replyTo = message.id;
         }
       }
+    }
+    if (route.startThread && replyTo === undefined) {
+      // The thread is this conversation from here on: known to be under its
+      // channel before Discord's THREAD_CREATE says so, and one the agent
+      // works in, so a reply there needs no mention.
+      bot.threads.set(replyChannel, message.channelId);
+      positions.adopt(agentId, { id: replyChannel, guildId: message.guildId, parentId: message.channelId });
     }
     const sessionId = sessionIdFor(agentId, route);
     const author = authorName(raw);

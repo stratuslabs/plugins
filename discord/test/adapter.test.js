@@ -242,6 +242,42 @@ test('a message whose thread already exists is answered in that thread', async (
   assert.equal(discord.state.posts[0].body.message_reference, undefined);
 });
 
+test('in the thread a mention opened, a reply with no mention continues it; one aimed at someone else does not', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000010', guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> start`, mentions: [{ id: BOT }],
+  }));
+  await until(() => gateway.turns.length === 1, 'the first dispatch');
+  gateway.turns[0].start();
+  gateway.turns[0].finish('Started.');
+  await until(() => discord.state.posts.length === 1, 'the first reply');
+  const thread = discord.state.threads[0].id;
+  // Discord doesn't name a thread's parent on its messages; this fake sends no THREAD_CREATE either.
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000011', guild_id: GUILD, channel_id: thread, content: 'for sam', mentions: [{ id: STRANGER }] }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000012', guild_id: GUILD, channel_id: thread, content: 'and then?' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  assert.equal(gateway.turns[1].input.sessionId, gateway.turns[0].input.sessionId, 'the same conversation');
+  assert.equal(gateway.turns[1].input.userMessage, 'Dylan: and then?');
+  assert.equal(gateway.turns[1].input.metadata.discordChannel, thread);
+});
+
+test('a thread the agent has not answered in still needs a mention, and needs none once it has', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = '600000000000000020';
+  discord.dispatch('THREAD_CREATE', { id: thread, type: 11, guild_id: GUILD, parent_id: CHANNEL, owner_id: OWNER });
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000021', guild_id: GUILD, channel_id: thread, content: 'just us here' }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000022', guild_id: GUILD, channel_id: thread, content: `<@${BOT}> now you`, mentions: [{ id: BOT }] }));
+  await until(() => gateway.turns.length === 1, 'the mention dispatched');
+  assert.equal(gateway.turns[0].input.userMessage, 'Dylan: now you');
+  gateway.turns[0].start();
+  gateway.turns[0].finish('Here.');
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000023', guild_id: GUILD, channel_id: thread, content: 'and this' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  assert.equal(gateway.turns[1].input.userMessage, 'Dylan: and this');
+});
+
 test('with no permission to open a thread, the answer replies under the message in the channel', async (t) => {
   const warns = [];
   const { discord, registered, gateway } = await setUp(t, { warns });

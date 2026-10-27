@@ -170,6 +170,22 @@ export const createPositions = ({ stateDirectory, warn = () => {}, writeDelayMs 
       entry.seen = max(entry.seen, message.id);
       changed();
     },
+    /**
+     * A thread the agent opened (or took over) to answer in: tracked from
+     * its start, so a reply there is the agent's to answer, and one sent
+     * while the daemon is down is read at the next start. `thread` is
+     * `{ id, guildId, parentId }`; Discord gives a thread on a message that
+     * message's id, so nothing in it is older.
+     */
+    adopt(agentId, thread) {
+      const entry = entryFor(agentId, { id: thread.id, channelId: thread.id, guildId: thread.guildId, parentId: thread.parentId }, true);
+      entry.seen = max(entry.seen, thread.id);
+      changed();
+    },
+    /** Whether the agent works in a conversation: it answered there, or opened it. */
+    tracks(agentId, conversation) {
+      return agents.get(agentId)?.has(conversation) === true;
+    },
     /** Its answer is out (or it ended some other way): the position may move past it. */
     end(agentId, message) {
       const entry = agents.get(agentId)?.get(message.channelId);

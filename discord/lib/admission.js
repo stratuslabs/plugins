@@ -6,10 +6,12 @@
  *     mentions: [userId], mentionsRoleOrEveryone, replyToAuthorId?, content }
  *
  * `parentId` is set for a thread: a thread is judged by its parent channel's
- * entry. The result says why a message was refused, for the debug log; it
- * never carries the text.
+ * entry. `engaged` says the agent works in this thread already (it opened
+ * it, or answered there), so a reply there is addressed to it without a
+ * mention, as in a Slack thread the agent is in. The result says why a
+ * message was refused, for the debug log; it never carries the text.
  */
-export const admit = (message, agent, botId) => {
+export const admit = (message, agent, botId, { engaged = false } = {}) => {
   if (message.authorId === botId) {
     return { admit: false, reason: 'own message' };
   }
@@ -49,7 +51,7 @@ export const admit = (message, agent, botId) => {
     if (elsewhere) {
       return { admit: false, reason: 'addressed to someone else' };
     }
-    if (requireMention) {
+    if (requireMention && !(engaged && message.parentId !== undefined)) {
       return { admit: false, reason: 'not addressed' };
     }
   }

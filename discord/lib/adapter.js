@@ -61,6 +61,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   let stopController = new AbortController();
   const retryTimers = new Set();
   const positions = createPositions({ stateDirectory, warn, ...(positionsWriteDelayMs !== undefined ? { writeDelayMs: positionsWriteDelayMs } : {}) });
+  const routeOf = (agentId, message) => routeFor(message, (id) => positions.rootOf(agentId, id));
 
   const track = (promise) => {
     const tracked = promise.catch((error) => warn(`discord: ${error instanceof Error ? error.message : String(error)}`));
@@ -292,7 +293,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     // before admission, because in a thread it needs no mention. With
     // nothing running it is an ordinary message.
     if (!message.authorIsBot && agent.approvers.has(message.authorId) && isStopRequest(message.content, bot.botId)) {
-      const route = routeFor(message);
+      const route = routeOf(agentId, message);
       if (!route.startThread && firstSighting(agentId, `stop:${message.id}`)) {
         const sessionId = sessionIdFor(agentId, route);
         if (stopTurns(sessionId, message.authorId, authorName(raw))) {
@@ -349,7 +350,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   };
 
   const answer = async (agentId, agent, bot, message, raw, verdict) => {
-    const turn = inOrder(sessionIdFor(agentId, routeFor(message)));
+    const turn = inOrder(sessionIdFor(agentId, routeOf(agentId, message)));
     try {
       await turn.before;
       return await answerInOrder(agentId, agent, bot, message, raw, verdict, turn.handed);
@@ -372,10 +373,16 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       // open with nothing said. An image or a text file alone is a question.
       return;
     }
-    const route = routeFor(message);
+    const route = routeOf(agentId, message);
     const direct = verdict.kind === 'direct';
     let replyChannel = route.thread ?? message.channelId;
     let replyTo;
+    if (route.inChannel) {
+      // A reply to one of its answers in the channel: the conversation
+      // carries on there, under the reply.
+      replyChannel = message.channelId;
+      replyTo = message.id;
+    }
     if (route.startThread) {
       try {
         replyChannel = await threadFrom(bot.rest, message.channelId, message.id, text);
@@ -427,18 +434,30 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     const idempotencyKey = `discord:${message.id}`;
 
     let first = true;
+    // Answered in the channel, not a thread: a reply to any of these
+    // messages is this conversation's.
+    const inChannel = (ids) => {
+      if (replyTo !== undefined) {
+        positions.answered(agentId, ids, route.thread);
+      }
+    };
     const renderer = createRenderer({
       warn,
       ops: {
         post: async (piece) => {
-          const [id] = await postText(bot.rest, replyChannel, piece, first && replyTo ? { replyTo } : {});
+          const ids = await postText(bot.rest, replyChannel, piece, first && replyTo ? { replyTo } : {});
           first = false;
-          return id;
+          inChannel(ids);
+          return ids[0];
         },
         edit: (id, piece) => editText(bot.rest, replyChannel, id, piece),
         remove: (id) => removeMessage(bot.rest, replyChannel, id),
         typing: () => typing(bot.rest, replyChannel),
-        upload: (filePath) => uploadFile(bot.rest, replyChannel, filePath),
+        upload: async (filePath) => {
+          const id = await uploadFile(bot.rest, replyChannel, filePath);
+          inChannel([id]);
+          return id;
+        },
       },
     });
     const entry = { turnId: randomUUID(), renderer, controller: new AbortController() };

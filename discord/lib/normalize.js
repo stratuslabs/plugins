@@ -4,6 +4,8 @@
  * parent channel, filled from the gateway's thread events, since a message
  * in a thread doesn't say which channel the thread is in.
  */
+const SNOWFLAKE = /^[0-9]{17,20}$/;
+
 export const normalizeMessage = (data, threads) => {
   const parentId = threads.get(data.channel_id);
   const reference = data.referenced_message;
@@ -17,6 +19,7 @@ export const normalizeMessage = (data, threads) => {
     mentions: (data.mentions ?? []).map((user) => user.id),
     mentionsRoleOrEveryone: data.mention_everyone === true || (data.mention_roles ?? []).length > 0,
     ...(reference?.author?.id ? { replyToAuthorId: reference.author.id } : {}),
+    ...(SNOWFLAKE.test(reference?.id ?? '') ? { replyToId: reference.id } : {}),
     content: typeof data.content === 'string' ? data.content : '',
   };
 };

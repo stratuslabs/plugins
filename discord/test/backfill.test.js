@@ -306,3 +306,56 @@ test('a message sent while a new gateway session is reading what was missed wait
   await until(() => gateway.turns.length === 3, 'both dispatched');
   assert.deepEqual(gateway.turns.slice(1).map((turn) => turn.idempotencyKey), [`discord:${missed}`, `discord:${live}`]);
 });
+
+/** A reply (Discord's Reply) to one of the agent's own messages, as Discord sends it. */
+const replyTo = (id, answerId, content) => raw(id, {
+  type: 19,
+  content,
+  message_reference: { message_id: answerId, channel_id: CHANNEL, guild_id: GUILD },
+  referenced_message: { id: answerId, channel_id: CHANNEL, type: 19, content: 'an answer', author: { id: BOT, username: 'ava', bot: true }, mentions: [] },
+});
+
+test('with no permission to open threads, a reply to an answer in the channel continues its conversation, after a restart too', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  discord.state.refuseThreads = true;
+  const gateway = fakeGateway();
+  const one = await startAdapter(env, gateway);
+  const first = idAt(60_000, 1);
+  discord.dispatch('MESSAGE_CREATE', raw(first, { guild_id: GUILD, channel_id: CHANNEL, content: 'which plan are we on?' }));
+  await until(() => discord.state.posts.length === 1, 'the first answer');
+  const session = `discord:ava:${GUILD}:${CHANNEL}:${first}`;
+  assert.equal(gateway.turns[0].sessionId, session);
+  assert.equal(discord.state.posts[0].body.message_reference?.message_id, first, 'answered under the message, in the channel');
+
+  const second = idAt(50_000, 2);
+  discord.dispatch('MESSAGE_CREATE', { ...replyTo(second, discord.state.posts[0].id, 'and what does it cost?'), guild_id: GUILD, channel_id: CHANNEL });
+  await until(() => discord.state.posts.length === 2, 'the second answer');
+  assert.equal(gateway.turns[1].sessionId, session, 'the reply continues the first message\'s session');
+  assert.equal(discord.state.posts[1].channelId, CHANNEL);
+  assert.equal(discord.state.posts[1].body.message_reference?.message_id, second, 'and is answered under the reply');
+  await one.stop();
+
+  // Down: a reply to the second answer lands in the channel.
+  const third = idAt(40_000, 3);
+  discord.state.channels[CHANNEL] = { id: CHANNEL, type: 0, guild_id: GUILD };
+  discord.state.history[CHANNEL] = [replyTo(third, discord.state.posts[1].id, 'and per seat?')];
+  await startAdapter(env, gateway);
+  await until(() => gateway.turns.length === 3, 'the reply sent while it was down');
+  assert.equal(gateway.turns[2].sessionId, session, 'still the same session after a restart');
+  await until(() => discord.state.posts.length === 3, 'the third answer');
+  assert.equal(discord.state.posts[2].channelId, CHANNEL);
+  assert.equal(discord.state.posts[2].body.message_reference?.message_id, third);
+});
+
+test('a reply to a message of the agent\'s it has no conversation for starts its own', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  discord.state.refuseThreads = true;
+  const gateway = fakeGateway();
+  await startAdapter(env, gateway);
+  const id = idAt(10_000, 4);
+  discord.dispatch('MESSAGE_CREATE', { ...replyTo(id, '900000000000099999', 'about this?'), guild_id: GUILD, channel_id: CHANNEL });
+  await until(() => discord.state.posts.length === 1, 'the answer');
+  assert.equal(gateway.turns[0].sessionId, `discord:ava:${GUILD}:${CHANNEL}:${id}`);
+});

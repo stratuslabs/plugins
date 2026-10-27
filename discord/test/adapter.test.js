@@ -674,3 +674,24 @@ test('a file a tool made during the turn is uploaded into the conversation, in i
   const order = discord.state.posts.map((p) => (p.files ? 'file' : p.body.content));
   assert.ok(order.indexOf('Drawing it.') < order.indexOf('file'), `words before the tool come first (${order})`);
 });
+
+test('with no permission to open threads, an approver\'s stop as a reply to the answer ends that conversation\'s turn', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.state.refuseThreads = true;
+  const root = '600000000000000031';
+  discord.dispatch('MESSAGE_CREATE', message({ id: root, guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> write me an essay`, mentions: [{ id: BOT }] }));
+  await until(() => gateway.turns.length === 1, 'the turn');
+  const [turn] = gateway.turns;
+  turn.start();
+  turn.emit({ type: 'provider.delta', delta: { type: 'text', text: 'Once upon' } });
+  await until(() => discord.state.posts.length === 1, 'streaming in the channel');
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000032', guild_id: GUILD, channel_id: CHANNEL, content: 'stop', type: 19,
+    message_reference: { message_id: discord.state.posts[0].id },
+    referenced_message: { id: discord.state.posts[0].id, channel_id: CHANNEL, content: 'Once upon', author: { id: BOT, username: 'ava', bot: true }, mentions: [] },
+  }));
+  await until(() => gateway.aborts.length === 1, 'the stop');
+  assert.equal(gateway.aborts[0].sessionId, `discord:ava:${GUILD}:${CHANNEL}:${root}`);
+  assert.equal(gateway.turns.length, 1, 'the stop is not a turn of its own');
+});

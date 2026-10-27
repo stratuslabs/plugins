@@ -15,10 +15,15 @@ agent's core any bigger.
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
+| [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
+| [`memory-sqlite`](./memory-sqlite) | A memory store named `sqlite`: every agent's memory in one owner-only SQLite file, selected with `"memoryStore": "sqlite"` | Moved here from the agent repository; keeps its name |
 | [`plugin-brave-search`](./brave-search) | `web.search` through the Brave Search API, behind the shared search contract | Needs a Brave Search API key as `search.apiKey`. Another backend can replace it with no soul edit |
 
 Each is released to npm as `@stratusagent/plugin-<name>` from the directory
 of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).
+A package that moved here from the agent repository keeps its npm name, so
+`provider-openai` is still `@stratusagent/provider-openai` and `memory-sqlite`
+is still `@stratusagent/memory-sqlite`.
 Each directory's README covers setup and configuration.
 
 [`index`](./index) isn't a plugin. It's the curated list `stratus setup`
@@ -81,6 +86,31 @@ the shared contract in
 and read the key from the `search.apiKey` credential, so switching vendors
 never changes a soul or a skill.
 
+## Tested against agent main
+
+Pull requests test each package against the core packages on npm. The
+[Nightly workflow](.github/workflows/nightly.yml) also tests every package
+against [agent main](https://github.com/stratuslabs/agent), so a change there
+that breaks a plugin shows up before it's released. It builds and packs main,
+runs each package's tests with main's packages in place of npm's, then packs
+each plugin as npm would publish it and loads it by name through main's
+loader. A plugin passes only if it loads whole and registers everything its
+manifest declares. A failing scheduled run opens an issue here, and the next
+passing one closes it.
+
+A plugin whose config has required settings needs an entry in
+[`.github/scripts/load-config.json`](.github/scripts/load-config.json), or
+the loader refuses it. `{package}` in a value is the package's directory and
+`{state}` is a scratch directory. To run the check locally against a checkout
+of agent main:
+
+```sh
+# in the agent checkout, after pnpm install && pnpm build
+pnpm -r --filter './packages/*' pack --pack-destination /tmp/agent-main-packs
+# here
+node .github/scripts/agent-main.mjs <dir> --packs /tmp/agent-main-packs --work /tmp/agent-main-work
+```
+
 ## Releasing a plugin
 
 Each package has its own version and is released on its own. A release is
@@ -114,6 +144,12 @@ package needs this once:
   add GitHub Actions: organization `stratuslabs`, repository `plugins`,
   workflow `release.yml`, environment `release`, allowed action stage publish
   only. Then set the package to disallow publishing with tokens.
+- **A package that moved here from the agent repository** is already on npm,
+  so it skips the hand-staged first release. Its first tag here must be a
+  version above the last one the agent repository published (`stratus update`
+  only moves a plugin to a newer release, so a lower one would never reach an
+  existing install), and its Trusted publishing settings need this
+  repository's entry, as above.
 
 ## Built into the agent
 

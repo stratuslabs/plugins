@@ -48,7 +48,7 @@ export const CONNECT_TIMEOUT_MS = 60_000;
 
 export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, cdnHosts = CDN_HOSTS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
-  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy? }]
+  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy?, halted? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
   const rendering = new Set(); // requestIds whose prompt is being posted
   const settledWhileRendering = new Map(); // requestId -> the resolved event
@@ -505,6 +505,12 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       renderers.delete(sessionId);
     }
 
+    if (entry.halted) {
+      // Settled after stop() gave up waiting: this channel has stopped, so
+      // nothing is posted and the message stays held. The next start reads
+      // it again, and the gateway repeats the finished turn's reply.
+      return 'kept';
+    }
     if (entry.stoppedBy !== undefined) {
       await renderer.stopped(entry.stoppedBy);
       return;
@@ -736,9 +742,13 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       clearTimeout(timer);
       if (!drained) {
         // What is left stays as it is in Discord; its typing stops, and
-        // nothing more is sent from a channel that has stopped.
+        // nothing more is sent for it from a channel that has stopped. Its
+        // message stays held, so the next start answers it.
         for (const queue of renderers.values()) {
-          for (const entry of queue) entry.renderer.halt();
+          for (const entry of queue) {
+            entry.halted = true;
+            entry.renderer.halt();
+          }
         }
         warn(`discord: stopped with ${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'} unfinished after ${drainTimeoutMs}ms`);
       }

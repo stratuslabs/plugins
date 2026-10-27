@@ -40,8 +40,14 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
   const listeners = new Set();
   const finished = new Map();
   const turns = [];
+  // A held dispatch's way to finish, for `release()`.
+  const held = [];
   return {
     turns,
+    /** Finish every held dispatch, as a turn that outlived its channel's stop would. */
+    release() {
+      for (const finish of held.splice(0)) finish();
+    },
     bus: { subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); } },
     agents: () => [{ id: 'ava' }],
     activeTurnId: () => undefined,
@@ -55,9 +61,6 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
         input.onRepeat?.('finished');
         return Promise.resolve(finished.get(input.idempotencyKey));
       }
-      if (hold) {
-        return new Promise(() => {});
-      }
       const session = {
         id: input.sessionId,
         status: 'completed',
@@ -66,6 +69,14 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
           { role: 'assistant', content: `answer to ${input.idempotencyKey}` },
         ],
       };
+      if (hold) {
+        return new Promise((resolve) => {
+          held.push(() => {
+            finished.set(input.idempotencyKey, session);
+            resolve(session);
+          });
+        });
+      }
       finished.set(input.idempotencyKey, session);
       return Promise.resolve(session);
     },
@@ -151,6 +162,32 @@ test('a message still being answered when the daemon stops is read again at the 
   await startAdapter(env, gateway);
   await until(() => gateway.turns.length === 1, 'the held message dispatched again');
   assert.equal(gateway.turns[0].idempotencyKey, `discord:${id}`);
+});
+
+test('a turn that settles after a stop gave up waiting for it posts nothing from the stopped channel, and is answered at the next start', async (t) => {
+  const env = await setUp(t);
+  const { discord, stateDir } = env;
+  const id = idAt(10_000);
+  const gateway = fakeGateway({ hold: true });
+  const one = await startAdapter(env, gateway);
+  discord.dispatch('MESSAGE_CREATE', raw(id, { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the dispatch');
+  await one.stop();
+  const posts = discord.state.posts.length;
+  const edits = discord.state.patches.length;
+  // The turn finishes after the stop's drain gave up on it.
+  gateway.release();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(discord.state.posts.length, posts, 'the stopped channel posts no answer');
+  assert.equal(discord.state.patches.length, edits, 'nor edits one in');
+  assert.equal((await stored(stateDir))[DM].last, String(BigInt(id) - 1n), 'still held below the message');
+
+  discord.state.channels[DM] = { id: DM, type: 1 };
+  discord.state.history[DM] = [raw(id, { channel_id: DM })];
+  await startAdapter(env, gateway);
+  await until(() => discord.state.posts.some((p) => p.body.content === `answer to discord:${id}`), 'the answer from the next start');
+  assert.equal(discord.state.posts.filter((p) => p.body.content === `answer to discord:${id}`).length, 1, 'answered once');
+  assert.equal(gateway.turns.length, 2, 'the finished turn is repeated, not run again');
 });
 
 test('a message refused by a daemon on its way down is told so and kept for the next start', async (t) => {

@@ -259,6 +259,28 @@ test('encrypting a kind the branch history already holds in plaintext is allowed
   assert.deepEqual(fresh.plaintextInHistory, []);
 });
 
+test('a kind that reached the history only as a rename of another file still counts as plaintext history', async () => {
+  // Codex P2 4318456641: git log detects renames by default, so --diff-filter=A
+  // skipped a path whose first commit was a rename of another kind's file.
+  const plain = makeHome();
+  const branchRemote = bareRemote();
+  rmSync(path.join(plain.home, 'agents', 'blair', 'memory.jsonl'));
+  const line = `${JSON.stringify({ id: 'm9', agentId: 'blair', content: 'Moved here from a skill file, word for word.' })}\n`;
+  mkdirSync(path.join(plain.home, 'skills', 'moved'), { recursive: true });
+  writeFileSync(path.join(plain.home, 'skills', 'moved', 'SKILL.md'), line);
+  await init(plain.home, branchRemote, { plaintext: true, branch: 'mini', fetchImpl: notFound });
+  await now(plain.home, { env: {}, fetchImpl: notFound });
+  rmSync(path.join(plain.home, 'skills', 'moved'), { recursive: true });
+  writeFileSync(path.join(plain.home, 'agents', 'blair', 'memory.jsonl'), line);
+  await now(plain.home, { env: {}, fetchImpl: notFound });
+  // The case is real only if git itself calls it a rename.
+  const renamed = git(repoDir(plain.home), 'log', '--format=', '--name-status', 'refs/heads/mini').toString();
+  assert.match(renamed, /^R\d+\thome\/skills\/moved\/SKILL\.md\thome\/agents\/blair\/memory\.jsonl$/m);
+  const key = await newKey();
+  const result = await init(plain.home, branchRemote, { branch: 'mini', recipients: [key.recipient], encrypt: 'memory', fetchImpl: notFound });
+  assert.deepEqual(result.plaintextInHistory, ['memory']);
+});
+
 test('a lost encryption cache re-encrypts once, and the backup still restores', async () => {
   const { home, remote, key } = await setUpEncrypted();
   const first = await now(home, { env: {}, fetchImpl: notFound });

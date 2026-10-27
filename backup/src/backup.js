@@ -232,7 +232,9 @@ const plaintextInHistory = async (repo, branch, encrypt) => {
   if (encrypt.length === 0) return [];
   const tip = await revParse(repo, localRef(branch));
   if (tip === undefined) return [];
-  const added = (await git(repo, ['log', '--format=', '--name-only', '--diff-filter=A', tip])).stdout.split('\n').filter(Boolean);
+  // --no-renames: a path whose first commit was a rename of another file
+  // (a skill moved to a memory path) would otherwise not count as added.
+  const added = (await git(repo, ['log', '--format=', '--name-only', '--no-renames', '--diff-filter=A', tip])).stdout.split('\n').filter(Boolean);
   const kinds = new Set(added.filter((file) => file.startsWith('home/') && isEncryptedPath(file, encrypt)).map(categoryOf));
   return [...kinds].sort();
 };

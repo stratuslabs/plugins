@@ -320,3 +320,56 @@ test('after a reset, a provider that answers in one piece still has its words be
   await renderer.finalize('Found it.');
   assert.deepEqual(visible(), ['Looking that up.', 'Found it.']);
 });
+
+test('once halted, a reply, a failure, a stop or a withdraw that comes later sends nothing', async () => {
+  for (const [what, end] of [
+    ['finalize', (renderer) => renderer.finalize('The late answer.')],
+    ['fail', (renderer) => renderer.fail('it broke')],
+    ['stopped', (renderer) => renderer.stopped('Dylan')],
+    ['withdraw', (renderer) => renderer.withdraw()],
+  ]) {
+    const { renderer, calls, visible, advance, settle } = harness();
+    renderer.beginTurn();
+    renderer.onEvent(text('partial'));
+    await settle();
+    renderer.halt();
+    const before = calls.length;
+    await end(renderer);
+    await advance(30000);
+    assert.equal(calls.length, before, `${what} after a halt makes no Discord call`);
+    assert.deepEqual(visible(), ['partial'], `${what}: what was up stays as it was`);
+  }
+});
+
+test('a halt while a sync is underway stops the requests it had left', async () => {
+  const calls = [];
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let nextId = 1;
+  const renderer = createRenderer({
+    ops: {
+      async post(piece) {
+        calls.push(['post', piece.length]);
+        if (calls.length === 1) await blocked;
+        return `m${nextId++}`;
+      },
+      async edit(id) {
+        calls.push(['edit', id]);
+      },
+      async remove(id) {
+        calls.push(['remove', id]);
+      },
+      async typing() {},
+    },
+  });
+  // Three messages' worth: the first post hangs, and the halt lands under it.
+  const finished = renderer.finalize('x'.repeat(5000));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'the first post is underway');
+  renderer.halt();
+  release();
+  await finished;
+  assert.deepEqual(calls, [['post', 2000]], 'nothing after the halt');
+});

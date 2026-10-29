@@ -12,8 +12,8 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@stratusagent/executor-local": "^0.11.8",
-    "@stratusagent/plugins": "^0.11.8"
+    "@stratusagent/executor-local": "^0.14.0",
+    "@stratusagent/plugins": "^0.14.0"
   },
   "stratus": {
     "pluginVersion": 1,

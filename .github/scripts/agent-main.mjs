@@ -130,8 +130,8 @@ export function hostManifest(pluginName, pluginTarball, packs) {
   const needed = closure(HOST_PACKAGES, packs);
   const dependencies = { [pluginName]: `file:${pluginTarball}` };
   for (const name of needed) dependencies[name] = `file:${packs.get(name).file}`;
-  // The plugin's own @stratusagent/* ranges may not admit main's version
-  // (sandbox still asks for ^0.11.8); the overrides make it get main's anyway.
+  // The plugin's own @stratusagent/* ranges name the last release, which may
+  // not admit main's version; the overrides make it get main's anyway.
   return { name: 'agent-main-host', private: true, type: 'module', dependencies, overrides: mainOverrides(needed, packs) };
 }
 

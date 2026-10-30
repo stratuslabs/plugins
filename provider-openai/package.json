@@ -24,12 +24,12 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@stratusagent/providers": "^0.13.6"
+    "@stratusagent/providers": "^0.14.0"
   },
   "devDependencies": {
-    "@stratusagent/core": "^0.13.6",
-    "@stratusagent/plugins": "^0.13.6",
-    "@stratusagent/state": "^0.13.6"
+    "@stratusagent/core": "^0.14.0",
+    "@stratusagent/plugins": "^0.14.0",
+    "@stratusagent/state": "^0.14.0"
   },
   "keywords": [
     "stratus",

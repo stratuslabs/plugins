@@ -55,7 +55,9 @@ export function readPacks(dir) {
 
 /**
  * Every packed package the given names need, the names included. A name
- * agent main no longer has is an error, since that is a break too.
+ * agent main no longer has is an error, since that is a break too. So is a
+ * packed package needing one main doesn't pack: npm would fetch the
+ * released one, and the check would run on a mix of main and npm.
  */
 export function closure(names, packs) {
   const missing = names.filter((name) => !packs.has(name));
@@ -64,7 +66,10 @@ export function closure(names, packs) {
   const visit = (name) => {
     if (seen.has(name)) return;
     seen.add(name);
-    for (const dependency of packs.get(name).dependencies) if (packs.has(dependency)) visit(dependency);
+    for (const dependency of packs.get(name).dependencies) {
+      if (!packs.has(dependency)) throw new Error(`agent main's ${name} needs ${dependency}, which agent main does not pack`);
+      visit(dependency);
+    }
   };
   for (const name of names) visit(name);
   return [...seen].sort();
@@ -125,8 +130,8 @@ export function hostManifest(pluginName, pluginTarball, packs) {
   const needed = closure(HOST_PACKAGES, packs);
   const dependencies = { [pluginName]: `file:${pluginTarball}` };
   for (const name of needed) dependencies[name] = `file:${packs.get(name).file}`;
-  // The plugin's own @stratusagent/* ranges may not admit main's version
-  // (sandbox still asks for ^0.11.8); the overrides make it get main's anyway.
+  // The plugin's own @stratusagent/* ranges name the last release, which may
+  // not admit main's version; the overrides make it get main's anyway.
   return { name: 'agent-main-host', private: true, type: 'module', dependencies, overrides: mainOverrides(needed, packs) };
 }
 

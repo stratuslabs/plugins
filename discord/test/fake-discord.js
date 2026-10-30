@@ -94,8 +94,9 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
         return state.historyDelayMs ? void setTimeout(reply, state.historyDelayMs).unref() : reply();
       }
       if (req.method === 'POST' && (match = url.match(/^\/channels\/(\d+)\/messages$/))) {
-        state.posts.push({ channelId: match[1], body: json, authorization: req.headers.authorization, ...(uploads ? { files: uploads } : {}) });
-        return send(200, { id: id(), channel_id: match[1] });
+        const posted = id();
+        state.posts.push({ id: posted, channelId: match[1], body: json, authorization: req.headers.authorization, ...(uploads ? { files: uploads } : {}) });
+        return send(200, { id: posted, channel_id: match[1] });
       }
       if (req.method === 'PATCH' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
         state.patches.push({ channelId: match[1], messageId: match[2], body: json });

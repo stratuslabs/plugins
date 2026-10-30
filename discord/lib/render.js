@@ -32,7 +32,7 @@ export const NO_REPLY_TEXT = '(no reply)';
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
  * serialized, and a failed one is logged through `warn`, never thrown into
- * the event stream.
+ * the event stream. After `halt()` none is made.
  */
 export const createRenderer = ({
   ops,
@@ -47,6 +47,8 @@ export const createRenderer = ({
   let breakPending = false; // the next words belong to a new response
   let streamedThisResponse = false;
   let finished = false;
+  // Set by halt(): the adapter has stopped, so nothing more goes to Discord.
+  let halted = false;
   let timer;
   let lastSyncAt = -Infinity;
   let chain = Promise.resolve();
@@ -63,6 +65,9 @@ export const createRenderer = ({
   };
 
   const call = async (what, fn) => {
+    if (halted) {
+      return undefined;
+    }
     try {
       return await fn();
     } catch (error) {
@@ -297,9 +302,14 @@ export const createRenderer = ({
       return { spoke: posted > 0 };
     },
 
-    /** The adapter is stopping with this turn unfinished: no more timers or requests. */
+    /**
+     * The adapter is stopping with this turn unfinished: no more timers or
+     * requests, even from a sync underway or a reply that comes later.
+     * What is up stays as it is.
+     */
     halt() {
       finished = true;
+      halted = true;
       stopTimers();
     },
 

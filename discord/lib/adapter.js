@@ -48,7 +48,7 @@ export const CONNECT_TIMEOUT_MS = 60_000;
 
 export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, cdnHosts = CDN_HOSTS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
-  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy? }]
+  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy?, halted? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
   const rendering = new Set(); // requestIds whose prompt is being posted
   const settledWhileRendering = new Map(); // requestId -> the resolved event
@@ -61,6 +61,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   let stopController = new AbortController();
   const retryTimers = new Set();
   const positions = createPositions({ stateDirectory, warn, ...(positionsWriteDelayMs !== undefined ? { writeDelayMs: positionsWriteDelayMs } : {}) });
+  const routeOf = (agentId, message) => routeFor(message, (id) => positions.rootOf(agentId, id));
 
   const track = (promise) => {
     const tracked = promise.catch((error) => warn(`discord: ${error instanceof Error ? error.message : String(error)}`));
@@ -292,7 +293,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     // before admission, because in a thread it needs no mention. With
     // nothing running it is an ordinary message.
     if (!message.authorIsBot && agent.approvers.has(message.authorId) && isStopRequest(message.content, bot.botId)) {
-      const route = routeFor(message);
+      const route = routeOf(agentId, message);
       if (!route.startThread && firstSighting(agentId, `stop:${message.id}`)) {
         const sessionId = sessionIdFor(agentId, route);
         if (stopTurns(sessionId, message.authorId, authorName(raw))) {
@@ -349,7 +350,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
   };
 
   const answer = async (agentId, agent, bot, message, raw, verdict) => {
-    const turn = inOrder(sessionIdFor(agentId, routeFor(message)));
+    const turn = inOrder(sessionIdFor(agentId, routeOf(agentId, message)));
     try {
       await turn.before;
       return await answerInOrder(agentId, agent, bot, message, raw, verdict, turn.handed);
@@ -372,10 +373,16 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       // open with nothing said. An image or a text file alone is a question.
       return;
     }
-    const route = routeFor(message);
+    const route = routeOf(agentId, message);
     const direct = verdict.kind === 'direct';
     let replyChannel = route.thread ?? message.channelId;
     let replyTo;
+    if (route.inChannel) {
+      // A reply to one of its answers in the channel: the conversation
+      // carries on there, under the reply.
+      replyChannel = message.channelId;
+      replyTo = message.id;
+    }
     if (route.startThread) {
       try {
         replyChannel = await threadFrom(bot.rest, message.channelId, message.id, text);
@@ -427,18 +434,30 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     const idempotencyKey = `discord:${message.id}`;
 
     let first = true;
+    // Answered in the channel, not a thread: a reply to any of these
+    // messages is this conversation's.
+    const inChannel = (ids) => {
+      if (replyTo !== undefined) {
+        positions.answered(agentId, ids, route.thread);
+      }
+    };
     const renderer = createRenderer({
       warn,
       ops: {
         post: async (piece) => {
-          const [id] = await postText(bot.rest, replyChannel, piece, first && replyTo ? { replyTo } : {});
+          const ids = await postText(bot.rest, replyChannel, piece, first && replyTo ? { replyTo } : {});
           first = false;
-          return id;
+          inChannel(ids);
+          return ids[0];
         },
         edit: (id, piece) => editText(bot.rest, replyChannel, id, piece),
         remove: (id) => removeMessage(bot.rest, replyChannel, id),
         typing: () => typing(bot.rest, replyChannel),
-        upload: (filePath) => uploadFile(bot.rest, replyChannel, filePath),
+        upload: async (filePath) => {
+          const id = await uploadFile(bot.rest, replyChannel, filePath);
+          inChannel([id]);
+          return id;
+        },
       },
     });
     const entry = { turnId: randomUUID(), renderer, controller: new AbortController() };
@@ -486,6 +505,14 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       renderers.delete(sessionId);
     }
 
+    if (entry.halted) {
+      // Settled after stop() gave up waiting: this channel has stopped, so
+      // nothing is posted and the message stays held. With a state
+      // directory the next start reads it again, and the gateway repeats
+      // the finished turn's reply; without one it goes unanswered, as
+      // stop() warned.
+      return 'kept';
+    }
     if (entry.stoppedBy !== undefined) {
       await renderer.stopped(entry.stoppedBy);
       return;
@@ -677,7 +704,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       if (stateDirectory) {
         positions.load();
       } else {
-        warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down will not be answered when it is back.');
+        warn('discord: this host gives plugins no state directory, so messages sent while the daemon is down, or still being answered when it stops, will not be answered when it is back.');
       }
       const roster = new Set(host.agents().map((agent) => agent.id));
       const attempts = [];
@@ -717,11 +744,19 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       clearTimeout(timer);
       if (!drained) {
         // What is left stays as it is in Discord; its typing stops, and
-        // nothing more is sent from a channel that has stopped.
+        // nothing more is sent for it from a channel that has stopped. Its
+        // message stays held, so the next start answers it, when there is
+        // a state directory to read it again from.
         for (const queue of renderers.values()) {
-          for (const entry of queue) entry.renderer.halt();
+          for (const entry of queue) {
+            entry.halted = true;
+            entry.renderer.halt();
+          }
         }
-        warn(`discord: stopped with ${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'} unfinished after ${drainTimeoutMs}ms`);
+        const unfinished = `${inFlight.size} repl${inFlight.size === 1 ? 'y' : 'ies'}`;
+        warn(stateDirectory
+          ? `discord: stopped with ${unfinished} unfinished after ${drainTimeoutMs}ms; held for the next start to answer`
+          : `discord: stopped with ${unfinished} unfinished after ${drainTimeoutMs}ms; this host gives plugins no state directory, so ${inFlight.size === 1 ? 'it' : 'they'} will not be answered`);
       }
       positions.flush();
       unsubscribe?.();

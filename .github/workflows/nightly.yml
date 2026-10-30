@@ -19,6 +19,7 @@ on:
     paths:
       - .github/workflows/nightly.yml
       - .github/scripts/agent-main.mjs
+      - .github/scripts/packages.mjs
       - .github/scripts/load-plugin.mjs
       - .github/scripts/load-config.json
 

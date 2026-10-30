@@ -40,8 +40,14 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
   const listeners = new Set();
   const finished = new Map();
   const turns = [];
+  // A held dispatch's way to finish, for `release()`.
+  const held = [];
   return {
     turns,
+    /** Finish every held dispatch, as a turn that outlived its channel's stop would. */
+    release() {
+      for (const finish of held.splice(0)) finish();
+    },
     bus: { subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); } },
     agents: () => [{ id: 'ava' }],
     activeTurnId: () => undefined,
@@ -55,9 +61,6 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
         input.onRepeat?.('finished');
         return Promise.resolve(finished.get(input.idempotencyKey));
       }
-      if (hold) {
-        return new Promise(() => {});
-      }
       const session = {
         id: input.sessionId,
         status: 'completed',
@@ -66,19 +69,27 @@ const fakeGateway = ({ hold = false, refuse } = {}) => {
           { role: 'assistant', content: `answer to ${input.idempotencyKey}` },
         ],
       };
+      if (hold) {
+        return new Promise((resolve) => {
+          held.push(() => {
+            finished.set(input.idempotencyKey, session);
+            resolve(session);
+          });
+        });
+      }
       finished.set(input.idempotencyKey, session);
       return Promise.resolve(session);
     },
   };
 };
 
-const startAdapter = async (env, gateway) => {
+const startAdapter = async (env, gateway, { warn = () => {}, noState = false } = {}) => {
   const { discord, stateDir } = env;
   const registered = [];
   await createPlugin(config, { api: discord.api, drainTimeoutMs: 100, positionsWriteDelayMs: 5 }).setup({
     log: () => {},
-    warn: () => {},
-    stateDirectory: { prepare: () => stateDir },
+    warn,
+    ...(noState ? {} : { stateDirectory: { prepare: () => stateDir } }),
     channels: { transportSecrets: async () => ({ ava: { botToken: 'tok' } }), register: (c) => registered.push(c) },
   });
   const adapter = registered[0].adapter;
@@ -151,6 +162,65 @@ test('a message still being answered when the daemon stops is read again at the 
   await startAdapter(env, gateway);
   await until(() => gateway.turns.length === 1, 'the held message dispatched again');
   assert.equal(gateway.turns[0].idempotencyKey, `discord:${id}`);
+});
+
+test('a turn that settles after a stop gave up waiting for it posts nothing from the stopped channel, and is answered at the next start', async (t) => {
+  const env = await setUp(t);
+  const { discord, stateDir } = env;
+  const id = idAt(10_000);
+  const gateway = fakeGateway({ hold: true });
+  const one = await startAdapter(env, gateway);
+  discord.dispatch('MESSAGE_CREATE', raw(id, { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the dispatch');
+  await one.stop();
+  const posts = discord.state.posts.length;
+  const edits = discord.state.patches.length;
+  // The turn finishes after the stop's drain gave up on it.
+  gateway.release();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(discord.state.posts.length, posts, 'the stopped channel posts no answer');
+  assert.equal(discord.state.patches.length, edits, 'nor edits one in');
+  assert.equal((await stored(stateDir))[DM].last, String(BigInt(id) - 1n), 'still held below the message');
+
+  discord.state.channels[DM] = { id: DM, type: 1 };
+  discord.state.history[DM] = [raw(id, { channel_id: DM })];
+  await startAdapter(env, gateway);
+  await until(() => discord.state.posts.some((p) => p.body.content === `answer to discord:${id}`), 'the answer from the next start');
+  assert.equal(discord.state.posts.filter((p) => p.body.content === `answer to discord:${id}`).length, 1, 'answered once');
+  assert.equal(gateway.turns.length, 2, 'the finished turn is repeated, not run again');
+});
+
+test('with no state directory, a stop that gives up on a turn says its reply will not be answered, and posts nothing', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  const id = idAt(10_000);
+  const gateway = fakeGateway({ hold: true });
+  const warnings = [];
+  const one = await startAdapter(env, gateway, { noState: true, warn: (line) => warnings.push(line) });
+  discord.dispatch('MESSAGE_CREATE', raw(id, { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the dispatch');
+  await one.stop();
+  const stopped = warnings.find((line) => line.includes('unfinished'));
+  assert.ok(stopped, 'the stop warns about the unfinished reply');
+  assert.match(stopped, /no state directory/, 'and says why it is lost');
+  assert.match(stopped, /will not be answered/);
+  const posts = discord.state.posts.length;
+  gateway.release();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(discord.state.posts.length, posts, 'the stopped channel still posts nothing');
+});
+
+test('with a state directory, a stop that gives up on a turn says it is held for the next start', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  const gateway = fakeGateway({ hold: true });
+  const warnings = [];
+  const one = await startAdapter(env, gateway, { warn: (line) => warnings.push(line) });
+  discord.dispatch('MESSAGE_CREATE', raw(idAt(10_000), { channel_id: DM }));
+  await until(() => gateway.turns.length === 1, 'the dispatch');
+  await one.stop();
+  const stopped = warnings.find((line) => line.includes('unfinished'));
+  assert.match(stopped, /held for the next start/);
 });
 
 test('a message refused by a daemon on its way down is told so and kept for the next start', async (t) => {
@@ -305,4 +375,57 @@ test('a message sent while a new gateway session is reading what was missed wait
   discord.dispatch('MESSAGE_CREATE', raw(live, { channel_id: DM, content: 'and now' }));
   await until(() => gateway.turns.length === 3, 'both dispatched');
   assert.deepEqual(gateway.turns.slice(1).map((turn) => turn.idempotencyKey), [`discord:${missed}`, `discord:${live}`]);
+});
+
+/** A reply (Discord's Reply) to one of the agent's own messages, as Discord sends it. */
+const replyTo = (id, answerId, content) => raw(id, {
+  type: 19,
+  content,
+  message_reference: { message_id: answerId, channel_id: CHANNEL, guild_id: GUILD },
+  referenced_message: { id: answerId, channel_id: CHANNEL, type: 19, content: 'an answer', author: { id: BOT, username: 'ava', bot: true }, mentions: [] },
+});
+
+test('with no permission to open threads, a reply to an answer in the channel continues its conversation, after a restart too', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  discord.state.refuseThreads = true;
+  const gateway = fakeGateway();
+  const one = await startAdapter(env, gateway);
+  const first = idAt(60_000, 1);
+  discord.dispatch('MESSAGE_CREATE', raw(first, { guild_id: GUILD, channel_id: CHANNEL, content: 'which plan are we on?' }));
+  await until(() => discord.state.posts.length === 1, 'the first answer');
+  const session = `discord:ava:${GUILD}:${CHANNEL}:${first}`;
+  assert.equal(gateway.turns[0].sessionId, session);
+  assert.equal(discord.state.posts[0].body.message_reference?.message_id, first, 'answered under the message, in the channel');
+
+  const second = idAt(50_000, 2);
+  discord.dispatch('MESSAGE_CREATE', { ...replyTo(second, discord.state.posts[0].id, 'and what does it cost?'), guild_id: GUILD, channel_id: CHANNEL });
+  await until(() => discord.state.posts.length === 2, 'the second answer');
+  assert.equal(gateway.turns[1].sessionId, session, 'the reply continues the first message\'s session');
+  assert.equal(discord.state.posts[1].channelId, CHANNEL);
+  assert.equal(discord.state.posts[1].body.message_reference?.message_id, second, 'and is answered under the reply');
+  await one.stop();
+
+  // Down: a reply to the second answer lands in the channel.
+  const third = idAt(40_000, 3);
+  discord.state.channels[CHANNEL] = { id: CHANNEL, type: 0, guild_id: GUILD };
+  discord.state.history[CHANNEL] = [replyTo(third, discord.state.posts[1].id, 'and per seat?')];
+  await startAdapter(env, gateway);
+  await until(() => gateway.turns.length === 3, 'the reply sent while it was down');
+  assert.equal(gateway.turns[2].sessionId, session, 'still the same session after a restart');
+  await until(() => discord.state.posts.length === 3, 'the third answer');
+  assert.equal(discord.state.posts[2].channelId, CHANNEL);
+  assert.equal(discord.state.posts[2].body.message_reference?.message_id, third);
+});
+
+test('a reply to a message of the agent\'s it has no conversation for starts its own', async (t) => {
+  const env = await setUp(t);
+  const { discord } = env;
+  discord.state.refuseThreads = true;
+  const gateway = fakeGateway();
+  await startAdapter(env, gateway);
+  const id = idAt(10_000, 4);
+  discord.dispatch('MESSAGE_CREATE', { ...replyTo(id, '900000000000099999', 'about this?'), guild_id: GUILD, channel_id: CHANNEL });
+  await until(() => discord.state.posts.length === 1, 'the answer');
+  assert.equal(gateway.turns[0].sessionId, `discord:ava:${GUILD}:${CHANNEL}:${id}`);
 });

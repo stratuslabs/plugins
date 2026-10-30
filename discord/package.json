@@ -19,7 +19,7 @@
   "dependencies": {
     "@discordjs/rest": "^2.6.3",
     "@discordjs/ws": "2.0.4",
-    "@stratusagent/core": "^0.13.5"
+    "@stratusagent/core": "^0.14.0"
   },
   "devDependencies": {
     "ws": "^8.22.0"

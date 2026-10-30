@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -37,6 +37,22 @@ test('the closure follows main\'s own dependencies, and a package main dropped i
   assert.deepEqual(closure(['@stratusagent/plugins'], PACKS), ['@stratusagent/agents', '@stratusagent/core', '@stratusagent/plugins']);
   assert.deepEqual(closure([], PACKS), []);
   assert.throws(() => closure(['@stratusagent/plugins', '@stratusagent/memory-sqlite'], PACKS), /agent main has no package @stratusagent\/memory-sqlite/);
+});
+
+test('a packed package that needs a package main does not pack is an error too, naming both', () => {
+  // npm would fetch the released one, and the check would run on a mix.
+  const packs = new Map([...PACKS, pack('state', ['core', 'memory-sqlite'])]);
+  assert.throws(() => closure(['@stratusagent/state'], packs), /agent main's @stratusagent\/state needs @stratusagent\/memory-sqlite, which agent main does not pack/);
+  assert.throws(() => closure(['@stratusagent/plugins'], new Map([...PACKS, pack('agents', ['core', 'gone'])])), /@stratusagent\/agents needs @stratusagent\/gone/);
+});
+
+test('a pull request that changes a script the nightly runs runs the nightly', () => {
+  const workflow = readFileSync(new URL('../workflows/nightly.yml', import.meta.url), 'utf8');
+  const on = workflow.slice(workflow.indexOf('pull_request:'), workflow.indexOf('\npermissions:'));
+  const paths = [...on.matchAll(/^\s+- (\S+)$/gm)].map((match) => match[1]);
+  const run = [...workflow.matchAll(/node (\.github\/scripts\/[\w.-]+)/g)].map((match) => match[1]);
+  assert.ok(run.length >= 2, `found the scripts it runs: ${run}`);
+  for (const script of new Set(run)) assert.ok(paths.includes(script), `${script} is in the pull_request paths (${paths})`);
 });
 
 test('main\'s copy is forced for every packed package; one the root names itself is a $ reference to that entry', () => {

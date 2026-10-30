@@ -23,10 +23,10 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@stratusagent/core": "^0.13.7"
+    "@stratusagent/core": "^0.14.0"
   },
   "devDependencies": {
-    "@stratusagent/plugins": "^0.13.7"
+    "@stratusagent/plugins": "^0.14.0"
   },
   "stratus": {
     "pluginVersion": 1,

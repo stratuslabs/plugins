@@ -1,20 +1,29 @@
 {
   "name": "@stratusagent/plugin-imessage",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "iMessage channel for Stratus: text an agent from your phone through Messages.app on its own Mac.",
   "type": "module",
   "exports": "./index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "README.md"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "imessage"
+  },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.13 <23 || >=23.4"
   },
   "scripts": {
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@parseaple/typedstream": "2.0.2",
-    "@stratusagent/core": "^0.13.5"
+    "@stratusagent/core": "^0.14.0"
   },
   "stratus": {
     "pluginVersion": 1,

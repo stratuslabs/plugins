@@ -17,7 +17,7 @@
     "directory": "budgets"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13 <23 || >=23.4"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

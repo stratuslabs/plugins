@@ -259,6 +259,77 @@ test('the wider entry shape behaves the same here as in the kernel store: validi
   sqlite.close();
 });
 
+test('an episodic note with no end of its own leaves list and topics after 14 days, as in the kernel store; a pin keeps it', async () => {
+  // Written on May 1, read on June 1: 31 days, past the 14-day default.
+  let at = new Date('2026-05-01T00:00:00.000Z');
+  const sqlite = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const reference = new InMemoryAgentMemoryStore({ now: () => at });
+  const seed = async (store) => {
+    const lasting = await store.append('ava', 'the deploy runs on MySQL', { about: ['deploy'], kind: 'semantic' });
+    // A note that replaced a fact: going stale must not bring the fact back.
+    await store.append('ava', 'the deploy moved to Postgres today', {
+      about: ['deploy'],
+      kind: 'episodic',
+      supersedes: lasting.id,
+    });
+    const stale = await store.append('ava', 'PR 12 is at head abc123', { about: ['pr-12'], kind: 'episodic' });
+    await store.append('ava', 'the freeze lasts through December', {
+      about: ['freeze'],
+      kind: 'episodic',
+      validUntil: '2026-12-31T00:00:00.000Z',
+    });
+    const pinned = await store.append('ava', 'the on-call rota is in the ops doc', { about: ['rota'], kind: 'episodic' });
+    assert.equal((await store.pin('ava', pinned.id)).pinned, true);
+    at = new Date('2026-05-25T00:00:00.000Z');
+    await store.append('ava', 'the loop is waiting on review', { about: ['loop'], kind: 'episodic' });
+    at = new Date('2026-06-01T00:00:00.000Z');
+    return { stale, pinned };
+  };
+
+  for (const [label, store] of [
+    ['sqlite', sqlite],
+    ['in-memory', reference],
+  ]) {
+    at = new Date('2026-05-01T00:00:00.000Z');
+    const { stale, pinned } = await seed(store);
+    // What is true now: the explicit window wins, a 7-day-old note stays,
+    // and the 31-day-old notes leave.
+    assert.deepEqual(
+      (await store.list('ava')).entries.map((entry) => entry.content),
+      ['the freeze lasts through December', 'the loop is waiting on review'],
+      label,
+    );
+    assert.deepEqual(
+      (await store.list('ava', { limit: 10 })).entries.map((entry) => entry.content),
+      ['the freeze lasts through December', 'the loop is waiting on review'],
+      label,
+    );
+    assert.deepEqual(
+      (await store.topics('ava')).map((topic) => topic.name).sort(),
+      ['freeze', 'loop'],
+      label,
+    );
+    // Expired is not deleted: every live note is still listed with
+    // validity 'all' and still found by search.
+    assert.equal((await store.list('ava', { validity: 'all' })).entries.length, 5, label);
+    assert.deepEqual(
+      (await store.search('ava', 'abc123')).entries.map((entry) => entry.id),
+      [stale.id],
+      label,
+    );
+    // The replaced fact stays replaced.
+    assert.equal((await store.search('ava', 'MySQL')).entries.length, 0, label);
+    // Pinning says the note is still current: the pinned core reads the
+    // record's own window, not the default.
+    assert.deepEqual(
+      (await store.pinned('ava')).map((entry) => entry.id),
+      [pinned.id],
+      label,
+    );
+  }
+  sqlite.close();
+});
+
 test('usage counters live beside the record here, and never in it', async () => {
   const store = createSqliteMemoryStore(await newFile());
   const written = await store.append('ava', 'the heron rookery is on the north bank');

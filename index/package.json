@@ -4,7 +4,7 @@
   "description": "The curated list of Stratus plugins that `stratus setup` offers under More plugins.",
   "type": "module",
   "license": "Apache-2.0",
-  "files": [],
+  "files": ["NOTICE"],
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test test/*.test.js"

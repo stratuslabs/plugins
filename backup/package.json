@@ -10,7 +10,8 @@
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "NOTICE"
   ],
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "backup" },

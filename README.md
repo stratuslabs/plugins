@@ -161,4 +161,7 @@ dashboard. Their packages are in
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE). Each package ships its own copy.
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Each package ships its
+own copy of both. The Release workflow refuses a package whose LICENSE differs
+from this one, whose NOTICE doesn't start with this one, or that npm would pack
+without either.

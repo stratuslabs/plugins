@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,13 +13,19 @@ afterEach(() => root && rmSync(root, { recursive: true, force: true }));
 const REPO = 'stratuslabs/plugins';
 const resolve = (dir, tag) => resolveRelease(dir, tag, REPO);
 
+const LICENSE_TEXT = 'Apache License\nVersion 2.0, January 2004\n';
+const NOTICE_TEXT = 'Stratus Agent plugins\nCopyright 2026 Stratus Labs\n';
+
 function repo(packages) {
   root = mkdtempSync(join(tmpdir(), 'plugins-release-'));
+  writeFileSync(join(root, 'LICENSE'), LICENSE_TEXT);
+  writeFileSync(join(root, 'NOTICE'), NOTICE_TEXT);
   for (const [dir, manifest] of Object.entries(packages)) {
     mkdirSync(join(root, dir), { recursive: true });
     if (manifest !== null) {
       writeFileSync(join(root, dir, 'package.json'), JSON.stringify(manifest));
-      writeFileSync(join(root, dir, 'LICENSE'), 'Apache License\n');
+      writeFileSync(join(root, dir, 'LICENSE'), LICENSE_TEXT);
+      writeFileSync(join(root, dir, 'NOTICE'), NOTICE_TEXT);
     }
   }
   return root;
@@ -116,6 +123,44 @@ test('a package ships under Apache-2.0 with its own LICENSE file', () => {
   const dir = repo({ peer: pkg() });
   rmSync(join(dir, 'peer', 'LICENSE'));
   assert.throws(() => resolve(dir, 'peer/v0.1.0'), /peer has no LICENSE file/);
+});
+
+test("a package's LICENSE is the repository's Apache 2.0 text, byte for byte", () => {
+  const dir = repo({ peer: pkg() });
+  for (const text of ['MIT License\n\nCopyright (c) 2026 Stratus Labs\n', '', LICENSE_TEXT.slice(0, 10), `${LICENSE_TEXT}\n`]) {
+    writeFileSync(join(dir, 'peer', 'LICENSE'), text);
+    assert.throws(() => resolve(dir, 'peer/v0.1.0'), /peer\/LICENSE is not the Apache 2\.0 text in the repository's LICENSE/);
+  }
+  writeFileSync(join(dir, 'peer', 'LICENSE'), LICENSE_TEXT);
+  assert.doesNotThrow(() => resolve(dir, 'peer/v0.1.0'));
+});
+
+test("a package ships a NOTICE that starts with the repository's NOTICE, and may add attributions after it", () => {
+  const dir = repo({ peer: pkg() });
+  rmSync(join(dir, 'peer', 'NOTICE'));
+  assert.throws(() => resolve(dir, 'peer/v0.1.0'), /peer has no NOTICE file/);
+  for (const text of ['', 'Something else\n', NOTICE_TEXT.slice(0, 12)]) {
+    writeFileSync(join(dir, 'peer', 'NOTICE'), text);
+    assert.throws(() => resolve(dir, 'peer/v0.1.0'), /peer\/NOTICE does not start with the repository's NOTICE/);
+  }
+  writeFileSync(join(dir, 'peer', 'NOTICE'), `${NOTICE_TEXT}\nThis package includes files from A2UI, licensed under Apache 2.0.\n`);
+  assert.doesNotThrow(() => resolve(dir, 'peer/v0.1.0'));
+});
+
+test('npm packs both LICENSE and NOTICE, so "files" has to name NOTICE', () => {
+  const dir = repo({ peer: pkg({ files: ['index.js'] }) });
+  writeFileSync(join(dir, 'peer', 'index.js'), 'export default {};\n');
+  assert.throws(() => resolve(dir, 'peer/v0.1.0'), /npm pack leaves NOTICE out of peer\. Add "NOTICE" to "files" in peer\/package\.json/);
+  writeFileSync(join(dir, 'peer', 'package.json'), JSON.stringify(pkg({ files: ['index.js', 'NOTICE'] })));
+  assert.doesNotThrow(() => resolve(dir, 'peer/v0.1.0'));
+});
+
+test("the repository's LICENSE is the Apache License 2.0 text from apache.org, unmodified", () => {
+  root = undefined;
+  const here = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const sha256 = createHash('sha256').update(readFileSync(join(here, 'LICENSE'))).digest('hex');
+  // https://www.apache.org/licenses/LICENSE-2.0.txt
+  assert.equal(sha256, 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30');
 });
 
 test('every package in this repository can be tagged for release as it stands', () => {

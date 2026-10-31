@@ -6,7 +6,7 @@
   "exports": "./index.js",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "sandbox" },
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.13 <23 || >=23.4" },
   "os": ["darwin"],
   "scripts": {
     "test": "node --test test/*.test.js"

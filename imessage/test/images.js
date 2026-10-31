@@ -1,7 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
 /** Test images, written for real, so the channel reads actual files. */
@@ -78,18 +76,21 @@ export const jpegSize = (bytes) => {
   return undefined;
 };
 
-let tiny;
-/** A real 16×8 JPEG, written by sips once. */
-export const tinyJpeg = () => {
-  if (!tiny) {
-    const directory = mkdtempSync(path.join(tmpdir(), 'imessage-jpeg-'));
-    try {
-      writeFileSync(path.join(directory, 'a.png'), png(16, 8));
-      execFileSync('/usr/bin/sips', ['-s', 'format', 'jpeg', path.join(directory, 'a.png'), '--out', path.join(directory, 'a.jpg')], { stdio: 'ignore' });
-      tiny = readFileSync(path.join(directory, 'a.jpg'));
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  }
-  return tiny;
-};
+/**
+ * A real 16×8 JPEG, made once from png(16, 8) by the Mac's sips (sips-311) and
+ * kept as bytes, so a test that only needs a JPEG runs where there is no sips.
+ */
+const TINY_JPEG = [
+  '/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQA',
+  'AAABAAAAEKADAAQAAAABAAAACAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmA',
+  'CZjs+EJ+/8AAEQgACAAQAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQE',
+  'AAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldY',
+  'WVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk',
+  '5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMR',
+  'BAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdo',
+  'aWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz',
+  '9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8P',
+  'D//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQA',
+  'Af/aAAwDAQACEQMRAD8A/EZIqspFQlWUr+9akmfOYaoz/9k=',
+].join('');
+export const tinyJpeg = () => Buffer.from(TINY_JPEG, 'base64');

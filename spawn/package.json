@@ -4,7 +4,7 @@
   "description": "agent.spawn: run several tasks at once in short-lived sub-agents with only the tools you hand them.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "spawn" },
   "engines": { "node": ">=22" },
   "scripts": {

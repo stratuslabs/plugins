@@ -4,7 +4,7 @@
   "description": "Overnight experiment dreams: each night, in a window you set, run overnight-experimenter under the macOS sandbox, at most once per experiment, and report what it tried in the morning.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "dreams" },
   "engines": { "node": ">=22" },
   "os": ["darwin"],

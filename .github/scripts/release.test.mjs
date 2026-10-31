@@ -16,7 +16,10 @@ function repo(packages) {
   root = mkdtempSync(join(tmpdir(), 'plugins-release-'));
   for (const [dir, manifest] of Object.entries(packages)) {
     mkdirSync(join(root, dir), { recursive: true });
-    if (manifest !== null) writeFileSync(join(root, dir, 'package.json'), JSON.stringify(manifest));
+    if (manifest !== null) {
+      writeFileSync(join(root, dir, 'package.json'), JSON.stringify(manifest));
+      writeFileSync(join(root, dir, 'LICENSE'), 'Apache License\n');
+    }
   }
   return root;
 }
@@ -24,6 +27,7 @@ function repo(packages) {
 const pkg = (extra = {}, dir = 'peer') => ({
   name: '@stratusagent/plugin-peer',
   version: '0.1.0',
+  license: 'Apache-2.0',
   scripts: { test: 'node --test' },
   repository: { type: 'git', url: 'git+https://github.com/stratuslabs/plugins.git', directory: dir },
   ...extra,
@@ -102,6 +106,16 @@ test('repository.directory names the package directory, so npm links its source'
     /peer\/package\.json has repository\.directory "dreams"; it should be "peer"/);
   assert.throws(() => resolve(repo({ peer: pkg({ repository: { type: 'git', url: 'https://github.com/stratuslabs/plugins' } }) }), 'peer/v0.1.0'),
     /peer\/package\.json has repository\.directory undefined; it should be "peer"/);
+});
+
+test('a package ships under Apache-2.0 with its own LICENSE file', () => {
+  assert.throws(() => resolve(repo({ peer: pkg({ license: 'MIT' }) }), 'peer/v0.1.0'),
+    /peer\/package\.json has license "MIT"; packages here are Apache-2\.0/);
+  assert.throws(() => resolve(repo({ peer: pkg({ license: undefined }) }), 'peer/v0.1.0'),
+    /peer\/package\.json has license undefined; packages here are Apache-2\.0/);
+  const dir = repo({ peer: pkg() });
+  rmSync(join(dir, 'peer', 'LICENSE'));
+  assert.throws(() => resolve(dir, 'peer/v0.1.0'), /peer has no LICENSE file/);
 });
 
 test('every package in this repository can be tagged for release as it stands', () => {

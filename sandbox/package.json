@@ -4,7 +4,7 @@
   "description": "Run every agent command under the macOS sandbox: write only the agent's workspace, read only the system and what you list.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "sandbox" },
   "engines": { "node": ">=22.13 <23 || >=23.4" },
   "os": ["darwin"],

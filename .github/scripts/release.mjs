@@ -5,8 +5,9 @@
 // the version there is the tag's version, the name is in the @stratusagent/
 // scope, the package isn't private, and its repository is this GitHub
 // repository (npm trusted publishing refuses a package whose repository.url
-// is anything else). Anything else fails before a test runs, so a mistyped
-// tag never stages a package.
+// is anything else), and it ships under Apache-2.0 with a LICENSE file of its
+// own (npm packs a package's directory, not the repository root). Anything
+// else fails before a test runs, so a mistyped tag never stages a package.
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,6 +16,7 @@ import { packageRunners } from './packages.mjs';
 
 const TAG = /^([a-z0-9][a-z0-9_-]*)\/v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 const SCOPE = '@stratusagent/';
+const LICENSE_ID = 'Apache-2.0';
 // npm's rule for a new scoped name: lowercase, URL-safe, no leading dot or
 // underscore, 214 characters at most. It also keeps line breaks out of the
 // name, which goes into $GITHUB_OUTPUT one name=value per line.
@@ -56,6 +58,12 @@ export function resolveRelease(root, tag, repository) {
   }
   const repoProblem = repositoryProblem(dir, pkg, repository);
   if (repoProblem) throw new Error(repoProblem);
+  if (pkg.license !== LICENSE_ID) {
+    throw new Error(`${dir}/package.json has license ${JSON.stringify(pkg.license)}; packages here are ${LICENSE_ID}.`);
+  }
+  if (!existsSync(join(root, dir, 'LICENSE'))) {
+    throw new Error(`${dir} has no LICENSE file, so its npm package would ship without the license text.`);
+  }
   const { runners, problem } = packageRunners(dir, pkg);
   if (problem) throw new Error(problem);
   return { dir, name: pkg.name, version, include: runners.map((runner) => ({ package: dir, runner })) };

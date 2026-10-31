@@ -128,5 +128,5 @@ The tests use A2UI's basic catalog and three of its examples, copied into
 
 ## License
 
-MIT. `schemas/v1_0/` and `test/fixtures/` hold files from A2UI under the
-Apache License 2.0. See [NOTICE](./NOTICE).
+Apache 2.0. `schemas/v1_0/` and `test/fixtures/` hold files from A2UI, also
+under the Apache License 2.0. See [NOTICE](./NOTICE).

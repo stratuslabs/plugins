@@ -1,0 +1,627 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+
+import { createPlugin } from '../index.js';
+import { createImessageAdapter } from '../lib/adapter.js';
+import { parseImessageConfig } from '../lib/config.js';
+import { createWatermarkStore } from '../lib/watermark.js';
+import { BODIES, createChatDb } from './chatdb-fixture.js';
+import { png, writeHeic } from './images.js';
+
+const HANDLE = 'ava.agent@icloud.com';
+const PHONE = '+15551234821';
+const STRANGER = '+15550009999';
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+/** A gateway that answers every dispatch with `reply(input)` as one turn. */
+const fakeGateway = (reply = (input) => ({ text: `echo: ${input.userMessage}` })) => {
+  const dispatched = [];
+  return {
+    dispatched,
+    bus: { subscribe: () => () => {} },
+    agents: () => [{ id: 'ava' }],
+    resolveApproval: () => false,
+    dispatch: async (input) => {
+      dispatched.push(input);
+      const outcome = await reply(input);
+      if (outcome.throw) {
+        throw outcome.throw;
+      }
+      if (outcome.repeat) {
+        input.onRepeat?.(outcome.repeat);
+      }
+      const user = { role: 'user', content: input.userMessage, idempotencyKey: input.idempotencyKey, ...(outcome.turnError ? { turnError: outcome.turnError } : {}) };
+      return {
+        id: input.sessionId,
+        status: outcome.turnError ? 'failed' : 'completed',
+        messages: [...(outcome.before ?? []), user, ...(outcome.text !== undefined ? [{ role: 'assistant', content: outcome.text }] : []), ...(outcome.after ?? [])],
+      };
+    },
+  };
+};
+
+const fakeSender = ({ fail = () => false } = {}) => {
+  const sent = [];
+  return {
+    sent,
+    sendText: async (to, text) => {
+      if (fail(to, text)) {
+        throw new Error('Messages refused the send: test');
+      }
+      sent.push([to, text]);
+    },
+  };
+};
+
+const setup = async (t, { config = {}, gateway = fakeGateway(), sender = fakeSender(), seed = true, attachments = {} } = {}) => {
+  const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'imessage-adapter-')));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const chatDb = path.join(directory, 'chat.db');
+  const fixture = createChatDb(chatDb);
+  const logs = [];
+  const parsed = parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} }, ...config }, { platform: 'darwin' });
+  const stateDirectory = path.join(directory, 'state');
+  const adapter = createImessageAdapter({
+    config: parsed,
+    stateDirectory,
+    chatDb,
+    sender,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+    sendRetryMs: [1, 1],
+    attachments: { directory: path.join(directory, 'Attachments'), pollMs: 10, ...attachments },
+  });
+  t.after(async () => {
+    await adapter.stop();
+    fixture.close();
+  });
+  if (seed) {
+    await adapter.start(gateway);
+  }
+  return { directory, chatDb, fixture, adapter, gateway, sender, logs, stateDirectory };
+};
+
+const waitFor = async (check, ms = 3000) => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) {
+      return;
+    }
+    await settle();
+  }
+  assert.fail('timed out waiting');
+};
+
+test('a principal texting over iMessage gets a turn as the user, and the answer back as plain text', async (t) => {
+  const gateway = fakeGateway(() => ({ text: '**Sure.** See [the docs](https://example.com/docs).' }));
+  const { fixture, sender } = await setup(t, { gateway });
+  const { guid } = fixture.received(PHONE, { body: BODIES[1].blob });
+  await waitFor(() => sender.sent.length === 1);
+  const [input] = gateway.dispatched;
+  assert.equal(input.sessionId, `imessage:ava:${HANDLE}:${PHONE}`);
+  assert.equal(input.agentId, 'ava');
+  assert.equal(input.userMessage, BODIES[1].text);
+  assert.equal(input.idempotencyKey, `imessage:${HANDLE}:${guid}`);
+  assert.equal(input.metadata.senderTrust, 'user');
+  assert.deepEqual(input.metadata.conversation, { kind: 'direct', with: PHONE });
+  assert.deepEqual(sender.sent, [[PHONE, 'Sure. See the docs (https://example.com/docs).']]);
+});
+
+test('history in chat.db before the first start is never answered', async (t) => {
+  const { fixture, sender, gateway, adapter } = await setup(t, { seed: false });
+  fixture.received(PHONE);
+  await adapter.start(gateway);
+  await settle();
+  await settle();
+  assert.equal(gateway.dispatched.length, 0);
+  fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(gateway.dispatched.length, 1);
+});
+
+test('a stranger and a principal over SMS are refused before any turn, and the log masks them', async (t) => {
+  const { fixture, sender, gateway, logs } = await setup(t);
+  fixture.received(STRANGER);
+  fixture.received(PHONE, { service: 'SMS' });
+  const last = fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(gateway.dispatched.length, 1);
+  assert.match(gateway.dispatched[0].idempotencyKey, new RegExp(last.guid));
+  const all = logs.join('\n');
+  assert.match(all, /not a principal/);
+  assert.match(all, /over SMS, not iMessage/);
+  assert.ok(!all.includes(STRANGER) && !all.includes(PHONE));
+});
+
+test('under admit anyone a stranger gets a turn labelled unknown, with nobody named', async (t) => {
+  const { fixture, sender, gateway } = await setup(t, { config: { admit: 'anyone' } });
+  fixture.received(STRANGER);
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(gateway.dispatched[0].metadata.senderTrust, 'unknown');
+  assert.deepEqual(gateway.dispatched[0].metadata.conversation, { kind: 'direct' });
+  assert.equal(sender.sent[0][0], STRANGER);
+});
+
+test('a failed turn is told to the person', async (t) => {
+  const gateway = fakeGateway(() => ({ turnError: 'provider unavailable' }));
+  const { fixture, sender } = await setup(t, { gateway });
+  fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  assert.match(sender.sent[0][1], /couldn't finish that: provider unavailable/);
+});
+
+test('a repeat of a finished turn sends that turn\'s answer, not the newest one', async (t) => {
+  const gateway = fakeGateway(() => ({ repeat: 'finished', text: 'the original answer', after: [{ role: 'user', content: 'later' }, { role: 'assistant', content: 'a later answer' }] }));
+  const { fixture, sender } = await setup(t, { gateway });
+  fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  assert.deepEqual(sender.sent, [[PHONE, 'the original answer']]);
+});
+
+test('a repeat that another delivery is answering sends nothing', async (t) => {
+  const gateway = fakeGateway(() => ({ repeat: 'live', text: 'x' }));
+  const { fixture, sender, stateDirectory } = await setup(t, { gateway });
+  const row = fixture.received(PHONE);
+  await waitFor(() => createWatermarkStore({ directory: stateDirectory }).load('ava').record?.watermark === row.rowid);
+  assert.deepEqual(sender.sent, []);
+});
+
+test('a daemon on its way down says so and keeps the message for the next start', async (t) => {
+  const stopping = Object.assign(new Error('stopping'), { name: 'GatewayStoppingError', restarting: true });
+  const gateway = fakeGateway(() => ({ throw: stopping }));
+  const { fixture, sender, stateDirectory } = await setup(t, { gateway });
+  const store = createWatermarkStore({ directory: stateDirectory });
+  const before = store.load('ava').record.watermark;
+  fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  await settle();
+  assert.match(sender.sent[0][1], /restarting/);
+  assert.equal(store.load('ava').record.watermark, before);
+});
+
+test('a dispatch the gateway refuses is told to the person and not retried', async (t) => {
+  const gateway = fakeGateway(() => ({ throw: new Error('unknown agent') }));
+  const { fixture, sender, stateDirectory } = await setup(t, { gateway });
+  const row = fixture.received(PHONE);
+  await waitFor(() => sender.sent.length === 1);
+  await waitFor(() => createWatermarkStore({ directory: stateDirectory }).load('ava').record.watermark === row.rowid);
+  assert.match(sender.sent[0][1], /couldn't start on that: unknown agent/);
+  assert.equal(gateway.dispatched.length, 1);
+});
+
+test('an answer Messages will not send is kept for the next start, after retries', async (t) => {
+  let attempts = 0;
+  const sender = fakeSender({ fail: () => { attempts += 1; return true; } });
+  const { fixture, logs, stateDirectory } = await setup(t, { sender });
+  const store = createWatermarkStore({ directory: stateDirectory });
+  const before = store.load('ava').record.watermark;
+  fixture.received(PHONE);
+  await waitFor(() => logs.some((line) => /will be sent after the next start/.test(line)));
+  assert.equal(attempts, 3);
+  assert.equal(store.load('ava').record.watermark, before);
+});
+
+test('a long answer goes as several messages, in order', async (t) => {
+  const long = Array.from({ length: 30 }, (_, index) => `Paragraph ${index} ${'word '.repeat(40)}`).join('\n\n');
+  const gateway = fakeGateway(() => ({ text: long }));
+  const { fixture, sender } = await setup(t, { gateway });
+  fixture.received(PHONE);
+  await waitFor(() => sender.sent.length >= 2);
+  await settle();
+  assert.ok(sender.sent.every(([, text]) => text.length <= 4000));
+  assert.match(sender.sent[0][1], /^Paragraph 0/);
+  assert.equal(sender.sent.map(([, text]) => text).join('\n\n').replace(/\s+/g, ' '), long.replace(/\s+/g, ' ').trim());
+});
+
+test('resolveOutbound texts the agent\'s own people and refuses anyone else, before sending', async (t) => {
+  const { adapter, sender } = await setup(t, { config: { principals: ['dylan@example.com'] } });
+  const connection = await adapter.resolveOutbound({ agentId: 'ava', to: 'Dylan@Example.com' });
+  await connection.post('Good morning');
+  const approver = await adapter.resolveOutbound({ agentId: 'ava', to: '+1 (555) 123-4821' });
+  await approver.post('Hi');
+  assert.deepEqual(sender.sent, [['dylan@example.com', 'Good morning'], [PHONE, 'Hi']]);
+  await assert.rejects(adapter.resolveOutbound({ agentId: 'ava', to: STRANGER }), /only texts people listed/);
+  await assert.rejects(adapter.resolveOutbound({ agentId: 'ava', to: '555-1234' }), /not an iMessage handle/);
+  await assert.rejects(adapter.resolveOutbound({ agentId: 'juno', to: PHONE }), /not on iMessage here/);
+  assert.equal(sender.sent.length, 2);
+});
+
+test('an unreadable watermark file keeps the agent off iMessage and says how to recover', async (t) => {
+  const { adapter, gateway, stateDirectory, logs } = await setup(t, { seed: false });
+  createWatermarkStore({ directory: stateDirectory });
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(stateDirectory, { recursive: true });
+  writeFileSync(path.join(stateDirectory, 'watermarks.json'), 'not json');
+  await adapter.start(gateway);
+  assert.deepEqual(adapter.status(), {});
+  assert.ok(logs.some((line) => line.startsWith('WARN') && /not JSON/.test(line) && /Remove/.test(line)));
+});
+
+test('a chat.db that cannot be opened names the Full Disk Access fix', async (t) => {
+  const { adapter, gateway, logs } = await setup(t, { seed: false });
+  const blocked = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory: mkdtempSync(path.join(tmpdir(), 'imessage-adapter-')),
+    chatDb: '/nonexistent/chat.db',
+    warn: (line) => logs.push(`WARN ${line}`),
+  });
+  await blocked.start(gateway);
+  await blocked.stop();
+  await adapter.stop();
+  assert.ok(logs.some((line) => /Full Disk Access/.test(line) && line.includes(process.execPath)));
+});
+
+test('createPlugin registers the configured agent and names any it refused', async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'imessage-plugin-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const registered = [];
+  const warnings = [];
+  const context = {
+    channels: { register: (entry) => registered.push(entry) },
+    stateDirectory: { prepare: () => directory },
+    warn: (line) => warnings.push(line),
+  };
+  await createPlugin({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }).setup(context);
+  assert.equal(registered.length, 1);
+  assert.deepEqual(registered[0].agents, ['ava']);
+  assert.equal(registered[0].adapter.name, 'imessage');
+
+  await createPlugin({ handle: HANDLE, approvers: [PHONE], agents: { ava: {}, juno: {} } }, { platform: 'darwin' }).setup(context);
+  assert.deepEqual(registered[1].agents, []);
+  assert.ok(warnings.some((line) => /ava and juno/.test(line)));
+
+  await assert.rejects(createPlugin({}, {}).setup({ channels: context.channels }), /no state directory/);
+  await assert.rejects(createPlugin({}, {}).setup({}), /no channel handle/);
+});
+
+test('"stop" from an approver ends the turn running in their conversation; with nothing running it is a message', async (t) => {
+  let release;
+  const aborted = [];
+  const gateway = fakeGateway((input) => new Promise((resolve) => {
+    release = () => resolve({ text: 'late answer' });
+    input.signal?.addEventListener('abort', () => { aborted.push(input.signal.reason.message); resolve({ text: 'partial' }); });
+  }));
+  gateway.abortTurns = (sessionId, reason) => { aborted.push(`host:${sessionId}:${reason}`); return 1; };
+  const { fixture, sender } = await setup(t, { gateway });
+  fixture.received(PHONE, { text: 'do a long thing', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  fixture.received(PHONE, { text: 'Stop.', body: null });
+  await waitFor(() => sender.sent.length === 1);
+  assert.deepEqual(sender.sent, [[PHONE, 'Stopped.']]);
+  assert.ok(aborted.some((line) => /Stopped from iMessage by \+1•••••4821/.test(line)));
+  assert.ok(aborted.some((line) => line.startsWith(`host:imessage:ava:${HANDLE}:${PHONE}`)));
+  assert.equal(gateway.dispatched.length, 1);
+  release?.();
+});
+
+test('"stop" over SMS, or from someone who is not an approver, stops nothing', async (t) => {
+  const gateway = fakeGateway(() => ({ text: 'fine' }));
+  let calls = 0;
+  gateway.abortTurns = () => { calls += 1; return 1; };
+  const { fixture, sender } = await setup(t, { gateway, config: { principals: [PHONE, STRANGER] } });
+  fixture.received(PHONE, { text: 'stop', body: null, service: 'SMS' });
+  fixture.received(STRANGER, { text: 'stop', body: null });
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(calls, 0);
+  assert.equal(gateway.dispatched.length, 1);
+  assert.equal(gateway.dispatched[0].userMessage, 'stop');
+});
+
+/** Where Messages would keep a file, in the test's own attachments folder. */
+const fileIn = (directory, name) => {
+  const folder = path.join(directory, 'Attachments', 'ab', '01', name.replace(/\W/g, '_'));
+  mkdirSync(folder, { recursive: true });
+  return path.join(folder, name);
+};
+
+test('a photo reaches the turn as an image, an iPhone HEIC as a JPEG; other files are named', { skip: process.platform !== 'darwin' && 'needs sips' }, async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t);
+  const heic = fileIn(directory, 'IMG_0001.HEIC');
+  writeHeic(heic, 320, 240);
+  const screenshot = fileIn(directory, 'shot.png');
+  writeFileSync(screenshot, png(20, 10));
+  const memo = fileIn(directory, 'Audio Message.caf');
+  writeFileSync(memo, 'audio');
+  fixture.received(PHONE, { text: '￼', body: null, files: [{ filename: heic, mimeType: 'image/heic', uti: 'public.heic', transferName: 'IMG_0001.HEIC' }] });
+  fixture.received(PHONE, { text: 'look￼￼', body: null, files: [
+    { filename: screenshot, mimeType: 'image/png', transferName: 'shot.png' },
+    { filename: memo, mimeType: 'audio/x-caf', transferName: 'Audio Message.caf' },
+  ] });
+  await waitFor(() => sender.sent.length === 2);
+  const [photo, mixed] = gateway.dispatched;
+  assert.equal(photo.userMessage, '');
+  assert.deepEqual(photo.images.map(({ mediaType, name }) => [mediaType, name]), [['image/jpeg', 'IMG_0001.HEIC']]);
+  assert.equal(mixed.userMessage, 'look\n[Attached, name only: Audio Message.caf (not a kind of file that can be read here). You have only the names, so say so rather than guessing at what is in them.]');
+  assert.deepEqual(mixed.images.map(({ mediaType, name }) => [mediaType, name]), [['image/png', 'shot.png']]);
+});
+
+test('a file nobody can read still reaches the turn by name, and the log names only the row', async (t) => {
+  const { fixture, gateway, sender, logs } = await setup(t, { attachments: { timeoutMs: 40 } });
+  const { rowid } = fixture.received(PHONE, { text: '￼', body: null, files: [{ filename: '/etc/hosts', mimeType: 'text/plain', transferName: 'hosts' }] });
+  await waitFor(() => sender.sent.length === 1);
+  assert.match(gateway.dispatched[0].userMessage, /^\[Attached, name only: hosts \(could not be read\)/);
+  assert.equal(gateway.dispatched[0].images, undefined);
+  const line = logs.find((entry) => entry.includes('attachment'));
+  assert.match(line, new RegExp(`row ${rowid}`));
+  assert.doesNotMatch(line, /hosts/);
+});
+
+test('a message waiting for its file holds later ones in its conversation, not other conversations', async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t, { config: { principals: [PHONE, STRANGER] }, attachments: { timeoutMs: 5000 } });
+  const late = fileIn(directory, 'late.png');
+  fixture.received(PHONE, { text: 'first', body: null, files: [{ filename: late, mimeType: 'image/png', transferName: 'late.png' }] });
+  fixture.received(PHONE, { text: 'second', body: null });
+  fixture.received(STRANGER, { text: 'elsewhere', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  await settle();
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['elsewhere']);
+  writeFileSync(late, png(8, 8));
+  await waitFor(() => sender.sent.length === 3);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['elsewhere', 'first', 'second']);
+  assert.equal(gateway.dispatched[1].images.length, 1);
+});
+
+test('once a message with a file is handed over, the next one goes too, without waiting for its answer', async (t) => {
+  let release;
+  const gateway = fakeGateway((input) => (input.userMessage === 'first'
+    ? new Promise((resolve) => { release = () => resolve({ text: 'one' }); })
+    : { text: 'two' }));
+  const { directory, fixture, sender } = await setup(t, { gateway });
+  const ready = fileIn(directory, 'ready.png');
+  writeFileSync(ready, png(8, 8));
+  fixture.received(PHONE, { text: 'first', body: null, files: [{ filename: ready, mimeType: 'image/png' }] });
+  fixture.received(PHONE, { text: 'second', body: null });
+  await waitFor(() => gateway.dispatched.length === 2);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['first', 'second']);
+  release();
+  await waitFor(() => sender.sent.length === 2);
+});
+
+test('"stop" while a message waits for its file ends it and the one behind it before any turn, said once', async (t) => {
+  const { directory, fixture, gateway, sender } = await setup(t, { attachments: { timeoutMs: 10_000 } });
+  fixture.received(PHONE, { text: 'what is this', body: null, files: [{ filename: fileIn(directory, 'never.png'), mimeType: 'image/png' }] });
+  fixture.received(PHONE, { text: 'and this', body: null });
+  await settle();
+  fixture.received(PHONE, { text: 'stop', body: null });
+  await waitFor(() => sender.sent.length === 1, 2000);
+  await settle();
+  await settle();
+  assert.deepEqual(sender.sent, [[PHONE, 'Stopped.']]);
+  assert.equal(gateway.dispatched.length, 0);
+});
+
+test('a channel stopping while a message waits for its file keeps it, and the next start answers it whole', async (t) => {
+  const { directory, chatDb, fixture, adapter, gateway, stateDirectory } = await setup(t, { attachments: { timeoutMs: 10_000 } });
+  const late = fileIn(directory, 'late.png');
+  fixture.received(PHONE, { text: 'see this', body: null, files: [{ filename: late, mimeType: 'image/png', transferName: 'late.png' }] });
+  await settle();
+  const started = Date.now();
+  await adapter.stop();
+  assert.ok(Date.now() - started < 1000, `stop took ${Date.now() - started}ms`);
+  assert.equal(gateway.dispatched.length, 0);
+  writeFileSync(late, png(8, 8));
+  const next = fakeGateway();
+  const sender = fakeSender();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender,
+    intervalMs: 10,
+    watch: false,
+    attachments: { directory: path.join(directory, 'Attachments'), pollMs: 10 },
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await waitFor(() => sender.sent.length === 1);
+  assert.equal(next.dispatched[0].userMessage, 'see this');
+  assert.equal(next.dispatched[0].images.length, 1);
+});
+
+// chat.db replaced (stratuslabs/plugins#23).
+
+/**
+ * Builds another chat.db beside `chatDb` with `fill`, then swaps it into
+ * place the way a restore does. The old writer is closed first, as Messages
+ * is while its database is swapped, so no WAL of the old file is left
+ * beside the new one.
+ */
+const replaceChatDb = (chatDb, fixture, fill) => {
+  fixture.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  fixture.close();
+  fixture.close = () => {};
+  const nextFile = `${chatDb}.next`;
+  const next = createChatDb(nextFile);
+  const rows = fill(next);
+  next.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  next.close();
+  rmSync(`${nextFile}-wal`, { force: true });
+  rmSync(`${nextFile}-shm`, { force: true });
+  renameSync(nextFile, chatDb);
+  return rows;
+};
+
+test('a chat.db replaced while the daemon was down is recovered from at the next start: history stays history', async (t) => {
+  const { chatDb, fixture, adapter, gateway, sender, logs, stateDirectory } = await setup(t);
+  const read = new Date(Date.now() - 60_000);
+  fixture.received(PHONE, { text: 'before the swap', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  const rows = replaceChatDb(chatDb, fixture, (next) => ({
+    history: next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) }),
+    again: next.received(PHONE, { text: 'before the swap', body: null, date: read }),
+    fresh: next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) }),
+    synced: next.received(PHONE, { text: 'older, synced in late', body: null, date: new Date(read.getTime() - 7_200_000) }),
+  }));
+  const next = fakeGateway();
+  const nextSender = fakeSender();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender: nextSender,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await waitFor(() => nextSender.sent.length === 1);
+  await settle();
+  await settle();
+  assert.deepEqual(next.dispatched.map((input) => input.userMessage), ['sent around the swap']);
+  assert.equal(gateway.dispatched.length, 1);
+  assert.ok(logs.some((line) => /WARN imessage: ava found chat\.db replaced \(chat\.db is a different file/.test(line)), logs.join('\n'));
+  assert.ok(!logs.some((line) => /Remove .*watermarks\.json/.test(line)), 'no hand-holding needed');
+  const record = createWatermarkStore({ directory: stateDirectory }).load('ava').record;
+  assert.ok(record.watermark >= rows.fresh.rowid);
+  assert.equal(record.historyThrough, read.getTime());
+});
+
+test('a chat.db replaced while the channel runs is reopened and recovered from, and later messages are answered', async (t) => {
+  const { chatDb, fixture, gateway, sender, logs } = await setup(t);
+  const read = new Date(Date.now() - 60_000);
+  fixture.received(PHONE, { text: 'before the swap', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) });
+    next.received(PHONE, { text: 'before the swap', body: null, date: read });
+    next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) });
+  });
+  await waitFor(() => sender.sent.length === 2);
+  const writer = createChatDb(chatDb, { existing: true });
+  t.after(() => writer.close());
+  writer.received(PHONE, { text: 'after the swap', body: null });
+  await waitFor(() => sender.sent.length === 3);
+  await settle();
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['before the swap', 'sent around the swap', 'after the swap']);
+  assert.equal(logs.filter((line) => /found chat\.db replaced/.test(line)).length, 1, logs.join('\n'));
+});
+
+test('a replaced chat.db with no date to recover from still stops the agent and says how to restart it', async (t) => {
+  const { chatDb, fixture, adapter, logs, stateDirectory } = await setup(t);
+  await adapter.stop();
+  // Seeded on an empty chat.db: no message was ever read, so there is no date.
+  replaceChatDb(chatDb, fixture, (next) => next.received(PHONE, { text: 'history', body: null }));
+  const next = fakeGateway();
+  const again = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender: fakeSender(),
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => again.stop());
+  await again.start(next);
+  await settle();
+  assert.equal(next.dispatched.length, 0);
+  assert.ok(logs.some((line) => /is not on iMessage: .*Remove .*watermarks\.json/.test(line)), logs.join('\n'));
+});
+
+/** Another adapter on the same state and chat.db, as the next daemon start. */
+const startAgain = async (t, { stateDirectory, chatDb, logs }) => {
+  const gateway = fakeGateway();
+  const sender = fakeSender();
+  const adapter = createImessageAdapter({
+    config: parseImessageConfig({ handle: HANDLE, approvers: [PHONE], agents: { ava: {} } }, { platform: 'darwin' }),
+    stateDirectory,
+    chatDb,
+    sender,
+    log: (line) => logs.push(line),
+    warn: (line) => logs.push(`WARN ${line}`),
+    intervalMs: 10,
+    watch: false,
+  });
+  t.after(() => adapter.stop());
+  await adapter.start(gateway);
+  return { gateway, sender, adapter };
+};
+
+test('an answer that could not be sent when chat.db was replaced is sent from the new one, after the old answers finish', async (t) => {
+  // Messages refuses the first answer's three tries, then sends.
+  let tries = 0;
+  const sender = fakeSender({ fail: () => (tries += 1) <= 3 });
+  let release;
+  let calls = 0;
+  const gateway = fakeGateway((input) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Promise((resolve) => { release = () => resolve({ text: 'the answer' }); });
+    }
+    return input.userMessage === 'slow one' ? { text: 'the answer', repeat: 'finished' } : { text: `echo: ${input.userMessage}` };
+  });
+  const { chatDb, fixture, logs } = await setup(t, { gateway, sender });
+  const read = new Date(Date.now() - 60_000);
+  const slow = fixture.received(PHONE, { text: 'slow one', body: null, date: read });
+  await waitFor(() => gateway.dispatched.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'slow one', body: null, date: read, guid: slow.guid });
+    next.received(PHONE, { text: 'sent around the swap', body: null, date: new Date(read.getTime() + 30_000) });
+  });
+  await settle();
+  await settle();
+  assert.equal(gateway.dispatched.length, 1, 'the new file waits while an answer from the old one is out');
+  release();
+  await waitFor(() => sender.sent.length === 2);
+  assert.ok(logs.some((line) => /could not send its answer to row 1/.test(line)));
+  assert.deepEqual(sender.sent.map(([, text]) => text), ['the answer', 'echo: sent around the swap']);
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['slow one', 'slow one', 'sent around the swap']);
+});
+
+test('a message kept at shutdown is answered after chat.db is replaced while the daemon is down', async (t) => {
+  const stopping = Object.assign(new Error('stopping'), { name: 'GatewayStoppingError', restarting: true });
+  const { chatDb, fixture, adapter, sender, stateDirectory, logs } = await setup(t, { gateway: fakeGateway(() => ({ throw: stopping })) });
+  const read = new Date(Date.now() - 60_000);
+  const kept = fixture.received(PHONE, { text: 'answer me later', body: null, date: read });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  replaceChatDb(chatDb, fixture, (next) => {
+    next.received(PHONE, { text: 'old history', body: null, date: new Date(read.getTime() - 3_600_000) });
+    next.received(PHONE, { text: 'answer me later', body: null, date: read, guid: kept.guid });
+  });
+  const again = await startAgain(t, { stateDirectory, chatDb, logs });
+  await waitFor(() => again.sender.sent.length === 1);
+  await settle();
+  assert.deepEqual(again.gateway.dispatched.map((input) => input.userMessage), ['answer me later']);
+  assert.deepEqual(createWatermarkStore({ directory: stateDirectory }).load('ava').record.carry, []);
+});
+
+test('a record from before dates were kept gets its date stored at the next start', async (t) => {
+  const { fixture, adapter, sender, stateDirectory, chatDb, logs } = await setup(t);
+  fixture.received(PHONE, { text: 'hello', body: null, date: new Date(Date.now() - 5000) });
+  await waitFor(() => sender.sent.length === 1);
+  await adapter.stop();
+  const store = createWatermarkStore({ directory: stateDirectory });
+  const { observedDate, ...old } = store.load('ava').record;
+  assert.ok(observedDate > 0);
+  store.save('ava', old);
+  await startAgain(t, { stateDirectory, chatDb, logs });
+  assert.equal(store.load('ava').record.observedDate, observedDate);
+});
+
+test('a stop while a replaced chat.db waits on an answer starts nothing on the new file', async (t) => {
+  let release;
+  const gateway = fakeGateway(() => new Promise((resolve) => { release = () => resolve({ text: 'late' }); }));
+  const { chatDb, fixture, adapter } = await setup(t, { gateway });
+  fixture.received(PHONE, { text: 'slow one', body: null });
+  await waitFor(() => gateway.dispatched.length === 1);
+  replaceChatDb(chatDb, fixture, (next) => next.received(PHONE, { text: 'on the new file', body: null }));
+  await settle();
+  const stopped = adapter.stop();
+  release();
+  await stopped;
+  await settle();
+  await settle();
+  assert.deepEqual(adapter.status(), {});
+  assert.deepEqual(gateway.dispatched.map((input) => input.userMessage), ['slow one']);
+});

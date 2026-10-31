@@ -40,11 +40,16 @@ npm install -g @stratusagent/plugin-peer
     "@stratusagent/plugin-peer": {
       "enabled": true,
       "self": "studio",
-      "listen": { "host": "0.0.0.0", "port": 4180 }
+      "listen": { "host": "::", "port": 4180 }
     }
   }
 }
 ```
+
+`::` accepts both IPv6 and IPv4. Use it rather than `0.0.0.0` wherever the
+sender reaches this daemon by a name that resolves to IPv6: on Fly's private
+network every `.internal` name does, and a listener on `0.0.0.0` there
+refuses every request (`unreachable`, `ECONNREFUSED`).
 
 Then give each pair of agents a shared secret, stored on both sides under
 the name of the *other* daemon:
@@ -88,6 +93,8 @@ A request is also refused when:
 - its request id is already running or already answered (`already running`,
   `already answered`), so a retry never runs a turn twice
 - it would exceed the hop budget (`depth limit`)
+- the receiving daemon is stopping (`the peer is stopping`); calling again
+  later reaches it once it's back
 
 An answer from a peer is another agent's words. On the receiving daemon the
 turn runs with sender trust `agent`, never as that daemon's principal. On
@@ -122,10 +129,30 @@ budget. An A → B → A loop therefore stops once the budget is spent.
 | --- | --- |
 | `result` | `answer` holds the remote agent's final reply |
 | `refused` | `reason` says why: the sender refused before sending, or the receiver refused |
-| `failed` | The remote turn failed. No detail from the other daemon is passed on |
+| `failed` | The remote turn failed, or the peer stopped it because the peer was shutting down. No other detail from the other daemon is passed on |
 | `timed out` | No answer within `timeoutMs` |
-| `unreachable` | The connection failed |
+| `unreachable` | The connection failed, and `error` says how: `ECONNREFUSED` (nothing listening at that address), `ENOTFOUND` (the name doesn't resolve, as for a stopped machine on Fly's private network), or the connection closing mid-answer. If it dropped after the peer had started the turn, the peer stopped that turn when the connection closed, and the turn may have done part of its work first. Calling again sends a new request |
 | `cancelled` | The caller's turn was stopped. The receiver aborts the remote turn when the connection closes, but the caller can't wait for confirmation, so the remote turn may still have finished |
+
+## When a daemon stops
+
+A receiving daemon that is stopping (a restart, an upgrade, a machine stop)
+lets its running turns finish first, as it does for every channel, and then
+sends each one's answer before it closes the listener: a turn that finished
+comes back as `result`, and one it had to abort as `failed`. Give it time to
+do that. Stratus drains for up to 30 seconds and then gives aborted turns 30
+more, so a platform's stop timeout should be over a minute (`kill_timeout`
+on Fly, where the default is 5 seconds, `stop_grace_period` in compose).
+A request that arrives while the daemon is stopping is refused as `the peer
+is stopping` and never runs.
+
+A daemon killed outright can't close its connections. If the asking daemon's
+machine dies mid-request, the peer can't tell the caller is gone, finishes
+the turn, and its answer reaches nobody. If the receiving daemon is killed
+mid-turn, the caller gets `unreachable`, and the receiver's next start
+continues that turn once (a peer turn carries an idempotency key, like any
+keyed message) with no one left to read the answer. Asking again sends a
+new request, which runs a new turn.
 
 ## Not yet
 

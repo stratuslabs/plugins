@@ -50,7 +50,7 @@ killed, the pipe closes and the tether stops the run's whole process group
 `evaluate.sh` started is still running in its group, the tether stops that
 too before the run is recorded as ended. Code that leaves its process group
 on purpose (`setsid`) escapes this; the sandbox still applies to it. One experiment directory belongs
-to one agent: config that lists it twice is refused at load, and two agents
+to one agent: config that lists it twice, even by two paths through a symlink, is refused at load, and two agents
 never run in the same directory at once, even through a symlink. That comes with running agent-written code. Running the daemon
 as a dedicated low-privilege user would narrow it further, but that's host
 setup, not something this plugin can do.
@@ -127,7 +127,7 @@ contains, any agent workspace or protected path. Whoever can edit
   old run has finished stopping and let go of its directory. The interrupted one isn't retried that
   night.
 - **Report:** when a run ends, the plugin runs `overnight report` (same
-  sandbox, same tether, stopped after two minutes) and summarizes only the
+  sandbox, same tether, stopped after two minutes or when the daemon stops) and summarizes only the
   lines appended to `experiments.jsonl` that night, reading at most 8 MiB of
   them, since the experimenting model can make that file any size: attempts, kept, not kept, failed, best score before and after, and up
   to five kept changes. The run's output goes to a log in the plugin's state

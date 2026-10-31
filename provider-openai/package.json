@@ -1,0 +1,80 @@
+{
+  "name": "@stratusagent/provider-openai",
+  "version": "0.14.0",
+  "description": "The OpenAI-compatible chat-completions provider as a Stratus plugin: registers `openai-compatible`, selectable by a soul, credentialed per agent through the plugin seam",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "provider-openai"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@stratusagent/providers": "^0.14.0"
+  },
+  "devDependencies": {
+    "@stratusagent/core": "^0.14.0",
+    "@stratusagent/plugins": "^0.14.0",
+    "@stratusagent/state": "^0.14.0"
+  },
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "openai",
+    "provider"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "providers": [
+        {
+          "name": "openai-compatible"
+        }
+      ]
+    },
+    "credentials": [
+      "openai.apiKey"
+    ],
+    "config": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object"
+        },
+        "vision": {
+          "type": "boolean"
+        },
+        "requestTimeoutMs": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

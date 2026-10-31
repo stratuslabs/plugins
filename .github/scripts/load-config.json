@@ -1,0 +1,6 @@
+{
+  "@stratusagent/memory-sqlite": { "path": "{state}/memory.sqlite" },
+  "@stratusagent/plugin-a2ui": { "catalogs": [{ "path": "{package}/test/fixtures/basic_catalog.json" }] },
+  "@stratusagent/plugin-dreams": { "agents": { "ava": { "window": "23:00-07:00", "experiments": [{ "path": "{state}/experiments/nightly" }] } } },
+  "@stratusagent/plugin-peer": { "self": "ava" }
+}

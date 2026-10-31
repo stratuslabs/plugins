@@ -40,6 +40,12 @@ export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const FRESHNESS_WINDOW_MS = 10 * 60_000;
 export const CLOCK_SKEW_MS = 60_000;
 export const SIGNATURE_HEADER = 'x-stratus-peer-signature';
+/**
+ * How long stopping the channel waits for in-flight requests to send their
+ * answers before it closes their connections: the turns that just finished,
+ * and the ones it aborted. Only a turn that ignores its abort uses it all.
+ */
+export const STOP_GRACE_MS = 2_000;
 export const PEER_SESSION_PREFIX = 'peer:';
 
 const ID_PART = /^[A-Za-z0-9._-]{1,64}$/;
@@ -222,6 +228,11 @@ const createListener = ({ secrets, maxDepth, log }) => {
   // One controller per admitted request, not per request id: a retry of a
   // live id must not take the original turn out of reach of stop().
   const live = new Set();
+  // Every response not yet sent, so stop() can let the answers out.
+  const handling = new Set();
+  // Set by stop(): a request still being read when it began has no turn to
+  // abort, and must not start one while the daemon is going down.
+  let stopping = false;
 
   const handle = async (request, response) => {
     if (request.method !== 'POST' || request.url !== '/peer/v1/delegate') {
@@ -247,6 +258,10 @@ const createListener = ({ secrets, maxDepth, log }) => {
     // is no secret yet, and the caller never takes one as an answer.
     const secret = secrets[body.to][body.from.daemon];
     const answer = (status, payload) => respond(response, status, { ...payload, re: body.id }, secret);
+    if (stopping) {
+      answer(503, { status: 'refused', reason: 'the peer is stopping' });
+      return;
+    }
     const controller = new AbortController();
     // The caller gave up (cancelled, timed out, or went away): stop the turn
     // rather than finish work nobody will read.
@@ -279,7 +294,10 @@ const createListener = ({ secrets, maxDepth, log }) => {
         answer(409, { status: 'refused', reason: repeat === 'live' ? 'already running' : 'already answered' });
         return;
       }
-      if (controller.signal.aborted) {
+      // A turn that completed is answered with its result even when an abort
+      // came after it finished: stop() aborts every live request, and one
+      // whose dispatch has settled but not yet been answered is still live.
+      if (session?.status !== 'completed' && controller.signal.aborted) {
         answer(200, { status: 'cancelled' });
         return;
       }
@@ -289,6 +307,13 @@ const createListener = ({ secrets, maxDepth, log }) => {
       }
       answer(200, { status: 'result', text: finalText(session), agent: body.to });
     } catch (error) {
+      // The gateway refuses new turns for the whole of its drain, before it
+      // stops this channel. Matched by name, as channel-slack does: the
+      // class lives in the gateway package, which a plugin doesn't import.
+      if (error instanceof Error && error.name === 'GatewayStoppingError') {
+        answer(503, { status: 'refused', reason: 'the peer is stopping' });
+        return;
+      }
       log(`peer: a request from ${body.from.daemon} failed: ${error instanceof Error ? error.message : String(error)}`);
       answer(200, { status: 'failed', error: 'the remote turn failed' });
     } finally {
@@ -301,7 +326,15 @@ const createListener = ({ secrets, maxDepth, log }) => {
     address: () => server?.address(),
     async start(nextGateway, listen) {
       gateway = nextGateway;
+      stopping = false;
       server = createServer((request, response) => {
+        // What stop() waits for is the response, not the handler: the
+        // handler returns once end() has queued the body, and a large answer
+        // is still being written then. 'close' fires once it has been sent,
+        // or once the connection is gone.
+        const sent = new Promise((resolve) => response.once('close', resolve));
+        handling.add(sent);
+        sent.then(() => handling.delete(sent));
         handle(request, response).catch(() => respond(response, 500, { status: 'failed', error: 'internal error' }));
       });
       await new Promise((resolve, reject) => {
@@ -312,19 +345,56 @@ const createListener = ({ secrets, maxDepth, log }) => {
       log(`peer: listening on ${bound.address}:${bound.port}`);
     },
     async stop() {
+      stopping = true;
       for (const controller of live.values()) {
         controller.abort(new Error('the daemon is stopping'));
       }
       if (server) {
+        // No new connections from here.
         const closing = new Promise((resolve) => server.close(() => resolve()));
+        // The gateway stops its channels once its in-flight turns have
+        // settled, so a turn that just finished still has its answer to
+        // send, and an aborted one its `cancelled`. Closing first would
+        // leave those callers with `unreachable` for a turn that ran.
+        let timer;
+        await Promise.race([
+          Promise.allSettled([...handling]),
+          new Promise((resolve) => { timer = setTimeout(resolve, STOP_GRACE_MS); }),
+        ]);
+        clearTimeout(timer);
         // close() waits for open connections, and a caller still waiting on
-        // a turn just aborted holds one.
+        // a turn that ignored its abort holds one.
         server.closeAllConnections();
         await closing;
         server = undefined;
       }
     },
   };
+};
+
+/**
+ * Why a request never got an answer. fetch reports every network failure as
+ * "fetch failed" and keeps the reason in `cause`: ECONNREFUSED (nothing
+ * listening there, or listening on IPv4 only where the name resolves to
+ * IPv6), ENOTFOUND (the name doesn't resolve, as for a stopped machine on a
+ * private network), or the connection closing mid-answer.
+ */
+const connectionError = (error) => {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const cause = error.cause instanceof Error ? error.cause : undefined;
+  if (!cause) {
+    return error.message;
+  }
+  // A name with several addresses fails with one error per address.
+  const parts = cause instanceof AggregateError && cause.errors.length > 0 ? cause.errors : [cause];
+  const reasons = [...new Set(parts.map((part) => {
+    const code = typeof part?.code === 'string' ? part.code : '';
+    const message = typeof part?.message === 'string' ? part.message : '';
+    return message.includes(code) ? message : [code, message].filter(Boolean).join(': ');
+  }).filter(Boolean))];
+  return reasons.length > 0 ? `${error.message}: ${reasons.join('; ')}` : error.message;
 };
 
 /** The peer.delegate tool, given this daemon's identity, peers and secrets. */
@@ -409,19 +479,25 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
         redirect: 'manual',
       });
     } catch (error) {
-      return aborted() ?? { status: 'unreachable', requestId: id, error: error instanceof Error ? error.message : String(error) };
+      return aborted() ?? { status: 'unreachable', requestId: id, error: connectionError(error) };
     }
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel().catch(() => {});
       return { status: 'failed', requestId: id, error: `the peer answered ${response.status}, a redirect, which is not followed; check the peer url` };
     }
     let text;
-    let answer;
     try {
       text = await readLimited(response, MAX_RESPONSE_BYTES);
-      if (text === undefined) {
-        return aborted() ?? { status: 'failed', requestId: id, error: `the peer's answer was larger than ${MAX_RESPONSE_BYTES} bytes, so it was dropped` };
-      }
+    } catch (error) {
+      // The connection broke partway through the answer: the same outcome
+      // as one that never connected, so the same status and its cause.
+      return aborted() ?? { status: 'unreachable', requestId: id, error: connectionError(error) };
+    }
+    if (text === undefined) {
+      return aborted() ?? { status: 'failed', requestId: id, error: `the peer's answer was larger than ${MAX_RESPONSE_BYTES} bytes, so it was dropped` };
+    }
+    let answer;
+    try {
       answer = JSON.parse(text);
     } catch {
       return aborted() ?? { status: 'failed', requestId: id, error: `the peer answered ${response.status} with no readable body` };
@@ -445,6 +521,10 @@ export const createDelegateTool = ({ self, peers, secrets, maxDepth, timeoutMs, 
     }
     if (answer.status === 'refused') {
       return { status: 'refused', reason: String(answer.reason ?? 'refused'), requestId: id };
+    }
+    if (answer.status === 'cancelled') {
+      // The peer aborted the turn itself (it was stopping), and said so.
+      return { status: 'failed', requestId: id, error: 'the peer stopped the turn before it finished' };
     }
     return { status: 'failed', requestId: id, error: String(answer.error ?? `the peer answered ${response.status}`) };
   },

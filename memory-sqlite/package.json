@@ -1,0 +1,64 @@
+{
+  "name": "@stratusagent/memory-sqlite",
+  "version": "0.14.0",
+  "description": "A SQLite-backed agent memory store for Stratus Agent, as a plugin: one owner-only database file, the kernel's memory contract, no FTS index",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "memory-sqlite"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@stratusagent/core": "^0.14.0",
+    "@stratusagent/plugins": "^0.14.0"
+  },
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "memory",
+    "sqlite"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "memory": [
+        {
+          "name": "sqlite"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

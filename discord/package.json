@@ -1,0 +1,95 @@
+{
+  "name": "@stratusagent/plugin-discord",
+  "version": "0.1.0",
+  "description": "Discord channel for Stratus: each agent answers as its own bot in DMs and allowlisted guild channels.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "discord"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "2.0.4",
+    "@stratusagent/core": "^0.14.0"
+  },
+  "devDependencies": {
+    "ws": "^8.22.0"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [
+        {
+          "name": "discord"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "allowFrom": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "principals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "allowBots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{17,20}$"
+          }
+        },
+        "guilds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "requireMention": {
+                "type": "boolean"
+              },
+              "channels": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "requireMention": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

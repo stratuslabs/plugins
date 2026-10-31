@@ -1,0 +1,50 @@
+import { createDiscordAdapter } from './lib/adapter.js';
+import { parseDiscordConfig } from './lib/config.js';
+
+/**
+ * @stratusagent/plugin-discord: each agent answers as its own Discord bot.
+ *
+ * The config (lib/config.js) says who each agent answers and where; the bot
+ * token is the channel's transport secret, stored with
+ * `stratus channel set discord --agent <id> botToken`, never an agent
+ * credential. An agent is registered on Discord only when it has both.
+ *
+ * `options.api` and `options.cdnHosts` point the bots at another Discord;
+ * `options.drainTimeoutMs`, `reconnectDelaysMs` and `connectTimeoutMs`
+ * shorten waits; `options.connect` replaces the bot connection. All for
+ * tests.
+ */
+export const createPlugin = (config = {}, options = {}) => ({
+  name: 'discord',
+  async setup(context) {
+    if (!context?.channels) {
+      throw new Error('This host hands plugins no channel handle (PluginContext.channels), so @stratusagent/plugin-discord cannot register.');
+    }
+    const secrets = await context.channels.transportSecrets('discord');
+    const withTokens = Object.keys(secrets).filter((agentId) => typeof secrets[agentId]?.botToken === 'string' && secrets[agentId].botToken.length > 0);
+    const parsed = parseDiscordConfig(config, { withTokens });
+    const agents = [...parsed.agents.keys()].filter((agentId) => withTokens.includes(agentId));
+    const log = context.log ?? (() => {});
+    const warn = context.warn ?? log;
+    for (const agentId of parsed.agents.keys()) {
+      if (!agents.includes(agentId)) {
+        warn(`discord: ${agentId} is configured but has no bot token. Store one with \`stratus channel set discord --agent ${agentId} botToken\`.`);
+      }
+    }
+    const adapter = createDiscordAdapter({
+      config: parsed,
+      secrets,
+      api: options.api,
+      log,
+      warn,
+      ...(context.stateDirectory ? { stateDirectory: context.stateDirectory } : {}),
+      ...(options.drainTimeoutMs !== undefined ? { drainTimeoutMs: options.drainTimeoutMs } : {}),
+      ...(options.positionsWriteDelayMs !== undefined ? { positionsWriteDelayMs: options.positionsWriteDelayMs } : {}),
+      ...(options.connect ? { connect: options.connect } : {}),
+      ...(options.cdnHosts ? { cdnHosts: options.cdnHosts } : {}),
+      ...(options.reconnectDelaysMs ? { reconnectDelaysMs: options.reconnectDelaysMs } : {}),
+      ...(options.connectTimeoutMs !== undefined ? { connectTimeoutMs: options.connectTimeoutMs } : {}),
+    });
+    context.channels.register({ adapter, agents });
+  },
+});

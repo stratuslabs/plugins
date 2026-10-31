@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -59,7 +60,7 @@ const fakeChild = (kills) => {
   child.pid = (pids += 1);
   child.kill = (signal) => kills.push(signal);
   // The daemon asks the tether to stop by closing its stdin.
-  child.stdin = { on() {}, end: () => kills.push('close-stdin') };
+  child.stdin = { on() {}, end: () => { child.stdinClosed = true; kills.push('close-stdin'); } };
   return child;
 };
 const unwrap = (command, args, options, child) => {
@@ -109,7 +110,7 @@ const fixture = ({ agents, now, guard = async () => {}, onSpawn = () => {}, secr
     keyProxy: proxies.keyProxy,
     warn: (message) => warnings.push(message),
   });
-  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports, reportCalls };
+  return { dreamer, claims, runs, kills, timers, proxies, warnings, reports, reportCalls, state };
 };
 
 // A second daemon on the first one's state.
@@ -140,6 +141,14 @@ const experimentDir = () => {
   const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-exp-')));
   mkdirSync(path.join(dir, 'workspace'));
   return dir;
+};
+
+// The config refuses two paths to one directory, so an alias can only
+// appear after load: a link that pointed elsewhere and now points at exp.
+const aliasAfterLoad = (exp) => {
+  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
+  symlinkSync(experimentDir(), link);
+  return { link, repoint: () => { unlinkSync(link); symlinkSync(exp, link); } };
 };
 
 const exit = async (run, code = 0, signal = null) => {
@@ -431,10 +440,9 @@ test('with no key stored nothing runs and nothing is spent: login mode is not su
   assert.match(warnings[0], /stratus channel set dreams --agent ava anthropicApiKey/);
 });
 
-test('two agents never run the same experiment directory at once, even through a symlink', async () => {
+test('two agents never run the same experiment directory at once, even through a symlink made after load', async () => {
   const exp = experimentDir();
-  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
-  symlinkSync(exp, link);
+  const { link, repoint } = aliasAfterLoad(exp);
   const { dreamer, runs } = fixture({
     agents: {
       ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
@@ -443,6 +451,7 @@ test('two agents never run the same experiment directory at once, even through a
     now: night(23, 0),
     secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
   });
+  repoint();
   await dreamer.tick();
   await dreamer.tick();
   assert.equal(runs.length, 1, 'the second agent waits for the path');
@@ -467,6 +476,27 @@ test('a setup failure after the key proxy opens closes it, and retries do not pi
   assert.ok(warnings.some((message) => message.includes('cannot express the path')));
 });
 
+test('a run log that cannot be opened records the claim as failed to start, not as still running', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, claims, proxies, warnings, state } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+  });
+  // A directory where the run's log file goes: opening it throws EISDIR.
+  const id = createHash('sha256').update(exp).digest('hex').slice(0, 12);
+  mkdirSync(path.join(state, 'agents', 'ava', id, 'logs', '2026-10-23-1.log'), { recursive: true });
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'nothing is spawned');
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result?.status, 'failed-to-start', 'the claim says what happened tonight, not at the next restart');
+  assert.match(entry.result.error, /EISDIR/);
+  assert.equal(proxies.opened.every((proxy) => proxy.closed), true, 'the key proxy is closed');
+  assert.ok(warnings.some((message) => message.includes('EISDIR')), 'and the failure is said');
+  await dreamer.tick();
+  assert.equal(runs.length, 0, 'the spent experiment is not tried again tonight');
+  assert.equal(claims.night('ava', '2026-10-23').length, 1);
+});
+
 test('a daemon stop after the tether has exited signals nothing', async () => {
   const exp = experimentDir();
   const { dreamer, runs, kills, timers, reports } = fixture({
@@ -481,14 +511,41 @@ test('a daemon stop after the tether has exited signals nothing', async () => {
   const stopped = dreamer.stop();
   reports[0].emit('exit', 0, null);
   await stopped;
-  assert.deepEqual(kills, [], 'the pid may be reused by now: nothing is sent');
+  assert.equal(runs[0].child.stdinClosed, undefined, 'the exited run is sent nothing');
+  assert.equal(kills.filter((kill) => kill !== 'close-stdin').length, 0, 'the pid may be reused by now: no signal is sent');
   assert.equal([...timers.pending].length, 0, 'and no timer is left armed');
+});
+
+test('a daemon stop while the report runs closes the report\'s pipe instead of waiting out its timeout', async () => {
+  const exp = experimentDir();
+  const { dreamer, runs, kills, timers, reports, claims } = fixture({
+    agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] } },
+    now: night(23, 0),
+    holdReports: true,
+  });
+  await dreamer.tick();
+  runs[0].child.emit('exit', 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports.length, 1, 'the report is running');
+  let returned = false;
+  const stopped = dreamer.stop().then(() => {
+    returned = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(reports[0].stdinClosed, true, 'the stop asks the report\'s tether to go, without the 120 s timer');
+  assert.deepEqual(kills, ['close-stdin'], 'once, and with no signal');
+  assert.equal(returned, false, 'the stop still waits for the report to exit');
+  reports[0].emit('exit', null, 'SIGTERM');
+  await stopped;
+  assert.equal([...timers.pending].length, 0, 'the report timer is cleared');
+  const [entry] = claims.night('ava', '2026-10-23');
+  assert.equal(entry.result.status, 'finished', 'the run itself had finished before the stop');
+  assert.equal(entry.result.report, undefined, 'and the cut-short report is not linked');
 });
 
 test('the experiment directory stays busy until its report and summary are done', async () => {
   const exp = experimentDir();
-  const link = path.join(mkdtempSync(path.join(os.tmpdir(), 'dreams-link-')), 'exp');
-  symlinkSync(exp, link);
+  const { link, repoint } = aliasAfterLoad(exp);
   const { dreamer, runs, reports } = fixture({
     agents: {
       ava: { window: '23:00-07:00', experiments: [{ path: exp, budget: '1h' }] },
@@ -498,6 +555,7 @@ test('the experiment directory stays busy until its report and summary are done'
     secrets: { ava: { anthropicApiKey: 'sk-a' }, bo: { anthropicApiKey: 'sk-b' } },
     holdReports: true,
   });
+  repoint();
   await dreamer.tick();
   runs[0].child.emit('exit', 0, null);
   await new Promise((resolve) => setTimeout(resolve, 20));

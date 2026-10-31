@@ -143,6 +143,37 @@ test('config: one experiment directory belongs to one agent, once', () => {
   );
 });
 
+test('config: two paths to one experiment directory through a symlink are still one directory', () => {
+  const exp = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'dreams-exp-')));
+  const links = mkdtempSync(path.join(os.tmpdir(), 'dreams-links-'));
+  const a = path.join(links, 'a');
+  const b = path.join(links, 'b');
+  symlinkSync(exp, a);
+  symlinkSync(exp, b);
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: a }] }, bo: { window: '01:00-05:00', experiments: [{ path: b }] } } }),
+    (error) => error.message.includes('listed for both ava and bo') && error.message.includes(exp),
+    'two agents, two aliases',
+  );
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: exp }, { path: a }] } } }),
+    /listed twice for ava/,
+    'one agent, the directory and an alias',
+  );
+  const { agents } = parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: a }] } } });
+  assert.equal(agents.get('ava').experiments[0].path, a, 'the configured path is kept as written');
+  assert.doesNotThrow(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: path.join(links, 'not-yet') }] } } }),
+    'a directory that does not exist yet is still accepted',
+  );
+  // Not there yet, but under a linked parent: the existing part is resolved.
+  assert.throws(
+    () => parseDreamsConfig({ agents: { ava: { window: '23:00-07:00', experiments: [{ path: path.join(exp, 'new', 'run') }] }, bo: { window: '01:00-05:00', experiments: [{ path: path.join(a, 'new', 'run') }] } } }),
+    (error) => error.message.includes('listed for both ava and bo') && error.message.includes(path.join(exp, 'new', 'run')),
+    'two agents, a missing directory under two aliases of its parent',
+  );
+});
+
 test('the summary reads a bounded amount of a log the model can grow without limit', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'dreams-'));
   const file = path.join(dir, 'experiments.jsonl');

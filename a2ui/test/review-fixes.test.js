@@ -185,7 +185,10 @@ test('valid function calls, and the @index system function, are still accepted',
   const tools = await setUp({ catalogs: [{ path: BASIC_PATH }] });
   const render = (components) => tools.get('ui.render').execute(screen(components));
   assert.deepEqual(await render(button(openUrl())), { surfaceId: 's1', accepted: true });
-  assert.deepEqual(await render([{ id: 'root', component: 'Text', text: { '@call': '@index' } }]), { surfaceId: 's1', accepted: true });
+  assert.deepEqual(await render([
+    { id: 'root', component: 'Column', children: { componentId: 'row', path: '/rows' } },
+    { id: 'row', component: 'Text', text: { '@call': '@index' } },
+  ]), { surfaceId: 's1', accepted: true });
   const nested = { '@call': 'formatString', args: { value: 'Item ${/n}' } };
   assert.deepEqual(await render([{ id: 'root', component: 'Text', text: nested }]), { surfaceId: 's1', accepted: true });
 });

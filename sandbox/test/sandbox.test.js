@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import { createLocalCommandExecutor, defineLocalCommandTool } from '@stratusagent/executor-local';
 
-import { createPlugin, sandboxProfile, sandboxSettings } from '../index.js';
+import { createPlugin, sandboxProfile, sandboxSettings, toolchainReads } from '../index.js';
 
 const onMac = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec');
 
@@ -39,8 +39,8 @@ const setup = async (config = {}) => {
     workspaces: { forAgent: () => workspace, prepare: () => workspace, all: async () => [workspace] },
   });
   const session = { id: 's1', agent: { id: 'nova', name: 'Nova' }, status: 'running', messages: [] };
-  const run = async (command, executor = registered.executor) => {
-    const result = await executor.execute({ id: 'c1', toolName: 'shell.run', input: { command } }, shellIn(workspace), session);
+  const run = async (command, executor = registered.executor, env = {}) => {
+    const result = await executor.execute({ id: 'c1', toolName: 'shell.run', input: { command } }, shellIn(workspace, env), session);
     return { ok: result.ok, out: `${result.output?.stdout ?? ''}${result.output?.stderr ?? ''}` };
   };
   return { root, workspace, outside, run, host: createLocalCommandExecutor() };
@@ -61,6 +61,63 @@ test('the profile denies by default and allows exactly what it was given', () =>
   assert.match(online, /\(allow network-outbound \(remote ip\)/);
   // A path that would end the string early is refused, not spliced in.
   assert.throws(() => sandboxProfile({ write: ['/w") (allow file-write* (subpath "/'], read: [], network: true }), /cannot express/);
+});
+
+test('the active Xcode is readable whatever its bundle is named, and nothing else is added', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-xcode-')));
+  const versioned = path.join(root, 'Xcode_26.6.app');
+  await mkdir(path.join(versioned, 'Contents', 'Developer'), { recursive: true });
+  await symlink(versioned, path.join(root, 'Xcode.app'));
+  const tools = path.join(root, 'CommandLineTools');
+  await mkdir(tools);
+  // A versioned name, as on GitHub's macOS runners.
+  assert.deepEqual(toolchainReads(path.join(versioned, 'Contents', 'Developer')), [versioned]);
+  // xcode-select prints a trailing newline.
+  assert.deepEqual(toolchainReads(`${path.join(root, 'Xcode.app', 'Contents', 'Developer')}\n`), [versioned]);
+  // A symlinked bundle is allowed where it really is.
+  assert.deepEqual(toolchainReads(path.join(root, 'Xcode.app', 'Contents', 'Developer')), [versioned]);
+  // Command Line Tools sit under /Library, already readable: no bundle, nothing added.
+  assert.deepEqual(toolchainReads(tools), []);
+  assert.deepEqual(toolchainReads(path.join(root, 'notes.application', 'Developer')), []);
+  // Only the bundle whose Contents/Developer it is: never an outer package
+  // Xcode sits in, and never a bundle the directory is merely somewhere inside.
+  const outer = path.join(root, 'Developer.app');
+  await mkdir(path.join(outer, 'Xcode.app', 'Contents', 'Developer'), { recursive: true });
+  assert.deepEqual(toolchainReads(path.join(outer, 'Xcode.app', 'Contents', 'Developer')), [path.join(outer, 'Xcode.app')]);
+  assert.deepEqual(toolchainReads(path.join(outer, 'Resources')), []);
+  for (const unusable of [undefined, '', 'Xcode.app/Contents/Developer', 42]) {
+    assert.deepEqual(toolchainReads(unusable), [], String(unusable));
+  }
+  const profile = sandboxProfile({ write: ['/w'], read: [], network: false, toolchains: [versioned] });
+  assert.match(profile, new RegExp(`\\(allow file-read\\* [^\\n]*\\(subpath "${versioned}"\\)`));
+  assert.doesNotMatch(profile.split('\n').find((line) => line.startsWith('(allow file-write*')), /Xcode/);
+});
+
+test('the plugin reads the active developer directory once and puts its bundle in every profile', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'stratus-sandbox-devdir-')));
+  const bundle = path.join(root, 'Xcode-beta.app');
+  await mkdir(path.join(bundle, 'Contents', 'Developer'), { recursive: true });
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  let asked = 0;
+  const profiles = [];
+  let registered;
+  const plugin = createPlugin({}, {
+    developerDir: () => { asked += 1; return `${path.join(bundle, 'Contents', 'Developer')}\n`; },
+    spawn: (command, args) => { profiles.push(args[1]); throw new Error('not spawned in this test'); },
+  });
+  if (process.platform !== 'darwin') return;
+  plugin.setup({
+    executors: { register: (entry) => { registered = entry; } },
+    workspaces: { forAgent: () => workspace, prepare: () => workspace, all: async () => [workspace] },
+  });
+  const session = { id: 's1', agent: { id: 'nova', name: 'Nova' }, status: 'running', messages: [] };
+  for (let i = 0; i < 2; i += 1) {
+    await registered.executor.execute({ id: `c${i}`, toolName: 'shell.run', input: { command: 'true' } }, shellIn(workspace), session);
+  }
+  assert.equal(asked, 1);
+  assert.equal(profiles.length, 2);
+  for (const profile of profiles) assert.match(profile, new RegExp(`\\(subpath "${bundle}"\\)`));
 });
 
 test('settings add shared and per-agent paths, and network is on unless turned off', () => {
@@ -106,12 +163,17 @@ test('a git hook runs inside the same walls', { skip: !onMac || !existsSync('/us
   const marker = path.join(outside, 'hook-ran');
   const repo = path.join(workspace, 'app');
   await mkdir(path.join(repo), { recursive: true });
-  const init = await run('git init -q app && cd app && git config user.name a && git config user.email a@b && echo 1 > f && git add f');
+  // A HOME of the test's own: git refuses to run when ~/.gitconfig exists
+  // but the sandbox can't read it, and this test is about the hook's walls,
+  // not about the machine's git config.
+  const home = path.join(workspace, 'home');
+  await mkdir(home);
+  const init = await run('git init -q app && cd app && git config user.name a && git config user.email a@b && echo 1 > f && git add f', undefined, { HOME: home });
   assert.equal(init.ok, true, init.out);
   const insideMarker = path.join(workspace, 'hook-ran-inside');
   await writeFile(path.join(repo, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho ran > ${insideMarker}\necho ran > ${marker} 2>/dev/null\nexit 0\n`);
   await chmod(path.join(repo, '.git', 'hooks', 'pre-commit'), 0o755);
-  const commit = await run('cd app && git commit -q -m m && git log --oneline | wc -l');
+  const commit = await run('cd app && git commit -q -m m && git log --oneline | wc -l', undefined, { HOME: home });
   assert.equal(commit.ok, true, commit.out);
   assert.equal(existsSync(insideMarker), true, 'the hook ran (inside)');
   assert.equal(existsSync(marker), false, 'the hook could not write outside the workspace');

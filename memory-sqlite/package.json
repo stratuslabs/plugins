@@ -24,8 +24,8 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@stratusagent/core": "^0.14.0",
-    "@stratusagent/plugins": "^0.14.0"
+    "@stratusagent/core": "^0.14.2",
+    "@stratusagent/plugins": "^0.14.2"
   },
   "keywords": [
     "stratus",

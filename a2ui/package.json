@@ -4,7 +4,7 @@
   "description": "ui.render: an agent shows a native screen as A2UI v1.0 JSON, checked against the catalogs you configure.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "a2ui" },
   "engines": { "node": ">=22" },
   "files": ["index.js", "lib/", "schemas/", "skills/", "README.md", "NOTICE"],

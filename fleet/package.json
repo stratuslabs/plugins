@@ -4,7 +4,7 @@
   "description": "fleet.*: read-only tools for an agent that reports on a Stratus fleet: agents, sessions, schedules, waiting approvals.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "fleet" },
   "engines": { "node": ">=22" },
   "scripts": {

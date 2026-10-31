@@ -286,6 +286,53 @@ test('words after a file stay below it when they arrive while an earlier post is
   assert.deepEqual(shown, ['Making the chart.', '[file /w/chart.png]', 'Here it is.']);
 });
 
+test('a tool that finishes while its status line is being posted has the status taken down before its file goes up', async () => {
+  const calls = [];
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let nextId = 1;
+  const renderer = createRenderer({
+    timers: { setTimeout: () => 0, clearTimeout: () => {} },
+    ops: {
+      async post(piece) {
+        const id = `m${nextId++}`;
+        if (id === 'm1') await blocked;
+        calls.push(['post', id, piece]);
+        return id;
+      },
+      async edit(id, piece) {
+        calls.push(['edit', id, piece]);
+      },
+      async remove(id) {
+        calls.push(['remove', id]);
+      },
+      async typing() {},
+      async upload(filePath) {
+        const id = `m${nextId++}`;
+        calls.push(['upload', id, filePath]);
+        return id;
+      },
+    },
+  });
+  renderer.onEvent(called('chart.render'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(nextId, 2, 'the status line\'s post is underway');
+  // Discord holds that post while the tool finishes and the reply streams in.
+  renderer.onEvent(produced({ file: '/w/chart.png' }));
+  renderer.onEvent(text('Here it is.'));
+  const finished = renderer.finalize('Here it is.');
+  release();
+  await finished;
+  assert.deepEqual(calls, [
+    ['post', 'm1', '-# ⚙ chart.render…'],
+    ['remove', 'm1'],
+    ['upload', 'm2', '/w/chart.png'],
+    ['post', 'm3', 'Here it is.'],
+  ]);
+});
+
 test('a reply that is the words before a tool that made a file is not posted again under the file', async () => {
   const { renderer, visible, settle } = harness();
   renderer.onEvent(text('Here is the chart.'));

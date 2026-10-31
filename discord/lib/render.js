@@ -86,6 +86,9 @@ export const createRenderer = ({
     for (const segment of segments) {
       const body = display(segment);
       const pieces = body ? chunk(body) : [];
+      // Files already queued when the segment was read: what was read has
+      // their tool's status line gone.
+      const ready = segment.files.length;
       for (const [index, piece] of pieces.entries()) {
         if (index < segment.ids.length) {
           if (segment.shown[index] !== piece) {
@@ -130,13 +133,18 @@ export const createRenderer = ({
       }
       // Taken before the call, so a failed upload is logged once and
       // not tried again.
-      while (segment.files.length > 0) {
-        const file = segment.files.shift();
+      for (const file of segment.files.splice(0, ready)) {
         const id = await call(`upload ${path.basename(file)}`, () => ops.upload(file));
         if (id !== undefined) {
           posted += 1;
           uploaded += 1;
         }
+      }
+      if (segment.files.length > 0) {
+        // A tool finished after this segment was read, so what this sync
+        // put up may still show its status line. The sync that tool queued
+        // brings the segment in line, then its files, then what follows.
+        return;
       }
     }
   };

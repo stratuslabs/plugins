@@ -27,7 +27,10 @@ export const NO_REPLY_TEXT = '(no reply)';
  *
  * A file a tool produced (an ok result's `file` or `files`, core's
  * `filePathsOf`) is a message of its own, in its place: after what was
- * said before the tool, before what is said after.
+ * said before the tool, before what is said after. It belongs to the
+ * segment it came after and goes up once that segment's messages are in
+ * line, and what is said after it is a new segment, so words that arrive
+ * while Discord is still busy with an earlier request stay below it.
  *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
@@ -42,7 +45,9 @@ export const createRenderer = ({
   now = Date.now,
   warn = () => {},
 }) => {
-  const segments = [{ text: '', ids: [], shown: [] }];
+  // `files`: a tool's files waiting to go up after the segment's messages.
+  const newSegment = () => ({ text: '', ids: [], shown: [], files: [] });
+  const segments = [newSegment()];
   let tool; // name of the running tool, shown on the live segment
   let breakPending = false; // the next words belong to a new response
   let streamedThisResponse = false;
@@ -123,6 +128,16 @@ export const createRenderer = ({
         segment.ids.pop();
         segment.shown.pop();
       }
+      // Taken before the call, so a failed upload is logged once and
+      // not tried again.
+      while (segment.files.length > 0) {
+        const file = segment.files.shift();
+        const id = await call(`upload ${path.basename(file)}`, () => ops.upload(file));
+        if (id !== undefined) {
+          posted += 1;
+          uploaded += 1;
+        }
+      }
     }
   };
 
@@ -166,7 +181,7 @@ export const createRenderer = ({
   /** Words so far end a segment; the next ones start a new one. */
   const closeSegment = () => {
     if (live().text.trim().length > 0) {
-      segments.push({ text: '', ids: [], shown: [] });
+      segments.push(newSegment());
     }
   };
 
@@ -235,23 +250,17 @@ export const createRenderer = ({
           schedule();
           return;
         }
-        // Brought up to date first (the status line comes down), so the
-        // file lands below the words before it; words after it start a
-        // message of their own below it.
+        // The files go up after this segment (its status line comes down
+        // first), so they land below the words before them; words after
+        // them go in the next segment, below them, however soon they come.
+        live().files.push(...files);
+        segments.push(newSegment());
         if (timer !== undefined) {
           timers.clearTimeout(timer);
           timer = undefined;
         }
         lastSyncAt = now();
-        chain = chain.then(syncNow).then(async () => {
-          for (const file of files) {
-            const id = await call(`upload ${path.basename(file)}`, () => ops.upload(file));
-            if (id !== undefined) {
-              posted += 1;
-              uploaded += 1;
-            }
-          }
-        });
+        void sync();
       }
     },
 
@@ -265,13 +274,15 @@ export const createRenderer = ({
       stopTimers();
       tool = undefined;
       const text = typeof reply === 'string' ? reply : '';
-      const previous = segments.length > 1 ? segments[segments.length - 2] : undefined;
+      // The words before the last tool call: a segment that only held a
+      // status line and a file says nothing.
+      const previous = segments.slice(0, -1).findLast((earlier) => earlier.text.trim().length > 0);
       const repeatsPrevious = previous !== undefined && live().text.trim().length === 0 && previous.text.trim() === text.trim();
       if (text.trim().length > 0 && !repeatsPrevious) {
         live().text = text;
       }
       // A file is something said; NO_REPLY_TEXT is for a turn with nothing
-      // to show. The uploads are in the chain, so wait for them first.
+      // to show. Each file's sync is in the chain, so wait for them first.
       await chain;
       if (uploaded === 0 && segments.every((segment) => display(segment) === '')) {
         live().text = NO_REPLY_TEXT;

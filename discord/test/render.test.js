@@ -250,6 +250,54 @@ test('a file a tool produced is posted in its place: below the words before it, 
   assert.deepEqual(calls.filter(([kind]) => kind === 'upload').map(([, , file]) => file), ['/w/chart.png', '/w/data.csv']);
 });
 
+test('words after a file stay below it when they arrive while an earlier post is still underway', async () => {
+  const shown = [];
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let nextId = 1;
+  const renderer = createRenderer({
+    timers: { setTimeout: () => 0, clearTimeout: () => {} },
+    ops: {
+      async post(piece) {
+        if (nextId === 1) await blocked;
+        shown.push(piece);
+        return `m${nextId++}`;
+      },
+      async edit() {},
+      async remove() {},
+      async typing() {},
+      async upload(filePath) {
+        shown.push(`[file ${filePath}]`);
+        return `m${nextId++}`;
+      },
+    },
+  });
+  renderer.onEvent(text('Making the chart.'));
+  renderer.onEvent(response('Making the chart.'));
+  renderer.onEvent(called('chart.render'));
+  renderer.onEvent(produced({ file: '/w/chart.png' }));
+  // The next response streams in while Discord still holds the first post.
+  renderer.onEvent(text('Here it is.'));
+  const finished = renderer.finalize('Here it is.');
+  release();
+  await finished;
+  assert.deepEqual(shown, ['Making the chart.', '[file /w/chart.png]', 'Here it is.']);
+});
+
+test('a reply that is the words before a tool that made a file is not posted again under the file', async () => {
+  const { renderer, visible, settle } = harness();
+  renderer.onEvent(text('Here is the chart.'));
+  await settle();
+  renderer.onEvent(response('Here is the chart.'));
+  renderer.onEvent(called('chart.render'));
+  renderer.onEvent(produced({ file: '/w/chart.png' }));
+  renderer.onEvent(response(''));
+  await renderer.finalize('Here is the chart.');
+  assert.deepEqual(visible(), ['Here is the chart.', '[file /w/chart.png]']);
+});
+
 test('a failed tool, or a result naming no file, uploads nothing', async () => {
   const { renderer, calls, settle } = harness();
   renderer.onEvent(called('x'));

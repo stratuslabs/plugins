@@ -77,13 +77,17 @@ starts, so a typo stops the start with the setting named.
   - `failed`: asked again after 5, 10, 20 and 40 minutes, then hourly. After
     6 failures in a row the session leaves the list until its next turn ends,
     with a warning in the daemon log.
+  - `interrupted` (the daemon is stopping): the restart picks it up. If the
+    daemon is somehow still running, it is asked again a minute later.
 - **A restart:** the list lives in memory. On start, every session of a
   listed agent updated in the last 7 days joins again, due a quiet wait after
   its last update. Core answers `nothing-new` for one already saved through
   its end, without a model call.
 - **Tidy:** once a night inside the window, up to `maxGroupsPerNight` tidy
   passes per agent, one at a time, stopping when nothing more waits. A failed
-  night is tried again the next night. Tidy merges need a memory store that
+  night is tried again the next night. What a night has spent is kept in
+  `tidy.json` in the plugin's state directory, so a restart inside the window
+  carries on under the same cap instead of starting it over. Tidy merges need a memory store that
   takes a list in `supersedes`: the built-in file store does. On one that
   doesn't, the daemon log says so once and save passes still run.
 

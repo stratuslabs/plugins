@@ -1,3 +1,6 @@
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
 import { isMemoryPassSessionId } from '@stratusagent/core';
 
 import { nightIn } from './window.js';
@@ -10,7 +13,9 @@ import { nightIn } from './window.js';
  * The due list lives in memory only. A restart loses nothing: the sweep in
  * the first drain puts back every session of an enrolled agent updated in
  * the last 7 days, and core answers `nothing-new` for one already saved
- * through its end, without a model call.
+ * through its end, without a model call. What tidy has spent tonight is
+ * kept in the plugin's state directory, so a restart inside the window
+ * does not start the night's cap over.
  */
 
 const MINUTE = 60_000;
@@ -22,8 +27,10 @@ export const MAX_FAILURES = 6;
 /** For an answer that changes on its own soon: a host still loading, another pass running. */
 export const RETRY_SOON_MS = MINUTE;
 export const SWEEP_DAYS = 7;
-/** Rows read per agent in the restart sweep, newest first. */
-export const SWEEP_LIMIT = 1000;
+/** Rows the restart sweep first reads per agent, newest first; doubled until it reaches past the 7 days. */
+export const SWEEP_PAGE = 500;
+/** Where tidy's nightly accounting lives in the state directory. */
+export const TIDY_STATE_FILE = 'tidy.json';
 /** Rows read to find the agent of a session whose creation this plugin missed. */
 export const LOOKUP_LIMIT = 50;
 /** Sessions whose agent is remembered; the oldest is dropped past this. */
@@ -42,6 +49,7 @@ export const createUpkeep = ({
   passes,
   fleet,
   bus,
+  stateDirectory,
   log = () => {},
   warn = () => {},
   now = Date.now,
@@ -55,8 +63,8 @@ export const createUpkeep = ({
   const floored = new Set();
   /** Agents whose start the host accepted. */
   const started = new Set();
-  /** agentId -> the night its tidy last ran. */
-  const tidied = new Map();
+  /** agentId -> { night, groups, finished }: tonight's tidy so far. */
+  const tidyNights = new Map();
   /** agentId -> not before this, for a tidy the host refused for now. */
   const tidyNotBefore = new Map();
   const tidyStoreWarned = new Set();
@@ -149,7 +157,15 @@ export const createUpkeep = ({
   const sweep = async () => {
     const since = now() - SWEEP_DAYS * 24 * 60 * MINUTE;
     for (const agentId of started) {
-      const rows = await fleet.sessions({ agentId, limit: SWEEP_LIMIT });
+      // Newest first: read more until the oldest row is past the 7 days.
+      let rows;
+      for (let limit = SWEEP_PAGE; ; limit *= 2) {
+        rows = await fleet.sessions({ agentId, limit });
+        const oldest = Date.parse(rows.at(-1)?.updatedAt ?? '');
+        if (rows.length < limit || !(oldest >= since)) {
+          break;
+        }
+      }
       for (const row of rows) {
         const updatedAt = Date.parse(row.updatedAt);
         if (!Number.isFinite(updatedAt) || updatedAt < since || isMemoryPassSessionId(row.id) || due.has(row.id)) {
@@ -179,7 +195,11 @@ export const createUpkeep = ({
         continue;
       }
       const night = nightIn(tidy.window, tidy.timeZone, new Date(at));
-      if (night !== undefined && tidied.get(agentId) !== night) {
+      if (night === undefined) {
+        continue;
+      }
+      const tonight = tidyNights.get(agentId);
+      if (tonight?.night !== night || (!tonight.finished && tonight.groups < tidy.maxGroupsPerNight)) {
         return { agentId, night };
       }
     }
@@ -249,7 +269,9 @@ export const createUpkeep = ({
       return;
     }
     if (status === 'interrupted') {
-      // Only a daemon stop interrupts a pass, and the restart sweep picks it up.
+      // Only a daemon stop interrupts a pass, and the restart sweep picks it
+      // up. Not asked again at once, in case this host is still running.
+      current.dueAt = at + RETRY_SOON_MS;
       return;
     }
     // failed
@@ -263,21 +285,61 @@ export const createUpkeep = ({
     current.dueAt = Math.max(current.dueAt, at + delay);
   };
 
+  const tidyStatePath = () => (stateDirectory === undefined ? undefined : path.join(stateDirectory.prepare(), TIDY_STATE_FILE));
+
+  const loadTidyNights = () => {
+    let file;
+    try {
+      file = tidyStatePath();
+      if (file === undefined) {
+        log('memory-upkeep: this host gives plugins no state directory, so a restart inside the tidy window starts the night\'s cap over.');
+        return;
+      }
+      const saved = JSON.parse(readFileSync(file, 'utf8'));
+      for (const [agentId, tonight] of Object.entries(saved?.agents ?? {})) {
+        if (typeof tonight?.night === 'string' && Number.isInteger(tonight.groups)) {
+          tidyNights.set(agentId, { night: tonight.night, groups: tonight.groups, finished: tonight.finished === true });
+        }
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        warn(`memory-upkeep: could not read ${file ?? 'the tidy state'}, so tonight's tidy cap starts over: ${messageOf(error)}`);
+      }
+    }
+  };
+
+  const saveTidyNights = () => {
+    let file;
+    try {
+      file = tidyStatePath();
+      if (file === undefined) {
+        return;
+      }
+      const temporary = `${file}.${process.pid}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify({ version: 1, agents: Object.fromEntries(tidyNights) })}\n`, { mode: 0o600 });
+      renameSync(temporary, file);
+    } catch (error) {
+      warn(`memory-upkeep: could not save ${file ?? 'the tidy state'}; a restart tonight may tidy past the cap: ${messageOf(error)}`);
+    }
+  };
+
   const runTidy = async ({ agentId, night }) => {
     const settings = agents.get(agentId);
-    for (let group = 0; group < settings.tidy.maxGroupsPerNight; group += 1) {
+    const previous = tidyNights.get(agentId);
+    const tonight = previous?.night === night ? previous : { night, groups: 0, finished: false };
+    tidyNights.set(agentId, tonight);
+    const finish = () => {
+      tonight.finished = true;
+      saveTidyNights();
+    };
+    while (tonight.groups < settings.tidy.maxGroupsPerNight) {
       let result;
       try {
         result = await passes.run({ kind: 'tidy', agentId, ...optional(settings) });
       } catch (error) {
         warn(`memory-upkeep: core refused the tidy pass request for ${agentId}: ${messageOf(error)}`);
-        break;
-      }
-      if (stopped || result.status === 'interrupted') {
+        finish();
         return;
-      }
-      if (result.status === 'done' && result.more) {
-        continue;
       }
       if (result.status === 'skipped') {
         if (result.reason === 'stopped') {
@@ -292,11 +354,30 @@ export const createUpkeep = ({
           tidyStoreWarned.add(agentId);
           warn(`memory-upkeep: ${agentId}'s memory store does not take list-valued supersedes, so tidy passes cannot merge facts there. Save passes still run.`);
         }
+        finish();
+        return;
       }
-      // Done, nothing left, refused or failed: this night is over; a failed one is tried the next night.
-      break;
+      if (result.status === 'nothing-new') {
+        finish();
+        return;
+      }
+      // It ran (done, failed or cut off), so it counts against tonight's cap.
+      tonight.groups += 1;
+      saveTidyNights();
+      if (stopped) {
+        return;
+      }
+      if (result.status === 'interrupted') {
+        tidyNotBefore.set(agentId, now() + RETRY_SOON_MS);
+        return;
+      }
+      if (result.status !== 'done' || !result.more) {
+        // Nothing more waits, or it failed: a failed night is tried the next night.
+        finish();
+        return;
+      }
     }
-    tidied.set(agentId, night);
+    finish();
   };
 
   const drain = async () => {
@@ -362,6 +443,7 @@ export const createUpkeep = ({
   return {
     /** Starts every enrolled agent, then listens. Call from `setup`. */
     async start() {
+      loadTidyNights();
       const results = await Promise.allSettled([...agents].map(([agentId, settings]) => passes.start(agentId, settings.mode)));
       [...agents.keys()].forEach((agentId, index) => {
         const result = results[index];

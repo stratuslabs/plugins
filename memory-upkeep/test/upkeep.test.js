@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { EventBus, memoryPassSessionId } from '@stratusagent/core';
 
 import { readUpkeepConfig } from '../lib/config.js';
-import { createUpkeep, FAILURE_DELAYS_MINUTES, MAX_FAILURES, RETRY_SOON_MS } from '../lib/upkeep.js';
+import { createUpkeep, FAILURE_DELAYS_MINUTES, MAX_FAILURES, RETRY_SOON_MS, SWEEP_PAGE, TIDY_STATE_FILE } from '../lib/upkeep.js';
 
 const MINUTE = 60_000;
 const T0 = Date.parse('2026-11-02T12:00:00.000Z');
@@ -15,9 +18,9 @@ const outcome = (status, extra = {}) => ({ passId: 'p', status, saved: 0, supers
  * A host for the upkeep: a real bus, a clock the test moves, a memory pass
  * handle that answers from a script, and a fleet reader over fixed rows.
  */
-const harness = ({ config = { agents: { atlas: {} } }, sessions = [], answer, startFails = [], fleetFailures = 0 } = {}) => {
+const harness = ({ config = { agents: { atlas: {} } }, sessions = [], answer, startFails = [], fleetFailures = 0, stateDir, start = T0 } = {}) => {
   let fleetFailuresLeft = fleetFailures;
-  let clock = T0;
+  let clock = start;
   const bus = new EventBus();
   const asked = [];
   const started = [];
@@ -52,6 +55,7 @@ const harness = ({ config = { agents: { atlas: {} } }, sessions = [], answer, st
     passes,
     fleet,
     bus,
+    ...(stateDir !== undefined ? { stateDirectory: { prepare: () => stateDir } } : {}),
     log: (line) => logs.push(['log', line]),
     warn: (line) => logs.push(['warn', line]),
     now: () => clock,
@@ -413,4 +417,99 @@ test('stop aborts a running pass, stops listening, and asks nothing more', async
   await h.turn('s-3');
   await h.advance(600 * MINUTE);
   assert.equal(h.asked.length, 1);
+});
+
+const tempDir = (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memory-upkeep-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+
+const tidyConfig = (maxGroupsPerNight) => ({ agents: { atlas: { tidy: { window: '12:00-14:00', timeZone: 'UTC', maxGroupsPerNight } } } });
+const tidyAsks = (h) => h.asked.filter((request) => request.kind === 'tidy').length;
+
+test('a restart inside the tidy window carries on from what tonight already spent, up to the same cap', async (t) => {
+  const stateDir = tempDir(t);
+  const first = harness({
+    stateDir,
+    config: tidyConfig(3),
+    answer: (_request, n) => (n === 1 ? outcome('done', { more: true }) : outcome('interrupted')),
+  });
+  await first.upkeep.start();
+  await first.upkeep.drain();
+  assert.equal(tidyAsks(first), 2, 'one merge, then the daemon stopped during the second');
+  first.upkeep.stop();
+  const saved = JSON.parse(readFileSync(path.join(stateDir, TIDY_STATE_FILE), 'utf8'));
+  assert.deepEqual(saved, { version: 1, agents: { atlas: { night: '2026-11-02', groups: 2, finished: false } } });
+  assert.equal(statSync(path.join(stateDir, TIDY_STATE_FILE)).mode & 0o777, 0o600);
+
+  const second = harness({ stateDir, config: tidyConfig(3), start: T0 + 10 * MINUTE, answer: () => outcome('done', { more: true }) });
+  await second.upkeep.start();
+  await second.upkeep.drain();
+  assert.equal(tidyAsks(second), 1, 'only what was left of the cap');
+  await second.advance(30 * MINUTE);
+  assert.equal(tidyAsks(second), 1);
+  second.upkeep.stop();
+});
+
+test('a night tidy finished stays finished across a restart, and the next night starts fresh', async (t) => {
+  const stateDir = tempDir(t);
+  const first = harness({ stateDir, config: tidyConfig(10), answer: () => outcome('done', { more: false }) });
+  await first.upkeep.start();
+  await first.upkeep.drain();
+  assert.equal(tidyAsks(first), 1);
+  first.upkeep.stop();
+
+  const second = harness({ stateDir, config: tidyConfig(10), start: T0 + 30 * MINUTE, answer: () => outcome('nothing-new') });
+  await second.upkeep.start();
+  await second.upkeep.drain();
+  assert.equal(tidyAsks(second), 0);
+  await second.advance(24 * 60 * MINUTE);
+  assert.equal(tidyAsks(second), 1);
+  second.upkeep.stop();
+});
+
+test('an unreadable tidy state file is reported and tonight starts over; no state directory works from memory', async (t) => {
+  const stateDir = tempDir(t);
+  writeFileSync(path.join(stateDir, TIDY_STATE_FILE), '{not json');
+  const h = harness({ stateDir, config: tidyConfig(1), answer: () => outcome('done', { more: true }) });
+  await h.upkeep.start();
+  await h.upkeep.drain();
+  assert.equal(tidyAsks(h), 1);
+  assert.ok(h.logs.some(([kind, line]) => kind === 'warn' && line.includes(TIDY_STATE_FILE)));
+  h.upkeep.stop();
+
+  const bare = harness({ config: tidyConfig(1), answer: () => outcome('done', { more: true }) });
+  await bare.upkeep.start();
+  await bare.upkeep.drain();
+  assert.equal(tidyAsks(bare), 1);
+  assert.ok(bare.logs.some(([kind, line]) => kind === 'log' && line.includes('no state directory')));
+  bare.upkeep.stop();
+});
+
+test('the restart sweep reads past its first page until it reaches sessions older than 7 days', async () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const count = SWEEP_PAGE * 2 + 100;
+  const sessions = Array.from({ length: count }, (_, i) => ({
+    id: `s-${i}`, agentId: 'atlas', status: 'completed', createdAt: iso(T0 - 2 * 24 * 60 * MINUTE), updatedAt: iso(T0 - 60 * MINUTE - i * 1000),
+  }));
+  sessions.push({ id: 's-stale', agentId: 'atlas', status: 'completed', createdAt: iso(T0 - 30 * 24 * 60 * MINUTE), updatedAt: iso(T0 - 8 * 24 * 60 * MINUTE) });
+  const h = harness({ sessions });
+  await h.upkeep.start();
+  await h.upkeep.drain();
+  assert.equal(h.asked.length, count);
+  assert.ok(!h.asked.some((request) => request.sessionId === 's-stale'));
+  assert.deepEqual(h.fleetReads.map((read) => read.limit), [SWEEP_PAGE, SWEEP_PAGE * 2, SWEEP_PAGE * 4]);
+  h.upkeep.stop();
+});
+
+test('a save pass cut off while this host keeps running is asked again a minute later, not at once', async () => {
+  const h = harness({ answer: (_r, n) => (n === 1 ? outcome('interrupted') : outcome('nothing-new')) });
+  await h.upkeep.start();
+  await h.turn('s-1');
+  await h.advance(30 * MINUTE);
+  assert.equal(h.asked.length, 1);
+  await h.advance(RETRY_SOON_MS);
+  assert.equal(h.asked.length, 2);
+  h.upkeep.stop();
 });

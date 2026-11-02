@@ -37,7 +37,15 @@ export const createPlugin = (config = {}) => {
       if (context.fleet === undefined) {
         throw new Error('memory-upkeep needs PluginContext.fleet to find recent sessions after a restart, and this host does not provide it.');
       }
-      upkeep = createUpkeep({ agents, passes: context.memoryPasses, fleet: context.fleet, bus: context.bus, log, warn });
+      upkeep = createUpkeep({
+        agents,
+        passes: context.memoryPasses,
+        fleet: context.fleet,
+        bus: context.bus,
+        stateDirectory: context.stateDirectory,
+        log,
+        warn,
+      });
       await upkeep.start();
     },
     dispose() {

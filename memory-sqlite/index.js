@@ -23,6 +23,8 @@ import {
   pinnedCapRefusal,
   pinnedInertRefusal,
   supersededMemoryIdsAt,
+  assertUnprotectedMemoryTargets,
+  memorySupersedesWriteIds,
   tokenizeMemoryText,
 } from '@stratusagent/core';
 import { expandHome } from '@stratusagent/plugins';
@@ -275,12 +277,10 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
     async append(agentId, content, appendOptions = {}) {
       assertMemoryContentWithinCap(content);
       const at = now();
-      // Same write-path check as every other store: an id a new record
-      // names must resolve to a live entry the caller owns, or nothing is
-      // stored. Skipping it would let one agent retire another's memory.
-      if (appendOptions.supersedes !== undefined) {
-        assertSupersedableMemoryEntry(liveEntries(agentId, at), appendOptions.supersedes);
-      }
+      // One id or a list (a merge: one record retiring several facts, so one
+      // forget brings them all back). A malformed value throws here rather
+      // than storing a plain fact beside the ones the caller meant to replace.
+      const supersedes = memorySupersedesWriteIds(appendOptions);
       const fields = memoryEntryFields(appendOptions);
       assertMemoryAboutWithinCap(fields.about ?? []);
       const createdAt = at.toISOString();
@@ -289,6 +289,21 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
       // appends on one connection can never claim one id.
       db.exec('BEGIN IMMEDIATE');
       try {
+        // Inside the write transaction, so a pin or an operator's assertion
+        // that another process lands meanwhile is seen. Same check as every
+        // other store: each id must resolve to a live entry the caller owns,
+        // or nothing is stored. Skipping it would let one agent retire
+        // another's memory.
+        if (supersedes.length > 0) {
+          const live = liveEntries(agentId, at);
+          for (const id of supersedes) {
+            assertSupersedableMemoryEntry(live, id);
+          }
+          // A memory pass may not retire a pinned fact or one an operator asserted.
+          if (appendOptions.refuseProtected === true) {
+            assertUnprotectedMemoryTargets(supersedes, live, new Set(selectPins.all(agentId).map((row) => row.id)));
+          }
+        }
         // The id encodes the sequence, and an import preserves ids from
         // wherever the corpus came from — so a corpus with gaps in it (an
         // export drops forgotten entries) can already hold the id this
@@ -509,7 +524,8 @@ export const createSqliteMemoryPlugin = (config = {}) => {
         );
       }
       store = createSqliteMemoryStore(path.resolve(expandHome(configured)));
-      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store, contract: MEMORY_STORE_CONTRACT_VERSION });
+      // It reads and writes a list in `supersedes`, so tidy passes can merge here.
+      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store, contract: MEMORY_STORE_CONTRACT_VERSION, supersedesMany: true });
     },
     dispose() {
       store?.close();

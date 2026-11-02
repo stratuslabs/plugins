@@ -594,3 +594,48 @@ test('the plugin registers the store as taking list-valued supersedes', async ()
   assert.equal(registered[0].supersedesMany, true);
   plugin.dispose();
 });
+
+/**
+ * Another process supersedes `targetId` inside a write transaction it holds
+ * for a moment before committing. Resolves once that transaction is open.
+ */
+const supersedeFromAnotherProcess = async (file, agentId, targetId) => {
+  const { spawn } = await import('node:child_process');
+  const script = `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(${JSON.stringify(file)});
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('BEGIN IMMEDIATE');
+    const seq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM entries').get().next;
+    db.prepare('INSERT INTO entries (seq, id, agent_id, content, created_at, fields) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(seq, ${JSON.stringify(agentId)} + ':memory:' + String(seq).padStart(12, '0'), ${JSON.stringify(agentId)}, 'the replacement', new Date().toISOString(), JSON.stringify({ supersedes: ${JSON.stringify(targetId)} }));
+    process.stdout.write('holding\\n');
+    setTimeout(() => { db.exec('COMMIT'); db.close(); }, 400);
+  `;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise((resolve) => child.on('exit', resolve));
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', (chunk) => (String(chunk).includes('holding') ? resolve() : undefined));
+    child.on('exit', (code) => reject(new Error(`the other process exited (${code}) before holding the lock`)));
+  });
+  return exited;
+};
+
+test('a pin or a relabel waits for a write another process holds, then sees what it committed: a fact superseded meanwhile is not pinned or relabeled', async () => {
+  const file = await newFile();
+  const sqlite = createSqliteMemoryStore(file);
+  const pinTarget = await sqlite.append('ava', 'Ava likes tea');
+  const relabelTarget = await sqlite.append('ava', 'Ava runs on Sundays');
+
+  let done = supersedeFromAnotherProcess(file, 'ava', pinTarget.id);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(() => sqlite.pin('ava', pinTarget.id), /nothing was pinned/);
+  await done;
+  assert.deepEqual(await sqlite.pinned('ava', { include: 'allocated' }), []);
+
+  done = supersedeFromAnotherProcess(file, 'ava', relabelTarget.id);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(await sqlite.reassertTrust('ava', relabelTarget.id, 'user'), false);
+  await done;
+  sqlite.close();
+});

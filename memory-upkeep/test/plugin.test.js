@@ -50,12 +50,13 @@ test('a config the plugin cannot use is refused when the plugin is created, befo
   assert.throws(() => createPlugin({ agents: { atlas: { tidy: { window: 'nightly' } } } }), /agents\.atlas\.tidy\.window/);
 });
 
-test('the manifest names the plugin, its core range, and a config schema the loader can check', () => {
+test('the manifest names the plugin, its Node range, its core dependency, and a config schema the loader can check', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(pkg.name, '@stratusagent/memory-upkeep');
   assert.equal(pkg.stratus.pluginVersion, 1);
   assert.equal(pkg.engines.node, '>=22.16 <23 || >=24');
-  assert.match(pkg.dependencies['@stratusagent/core'], /^\^0\.14\.3$/);
+  // The nightly swaps the range for agent main's tarball, so only its presence is checked.
+  assert.ok(pkg.dependencies['@stratusagent/core']);
   assert.equal(pkg.stratus.config.additionalProperties, false);
   assert.deepEqual(Object.keys(pkg.stratus.config.properties).sort(), ['mode', 'model', 'save', 'tidy']);
 });

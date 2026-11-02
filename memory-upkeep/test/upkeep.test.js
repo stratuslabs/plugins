@@ -64,6 +64,7 @@ const harness = ({ config = { agents: { atlas: {} } }, sessions = [], answer, st
   return {
     bus,
     upkeep,
+    fleet,
     asked,
     started,
     logs,
@@ -511,5 +512,30 @@ test('a save pass cut off while this host keeps running is asked again a minute 
   assert.equal(h.asked.length, 1);
   await h.advance(RETRY_SOON_MS);
   assert.equal(h.asked.length, 2);
+  h.upkeep.stop();
+});
+
+test('when lookups for two turns on an unseen session resolve out of order, the later turn\'s quiet wait stands', async () => {
+  const h = harness({
+    sessions: [{ id: 's-old', agentId: 'atlas', status: 'completed', createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-02T00:00:00.000Z' }],
+  });
+  await h.upkeep.start();
+  await h.upkeep.drain();
+  // Hold the fleet's answers, then release them newest first.
+  const held = [];
+  const { sessions } = h.fleet;
+  h.fleet.sessions = (options) => new Promise((resolve) => held.push(() => resolve(sessions(options))));
+  await h.bus.emit({ type: 'session.completed', sessionId: 's-old' });
+  await h.advance(10 * MINUTE);
+  await h.bus.emit({ type: 'session.completed', sessionId: 's-old' });
+  assert.equal(held.length, 2);
+  held[1]();
+  await new Promise((resolve) => setImmediate(resolve));
+  held[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.advance(20 * MINUTE);
+  assert.equal(h.asked.length, 0, 'thirty minutes after the first turn is only twenty after the second');
+  await h.advance(10 * MINUTE);
+  assert.deepEqual(h.asked.map((request) => request.sessionId), ['s-old']);
   h.upkeep.stop();
 });

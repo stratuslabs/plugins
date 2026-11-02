@@ -55,7 +55,7 @@ export const createUpkeep = ({
   now = Date.now,
   tickMs = TICK_MS,
 }) => {
-  /** sessionId -> { agentId, dueAt, floor, failures, version } */
+  /** sessionId -> { agentId, dueAt, lastTurnAt, floor, failures, version } */
   const due = new Map();
   /** sessionId -> agentId, from session.created, the sweep and fleet lookups. */
   const known = new Map();
@@ -91,9 +91,16 @@ export const createUpkeep = ({
       return;
     }
     const existing = due.get(sessionId);
+    if (existing !== undefined && at < existing.lastTurnAt) {
+      // A fleet lookup for an earlier turn that resolved after a later one:
+      // the later turn's wait stands.
+      existing.floor = existing.floor || floor;
+      return;
+    }
     const dueAt = floor ? at : at + quietMs(agentId);
     due.set(sessionId, {
       agentId,
+      lastTurnAt: at,
       // A session still backing off keeps its retry time when that is later.
       dueAt: existing !== undefined && existing.failures > 0 ? Math.max(dueAt, existing.dueAt) : dueAt,
       floor: floor || (existing?.floor ?? false),
@@ -172,7 +179,7 @@ export const createUpkeep = ({
           continue;
         }
         remember(row.id, agentId);
-        due.set(row.id, { agentId, dueAt: updatedAt + quietMs(agentId), floor: false, failures: 0, version: 1 });
+        due.set(row.id, { agentId, dueAt: updatedAt + quietMs(agentId), lastTurnAt: updatedAt, floor: false, failures: 0, version: 1 });
       }
     }
     swept = true;

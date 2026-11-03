@@ -4,14 +4,14 @@
   "description": "Discord channel for Stratus: each agent answers as its own bot in DMs and allowlisted guild channels.",
   "type": "module",
   "exports": "./index.js",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/plugins.git",
     "directory": "discord"
   },
   "engines": {
-    "node": ">=22.13 <23 || >=23.4"
+    "node": ">=22.16 <23 || >=24"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

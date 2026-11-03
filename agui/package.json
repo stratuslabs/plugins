@@ -1,0 +1,19 @@
+{
+  "name": "@stratusagent/plugin-agui",
+  "version": "0.0.0-spike",
+  "private": true,
+  "description": "SPIKE: serve a Stratus agent to AG-UI 1.0 clients (Server-Sent Events over a loopback HTTP endpoint).",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [{ "name": "agui" }]
+    }
+  }
+}

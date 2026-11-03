@@ -9,16 +9,17 @@
   },
   "files": [
     "index.js",
-    "README.md"
+    "README.md",
+    "NOTICE"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/plugins.git",
     "directory": "provider-openai"
   },
   "engines": {
-    "node": ">=22.13 <23 || >=23.4"
+    "node": ">=22.16 <23 || >=24"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

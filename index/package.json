@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "The curated list of Stratus plugins that `stratus setup` offers under More plugins.",
   "type": "module",
-  "license": "MIT",
-  "files": [],
+  "license": "Apache-2.0",
+  "files": ["NOTICE"],
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test test/*.test.js"

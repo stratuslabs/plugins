@@ -5,9 +5,12 @@
 // the version there is the tag's version, the name is in the @stratusagent/
 // scope, the package isn't private, and its repository is this GitHub
 // repository (npm trusted publishing refuses a package whose repository.url
-// is anything else). Anything else fails before a test runs, so a mistyped
-// tag never stages a package.
+// is anything else), and it ships under Apache-2.0 with its own copy of the
+// repository's LICENSE and NOTICE, both in what npm packs (npm packs a
+// package's directory, not the repository root). Anything else fails before
+// a test runs, so a mistyped tag never stages a package.
 
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +18,7 @@ import { packageRunners } from './packages.mjs';
 
 const TAG = /^([a-z0-9][a-z0-9_-]*)\/v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/;
 const SCOPE = '@stratusagent/';
+const LICENSE_ID = 'Apache-2.0';
 // npm's rule for a new scoped name: lowercase, URL-safe, no leading dot or
 // underscore, 214 characters at most. It also keeps line breaks out of the
 // name, which goes into $GITHUB_OUTPUT one name=value per line.
@@ -37,6 +41,50 @@ function repositoryProblem(dir, pkg, repository) {
   return undefined;
 }
 
+// The package's LICENSE is the repository's, byte for byte, and its NOTICE
+// starts with the repository's, so a stale MIT file or an empty one never
+// ships. A package may add its own attributions after the shared NOTICE, as
+// a2ui does for the A2UI files it copies.
+function licenseProblem(root, dir, pkg) {
+  if (pkg.license !== LICENSE_ID) {
+    return `${dir}/package.json has license ${JSON.stringify(pkg.license)}; packages here are ${LICENSE_ID}.`;
+  }
+  for (const file of ['LICENSE', 'NOTICE']) {
+    if (!existsSync(join(root, file))) return `The repository has no ${file} at its root to check ${dir} against.`;
+  }
+  if (!existsSync(join(root, dir, 'LICENSE'))) {
+    return `${dir} has no LICENSE file, so its npm package would ship without the license text.`;
+  }
+  if (!readFileSync(join(root, dir, 'LICENSE')).equals(readFileSync(join(root, 'LICENSE')))) {
+    return `${dir}/LICENSE is not the Apache 2.0 text in the repository's LICENSE. Copy that file over it.`;
+  }
+  if (!existsSync(join(root, dir, 'NOTICE'))) {
+    return `${dir} has no NOTICE file. Copy the repository's NOTICE into it; Apache 2.0 asks that the NOTICE travel with the package.`;
+  }
+  const notice = readFileSync(join(root, 'NOTICE'), 'utf8');
+  if (!readFileSync(join(root, dir, 'NOTICE'), 'utf8').startsWith(notice)) {
+    return `${dir}/NOTICE does not start with the repository's NOTICE. Keep that text first and add the package's own attributions after it.`;
+  }
+  const packed = packedFiles(join(root, dir));
+  const missing = ['LICENSE', 'NOTICE'].filter((file) => !packed.includes(file));
+  if (missing.length > 0) {
+    return `npm pack leaves ${missing.join(' and ')} out of ${dir}. Add ${missing.map((file) => JSON.stringify(file)).join(' and ')} to "files" in ${dir}/package.json.`;
+  }
+  return undefined;
+}
+
+// What npm would put in the tarball, read from npm itself, so "files", an
+// .npmignore and npm's own always-included list all count.
+function packedFiles(dir) {
+  const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+    cwd: dir,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const [report] = JSON.parse(out);
+  return report.files.map((file) => file.path);
+}
+
 export function resolveRelease(root, tag, repository) {
   const match = TAG.exec(tag);
   if (!match) throw new Error(`${JSON.stringify(tag)} is not a release tag. Use <dir>/v<major.minor.patch>, for example peer/v0.1.0.`);
@@ -56,6 +104,8 @@ export function resolveRelease(root, tag, repository) {
   }
   const repoProblem = repositoryProblem(dir, pkg, repository);
   if (repoProblem) throw new Error(repoProblem);
+  const licenseIssue = licenseProblem(root, dir, pkg);
+  if (licenseIssue) throw new Error(licenseIssue);
   const { runners, problem } = packageRunners(dir, pkg);
   if (problem) throw new Error(problem);
   return { dir, name: pkg.name, version, include: runners.map((runner) => ({ package: dir, runner })) };

@@ -159,3 +159,10 @@ Some capabilities ship with the agent itself rather than here: files, shell,
 web fetch, browser, MCP servers, Slack, and the control API with its
 dashboard. Their packages are in
 [`stratuslabs/agent/packages`](https://github.com/stratuslabs/agent/tree/main/packages).
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Each package ships its
+own copy of both. The Release workflow refuses a package whose LICENSE differs
+from this one, whose NOTICE doesn't start with this one, or that npm would pack
+without either.

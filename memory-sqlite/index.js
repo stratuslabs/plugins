@@ -12,6 +12,7 @@ import {
   clampMemoryRecallLimit,
   collectMemoryTopics,
   compareMemoryChronology,
+  effectiveMemoryValidityAt,
   importableMemoryEntry,
   isMemoryEntryCurrent,
   MEMORY_PINNED_MAX_BYTES,
@@ -334,7 +335,7 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
       const entries =
         listOptions.validity === 'all'
           ? liveEntries(agentId, at)
-          : liveEntries(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at));
+          : liveEntries(agentId, at).filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current');
       if (listOptions.limit === undefined) {
         return { entries: entries.sort(compareMemoryChronology), truncated: false };
       }
@@ -423,6 +424,8 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
         return pins.sort(compareMemoryChronology);
       }
       const alive = new Set(liveEntries(agentId, at).map((entry) => entry.id));
+      // The pin's own window, not the episodic default: pinning is how an
+      // agent says a note is still current.
       return pins
         .filter((entry) => alive.has(entry.id) && isMemoryEntryCurrent(entry, at))
         .sort(compareMemoryChronology);
@@ -430,7 +433,9 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
 
     async topics(agentId) {
       const at = now();
-      return collectMemoryTopics(liveEntries(agentId, at).filter((entry) => isMemoryEntryCurrent(entry, at)));
+      return collectMemoryTopics(
+        liveEntries(agentId, at).filter((entry) => effectiveMemoryValidityAt(entry, at) === 'current'),
+      );
     },
 
     async importEntries(agentId, entries) {

@@ -140,8 +140,12 @@ jobs:
           fi
           if [ "$PACKED" != success ]; then
             body="Agent main didn't build or pack ($PACKED), so no plugin was checked: $RUN"
-          else
+          elif [ "$TESTED" = failure ]; then
             body="At least one plugin fails against agent main $SHA ($TESTED). The failing jobs name the package and the check: $RUN"
+          else
+            # cancelled or abandoned: a job stopped before its tests did, most
+            # often one that never got a runner. That is not a plugin failing.
+            body="At least one plugin job didn't finish against agent main $SHA ($TESTED), so this run doesn't show whether every plugin passes. A job that never got a runner ends this way. Check the run before treating it as a break: $RUN"
           fi
           if [ -n "$open" ]; then
             gh issue comment "$open" --body "$body"

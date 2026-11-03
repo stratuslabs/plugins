@@ -17,6 +17,7 @@ agent's core any bigger.
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
 | [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
 | [`memory-sqlite`](./memory-sqlite) | A memory store named `sqlite`: every agent's memory in one owner-only SQLite file, selected with `"memoryStore": "sqlite"` | Moved here from the agent repository; keeps its name |
+| [`plugin-brave-search`](./brave-search) | `web.search` through the Brave Search API, behind the shared search contract | Needs a Brave Search API key as `search.apiKey`. Another backend can replace it with no soul edit |
 
 Each is released to npm as `@stratusagent/plugin-<name>` from the directory
 of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).

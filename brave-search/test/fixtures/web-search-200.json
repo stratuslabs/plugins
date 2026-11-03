@@ -1,0 +1,71 @@
+{
+  "type": "search",
+  "query": {
+    "original": "kettle \"descaling\" -vinegar",
+    "show_strict_warning": false,
+    "is_navigational": false,
+    "spellcheck_off": true,
+    "country": "us",
+    "more_results_available": true
+  },
+  "mixed": {
+    "type": "mixed",
+    "main": [
+      { "type": "web", "index": 0, "all": false },
+      { "type": "web", "index": 1, "all": false },
+      { "type": "web", "index": 2, "all": false },
+      { "type": "web", "index": 3, "all": false }
+    ]
+  },
+  "web": {
+    "type": "search",
+    "family_friendly": true,
+    "results": [
+      {
+        "type": "search_result",
+        "title": "How to descale a kettle without vinegar",
+        "url": "https://www.example.com/guides/descale-kettle",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "Citric acid works as well as <strong>descaling</strong> tablets. Fill the <strong>kettle</strong> halfway…",
+        "page_age": "2026-10-20T09:15:00",
+        "age": "October 20, 2026",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": { "scheme": "https", "netloc": "example.com", "hostname": "www.example.com", "path": "› guides › descale-kettle" }
+      },
+      {
+        "type": "search_result",
+        "title": "Kettle descaling FAQ",
+        "url": "https://docs.example.com/kettles/faq",
+        "description": "Answers to common questions about <strong>descaling</strong>.",
+        "page_age": "2026-10-25T18:00:00+02:00",
+        "age": "2 days ago",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": { "scheme": "https", "netloc": "docs.example.com", "hostname": "docs.example.com", "path": "› kettles › faq" }
+      },
+      {
+        "type": "search_result",
+        "title": "Limescale and your kettle",
+        "url": "https://notexample.com/limescale",
+        "description": "Why hard water leaves deposits.",
+        "page_age": "2026-01-03",
+        "age": "January 3, 2026",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": { "scheme": "https", "netloc": "notexample.com", "hostname": "notexample.com", "path": "› limescale" }
+      },
+      {
+        "type": "search_result",
+        "title": "Descaling forum thread",
+        "url": "https://forum.example.org/t/descaling",
+        "description": "A thread with no usable date.",
+        "age": "March 2, 2023",
+        "language": "en",
+        "family_friendly": true,
+        "meta_url": { "scheme": "https", "netloc": "forum.example.org", "hostname": "forum.example.org", "path": "› t › descaling" }
+      }
+    ]
+  }
+}

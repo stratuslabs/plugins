@@ -166,3 +166,74 @@ test('a copy of a main package from anywhere but main\'s tarball is reported, wh
   delete lock.packages['node_modules/@stratusagent/plugin-sandbox/node_modules/@stratusagent/plugins'];
   assert.deepEqual(strayCopies(lock, PACKS), []);
 });
+
+// The Report job's script, run as Actions runs it (bash -eo pipefail) with a
+// stub gh that records each call and answers `gh issue list` with `open`.
+const runReport = ({ packed, tested, open = '' }) => {
+  const workflow = readFileSync(new URL('../workflows/nightly.yml', import.meta.url), 'utf8');
+  const lines = workflow.split('\n');
+  const step = lines.findIndex((line) => line.trim() === '- name: Open, update or close the issue');
+  assert.ok(step > 0, 'found the Report step');
+  assert.equal(lines[step + 1].trim(), 'run: |');
+  const body = [];
+  for (const line of lines.slice(step + 2)) {
+    if (line.trim() !== '' && !line.startsWith(' '.repeat(10))) break;
+    body.push(line.slice(10));
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'nightly-report-'));
+  mkdirSync(join(dir, 'bin'));
+  writeFileSync(join(dir, 'report.sh'), body.join('\n'));
+  writeFileSync(
+    join(dir, 'bin', 'gh'),
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+require('node:fs').appendFileSync(process.env.GH_LOG, JSON.stringify(args) + '\\n');
+if (args[0] === 'issue' && args[1] === 'list') process.stdout.write(process.env.STUB_OPEN);
+`,
+    { mode: 0o755 },
+  );
+  const log = join(dir, 'gh.log');
+  writeFileSync(log, '');
+  execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', join(dir, 'report.sh')], {
+    env: {
+      PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+      GH_LOG: log,
+      STUB_OPEN: open,
+      TITLE: 'Nightly against agent main is failing',
+      RUN: 'https://github.com/stratuslabs/plugins/actions/runs/1',
+      SHA: 'f0b756d1',
+      PACKED: packed,
+      TESTED: tested,
+    },
+  });
+  return readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter((args) => args[1] !== 'list');
+};
+
+test('report: a passing run closes the open issue, and does nothing when none is open', () => {
+  assert.deepEqual(runReport({ packed: 'success', tested: 'success', open: '56' }), [
+    ['issue', 'close', '56', '--comment', 'Passing again against agent main f0b756d1: https://github.com/stratuslabs/plugins/actions/runs/1'],
+  ]);
+  assert.deepEqual(runReport({ packed: 'success', tested: 'success' }), []);
+});
+
+test('report: a failing plugin job says a plugin fails, and opens the issue when none is open', () => {
+  const [call] = runReport({ packed: 'success', tested: 'failure' });
+  assert.deepEqual(call.slice(0, 4), ['issue', 'create', '--title', 'Nightly against agent main is failing']);
+  assert.equal(call[4], '--body');
+  assert.equal(call[5], 'At least one plugin fails against agent main f0b756d1 (failure). The failing jobs name the package and the check: https://github.com/stratuslabs/plugins/actions/runs/1');
+});
+
+test('report: a job that never finished, such as one that got no runner, is not called a plugin failing', () => {
+  for (const tested of ['abandoned', 'cancelled']) {
+    const [call] = runReport({ packed: 'success', tested, open: '56' });
+    assert.deepEqual(call.slice(0, 4), ['issue', 'comment', '56', '--body']);
+    assert.doesNotMatch(call[4], /fails/, tested);
+    assert.match(call[4], new RegExp(`didn't finish against agent main f0b756d1 \\(${tested}\\)`), tested);
+    assert.match(call[4], /runs\/1$/, tested);
+  }
+});
+
+test('report: agent main that did not pack says no plugin was checked', () => {
+  const [call] = runReport({ packed: 'failure', tested: 'skipped', open: '56' });
+  assert.deepEqual(call, ['issue', 'comment', '56', '--body', "Agent main didn't build or pack (failure), so no plugin was checked: https://github.com/stratuslabs/plugins/actions/runs/1"]);
+});

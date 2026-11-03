@@ -673,6 +673,7 @@ test('a file a tool made during the turn is uploaded into the conversation, in i
   assert.deepEqual(uploads.map((p) => [p.channelId, p.files[0].name]), [[DM, 'chart.png']]);
   const order = discord.state.posts.map((p) => (p.files ? 'file' : p.body.content));
   assert.ok(order.indexOf('Drawing it.') < order.indexOf('file'), `words before the tool come first (${order})`);
+  assert.ok(order.indexOf('file') < order.indexOf('Here it is.'), `the reply comes after the file (${order})`);
 });
 
 test('with no permission to open threads, an approver\'s stop as a reply to the answer ends that conversation\'s turn', async (t) => {

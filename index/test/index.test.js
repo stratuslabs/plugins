@@ -65,7 +65,8 @@ test('every @stratusagent entry is a plugin in this repository that setup can of
   }
 });
 
-test('the package publishes nothing but its package.json and README', () => {
-  assert.deepEqual(pkg.files, []);
+test('the package publishes nothing but its package.json, README, LICENSE and NOTICE', () => {
+  // npm always packs package.json, README and LICENSE; "files" adds NOTICE.
+  assert.deepEqual(pkg.files, ['NOTICE']);
   assert.equal(pkg.private, undefined);
 });

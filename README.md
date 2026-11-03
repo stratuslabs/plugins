@@ -15,6 +15,7 @@ agent's core any bigger.
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
+| [`plugin-budgets`](./budgets) | Token budgets per UTC day and month, for the install and each agent, checked before every model call, plus a ledger of every call's usage | Needs Stratus 0.13.7 or later. Tokens, not money |
 | [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
 | [`memory-sqlite`](./memory-sqlite) | A memory store named `sqlite`: every agent's memory in one owner-only SQLite file, selected with `"memoryStore": "sqlite"` | Moved here from the agent repository; keeps its name |
 

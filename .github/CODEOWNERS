@@ -1,0 +1,12 @@
+# Files that change CI or run code at install, build, test or release time.
+# A change to any of them needs a maintainer's review once a ruleset for
+# main has "Require review from Code Owners" on.
+#
+# There is no root package or workspace here: each plugin is its own npm
+# package, so its package.json (scripts, dependencies, engines) and its
+# lockfile are listed wherever they sit.
+
+/.github/          @dylanfeltus
+package.json       @dylanfeltus
+package-lock.json  @dylanfeltus
+.npmrc             @dylanfeltus

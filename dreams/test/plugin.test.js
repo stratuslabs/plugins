@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -132,7 +132,20 @@ test('dreams.report answers for the calling agent only', async () => {
 test('a tool installed straight in the home directory is not opened to the experiment', () => {
   const home = tmp('dreams-home-');
   assert.throws(() => installRoot(tool(home, 'claude'), path.join(home, 'bin')), /home directory or above/);
-  assert.equal(installRoot('/opt/homebrew/bin/claude', home), '/opt/homebrew');
+});
+
+test('a tool outside the home opens the install it really lives in, following a symlink', () => {
+  const home = tmp('dreams-home-');
+  const prefix = tmp('dreams-prefix-');
+  assert.equal(installRoot(tool(prefix, 'claude'), home), prefix);
+
+  // npm -g links <prefix>/bin/claude to the package's own binary, as Homebrew's npm does.
+  const npm = tmp('dreams-npm-');
+  const pkg = path.join(npm, 'lib', 'node_modules', '@anthropic-ai', 'claude-code');
+  const binary = tool(pkg, 'claude.exe');
+  mkdirSync(path.join(npm, 'bin'));
+  symlinkSync(path.relative(path.join(npm, 'bin'), binary), path.join(npm, 'bin', 'claude'));
+  assert.equal(installRoot(path.join(npm, 'bin', 'claude'), home), pkg);
 });
 
 test('the profile writes only what the experimenter writes, and denies secrets after every allow', () => {

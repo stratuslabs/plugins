@@ -5,7 +5,7 @@ export const BOT = '111111111111111111';
 
 /**
  * Just enough of Discord for the adapter's own tests: `GET /gateway/bot`,
- * message (post, edit, delete), typing and thread routes over REST, and a gateway that says
+ * message (post, edit, delete), reaction, typing and thread routes over REST, and a gateway that says
  * hello, answers heartbeats, identifies and resumes. Records what it was
  * sent. `closeOnIdentify` makes it refuse the identify with a close code;
  * `gatewayDelayMs` slows `GET /gateway/bot` and `gatewayUrl` replaces the
@@ -14,7 +14,7 @@ export const BOT = '111111111111111111';
 export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gatewayUrl, port: listenPort = 0 } = {}) => {
   // `channels` (id -> channel object) and `history` (channel id -> its
   // messages, any order) are the test's to fill; GETs read them.
-  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], sockets: [], gets: [], channels: {}, history: {}, files: {}, downloads: [], seq: 0 };
+  const state = { identifies: [], resumes: [], posts: [], patches: [], deletes: [], callbacks: [], typing: [], threads: [], reactions: [], sockets: [], gets: [], channels: {}, history: {}, files: {}, downloads: [], seq: 0 };
   let nextId = 900000000000000000n;
   const id = () => String((nextId += 1n));
   const server = http.createServer((req, res) => {
@@ -109,6 +109,15 @@ export const fakeDiscord = async ({ closeOnIdentify, gatewayDelayMs = 0, gateway
       }
       if (req.method === 'DELETE' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)$/))) {
         state.deletes.push({ channelId: match[1], messageId: match[2] });
+        res.writeHead(204);
+        return res.end();
+      }
+      if (req.method === 'PUT' && (match = url.match(/^\/channels\/(\d+)\/messages\/(\d+)\/reactions\/([^/]+)\/@me$/))) {
+        // `refuseReactions`: the bot may not add reactions there.
+        if (state.refuseReactions) {
+          return send(403, { message: 'Missing Permissions', code: 50013 });
+        }
+        state.reactions.push({ channelId: match[1], messageId: match[2], emoji: decodeURIComponent(match[3]) });
         res.writeHead(204);
         return res.end();
       }

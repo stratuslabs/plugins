@@ -7,6 +7,7 @@ const Routes = {
   channelMessages: (channel) => `/channels/${channel}/messages`,
   channelMessage: (channel, message) => `/channels/${channel}/messages/${message}`,
   channelTyping: (channel) => `/channels/${channel}/typing`,
+  ownReaction: (channel, message, emoji) => `/channels/${channel}/messages/${message}/reactions/${encodeURIComponent(emoji)}/@me`,
   threads: (channel, message) => `/channels/${channel}/messages/${message}/threads`,
 };
 
@@ -79,6 +80,19 @@ export const removeMessage = async (rest, channelId, messageId) => {
     }
   }
 };
+
+/**
+ * The emoji for each reaction core lets a silent turn name
+ * (`SILENT_REACTIONS`, card 1078): its channel-neutral names, as Discord
+ * shows them.
+ */
+export const REACTION_EMOJI = Object.freeze({ thumbsup: '👍', laughing: '😆', heart: '❤️', tada: '🎉' });
+
+/**
+ * Put the bot's own reaction on a message. Needs Add Reactions and Read
+ * Message History there; adding one it has already left changes nothing.
+ */
+export const react = (rest, channelId, messageId, emoji) => rest.put(Routes.ownReaction(channelId, messageId, emoji));
 
 /** "Agent is typing…" for about ten seconds. */
 export const typing = (rest, channelId) => rest.post(Routes.channelTyping(channelId));

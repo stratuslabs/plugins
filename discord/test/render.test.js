@@ -8,7 +8,7 @@ import { createRenderer, NO_REPLY_TEXT } from '../lib/render.js';
  * only when the test advances time, and every post, edit and delete lands
  * in `calls` in order.
  */
-const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } = {}) => {
+const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false, quiet = false } = {}) => {
   let clock = 0;
   let timers = [];
   let nextTimer = 1;
@@ -74,7 +74,7 @@ const harness = ({ intervalMs = 1000, failEdits = false, failUploads = false } =
     await settle();
   };
   const warnings = [];
-  const renderer = createRenderer({ ops, intervalMs, typingEveryMs: 8000, timers: fakeTimers, now: () => clock, warn: (line) => warnings.push(line) });
+  const renderer = createRenderer({ ops, intervalMs, typingEveryMs: 8000, timers: fakeTimers, now: () => clock, warn: (line) => warnings.push(line), quiet });
   const visible = () => [...messages.values()];
   const setFailEdits = (value) => {
     editsFail = value;
@@ -576,4 +576,95 @@ test('a post Discord refused is logged and the turn goes on', async () => {
   assert.deepEqual(shown, ['Done.']);
   assert.equal(spoke, true);
   assert.match(warnings.join('\n'), /could not post a tool's message: Missing Access/);
+});
+
+// A turn that may stay silent (`quiet`, a reply-optional turn: AGT-329).
+
+test('a quiet turn streams nothing, and one that ends silent posts nothing: no (no reply), and not the marker', async () => {
+  const { renderer, calls, advance, settle } = harness({ quiet: true });
+  renderer.beginTurn();
+  renderer.onEvent(text('NO_REPLY'));
+  await settle();
+  renderer.onEvent(text(' thumbsup'));
+  await advance(5000);
+  renderer.onEvent(response('NO_REPLY thumbsup'));
+  const { spoke } = await renderer.finalize('');
+  await advance(30000);
+  assert.deepEqual(calls.filter(([op]) => op !== 'typing'), [], 'nothing went to Discord but typing');
+  assert.equal(spoke, false);
+});
+
+test('a quiet turn that answers posts its answer once, at the end', async () => {
+  const { renderer, calls, visible, advance, settle } = harness({ quiet: true });
+  renderer.onEvent(text('You are'));
+  await settle();
+  renderer.onEvent(text(' welcome.'));
+  await advance(5000);
+  assert.deepEqual(visible(), [], 'nothing while it runs');
+  const { spoke } = await renderer.finalize('You are welcome. Anything else?');
+  assert.deepEqual(visible(), ['You are welcome. Anything else?']);
+  assert.equal(calls.filter(([op]) => op === 'edit').length, 0, 'posted whole, never edited');
+  assert.equal(spoke, true);
+});
+
+test('a quiet turn shows no tool status, and its words before a tool stay unsaid when it ends silent', async () => {
+  const { renderer, visible, advance, settle } = harness({ quiet: true });
+  renderer.onEvent(text("I'll check."));
+  await settle();
+  renderer.onEvent(response("I'll check."));
+  renderer.onEvent(called('web.fetch'));
+  await advance(1000);
+  assert.deepEqual(visible(), [], 'no status line');
+  renderer.onEvent(completed());
+  renderer.onEvent(text('NO_REPLY'));
+  await advance(1000);
+  const { spoke } = await renderer.finalize('');
+  assert.deepEqual(visible(), []);
+  assert.equal(spoke, false);
+});
+
+test('a quiet turn that answers after a tool posts the words before it too, in order', async () => {
+  const { renderer, visible, advance, settle } = harness({ quiet: true });
+  renderer.onEvent(text("I'll check."));
+  await settle();
+  renderer.onEvent(response("I'll check."));
+  renderer.onEvent(called('web.fetch'));
+  renderer.onEvent(completed());
+  renderer.onEvent(text('It is sunny.'));
+  await advance(1000);
+  assert.deepEqual(visible(), []);
+  await renderer.finalize('It is sunny.');
+  assert.deepEqual(visible(), ["I'll check.", 'It is sunny.']);
+});
+
+test('a quiet turn speaks when a tool posts: the words before it go up, then the post; silence after it adds nothing', async () => {
+  const { renderer, visible, advance, settle } = harness({ quiet: true });
+  renderer.onEvent(text('Counting the PRs.'));
+  await settle();
+  renderer.onEvent(response('Counting the PRs.'));
+  renderer.onEvent(called('chat.card'));
+  await advance(1000);
+  assert.deepEqual(visible(), []);
+  renderer.onEvent(produced(card('13 open PRs')));
+  await settle();
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs'], 'up as soon as the tool returned it');
+  renderer.onEvent(text('NO_REPLY'));
+  await advance(5000);
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs'], 'words after it are held');
+  const { spoke } = await renderer.finalize('');
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs']);
+  assert.equal(spoke, true);
+});
+
+test('a quiet turn that fails, or is stopped, still says so', async () => {
+  {
+    const { renderer, visible } = harness({ quiet: true });
+    await renderer.fail('The provider timed out.');
+    assert.deepEqual(visible(), ['⚠ The provider timed out.']);
+  }
+  {
+    const { renderer, visible } = harness({ quiet: true });
+    await renderer.stopped('Dylan');
+    assert.deepEqual(visible(), ['-# Stopped by Dylan.']);
+  }
 });

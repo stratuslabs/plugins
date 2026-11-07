@@ -676,6 +676,30 @@ test('a file a tool made during the turn is uploaded into the conversation, in i
   assert.ok(order.indexOf('file') < order.indexOf('Here it is.'), `the reply comes after the file (${order})`);
 });
 
+test('a post a tool returned shows its text in the conversation, in its place, pinging nobody', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ channel_id: DM, content: 'open PRs as a card' }));
+  await until(() => gateway.turns.length === 1, 'a dispatch');
+  const [turn] = gateway.turns;
+  turn.start();
+  turn.emit({ type: 'provider.delta', delta: { type: 'text', text: 'Counting.' } });
+  turn.emit({ type: 'provider.response', parts: [{ type: 'text', text: 'Counting.' }] });
+  turn.emit({ type: 'tool.called', call: { id: 'c1', toolName: 'chat.card', input: {} } });
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: '*13* open' } }];
+  turn.emit({ type: 'tool.completed', result: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: '13 open PRs @everyone', slack: { blocks } } } } });
+  turn.finish('Here they are.');
+  await until(() => discord.state.posts.some((p) => p.body.content === 'Here they are.') || discord.state.patches.some((p) => p.body.content === 'Here they are.'), 'the reply');
+  const card = discord.state.posts.find((p) => p.body.content === '13 open PRs @everyone');
+  assert.ok(card, 'the post\'s text is a message of its own');
+  assert.equal(card.channelId, DM);
+  assert.deepEqual(card.body.allowed_mentions, { parse: [], replied_user: false });
+  assert.equal(JSON.stringify(discord.state.posts).includes('*13* open'), false, 'Slack blocks never reach Discord');
+  const order = discord.state.posts.map((p) => p.body.content);
+  assert.ok(order.indexOf('Counting.') < order.indexOf('13 open PRs @everyone'), `words before the tool come first (${order})`);
+  assert.ok(order.indexOf('13 open PRs @everyone') < order.indexOf('Here they are.'), `the reply comes after the post (${order})`);
+});
+
 test('with no permission to open threads, an approver\'s stop as a reply to the answer ends that conversation\'s turn', async (t) => {
   const { discord, registered, gateway } = await setUp(t);
   await registered[0].adapter.start(gateway);

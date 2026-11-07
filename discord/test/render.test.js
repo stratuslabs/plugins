@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { chunk } from '../lib/chunk.js';
 import { createRenderer, NO_REPLY_TEXT } from '../lib/render.js';
 
 /**
@@ -467,4 +468,112 @@ test('a halt while a sync is underway stops the requests it had left', async () 
   release();
   await finished;
   assert.deepEqual(calls, [['post', 2000]], 'nothing after the halt');
+});
+
+// A tool's ready-made message (core's post convention, AGT-324): Discord
+// shows its `text`; Slack's blocks are Slack's.
+const card = (value) => ({ post: { text: value, slack: { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '*13* open' } }] } } });
+
+test('a post a tool returned shows its text in its place: below the words before it, above the words after', async () => {
+  const { renderer, visible, advance, settle } = harness();
+  renderer.onEvent(text('Counting the PRs.'));
+  await settle();
+  renderer.onEvent(response('Counting the PRs.'));
+  renderer.onEvent(called('chat.card'));
+  await advance(1000);
+  renderer.onEvent(produced(card('Stratus repos: 13 open PRs')));
+  await settle();
+  renderer.onEvent(text('That is all of them.'));
+  await advance(1000);
+  await renderer.finalize('That is all of them.');
+  assert.deepEqual(visible(), ['Counting the PRs.', 'Stratus repos: 13 open PRs', 'That is all of them.']);
+});
+
+test('a post alone is something said: no (no reply) after it', async () => {
+  const { renderer, visible, settle } = harness();
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('13 open PRs')));
+  await settle();
+  const { spoke } = await renderer.finalize('');
+  assert.deepEqual(visible(), ['13 open PRs']);
+  assert.equal(spoke, true);
+});
+
+test('a post longer than one message goes up as more messages, in order', async () => {
+  const { renderer, visible, settle } = harness();
+  const long = `${'a'.repeat(1990)} ${'b'.repeat(500)}`;
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card(long)));
+  await settle();
+  await renderer.finalize('Done.');
+  assert.deepEqual(visible(), [...chunk(long), 'Done.']);
+  assert.ok(chunk(long).length > 1);
+});
+
+test('a result with files and a post: the files go up first, then the post, as Slack orders them', async () => {
+  const { renderer, visible, settle } = harness();
+  renderer.onEvent(called('report'));
+  renderer.onEvent(produced({ file: '/w/chart.png', ...card('Weekly report') }));
+  await settle();
+  await renderer.finalize('Done.');
+  assert.deepEqual(visible(), ['[file /w/chart.png]', 'Weekly report', 'Done.']);
+});
+
+test('no post from a failed, external or denied result, or from a `post` that is not one', async () => {
+  const { renderer, visible, settle } = harness();
+  const results = [
+    produced(card('failed'), false),
+    { type: 'tool.completed', sessionId: 's', result: { callId: 'c1', ok: true, trust: 'external', output: card('from a fetched page') } },
+    { type: 'tool.denied', sessionId: 's', call: { id: 'c1', toolName: 'x' }, result: { ok: true, output: card('denied') } },
+    produced({ post: 'a blog post' }),
+    produced({ post: { text: '   ' } }),
+    produced({ post: { title: 'no text' } }),
+    produced({ post: ['text'] }),
+    produced([{ post: { text: 'in an array' } }]),
+  ];
+  for (const result of results) {
+    renderer.onEvent(called('x'));
+    renderer.onEvent(result);
+  }
+  await settle();
+  await renderer.finalize('done');
+  assert.deepEqual(visible(), ['done']);
+});
+
+test('a post from a result whose trust is the agent\'s own or unknown is posted', async () => {
+  const { renderer, visible, settle } = harness();
+  for (const trust of ['agent', 'unknown']) {
+    renderer.onEvent(called('chat.card'));
+    renderer.onEvent({ type: 'tool.completed', sessionId: 's', result: { callId: 'c1', ok: true, trust, output: card(`from ${trust}`) } });
+  }
+  await settle();
+  await renderer.finalize('');
+  assert.deepEqual(visible(), ['from agent', 'from unknown']);
+});
+
+test('a post Discord refused is logged and the turn goes on', async () => {
+  const shown = [];
+  const warnings = [];
+  let nextId = 1;
+  const renderer = createRenderer({
+    timers: { setTimeout: () => 0, clearTimeout: () => {} },
+    warn: (line) => warnings.push(line),
+    ops: {
+      async post(piece) {
+        if (piece === 'Weekly report') throw new Error('Missing Access');
+        shown.push(piece);
+        return `m${nextId++}`;
+      },
+      async edit() {},
+      async remove() {},
+      async typing() {},
+      async upload() {},
+    },
+  });
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('Weekly report')));
+  const { spoke } = await renderer.finalize('Done.');
+  assert.deepEqual(shown, ['Done.']);
+  assert.equal(spoke, true);
+  assert.match(warnings.join('\n'), /could not post a tool's message: Missing Access/);
 });

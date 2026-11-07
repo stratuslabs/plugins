@@ -95,6 +95,13 @@ either place fails the load with its name.
   most Discord takes from a bot in a server with no boosts; a failed upload
   is logged and the turn goes on.
 
+- Posts a tool returns: a tool's ready-made message (an ok result's
+  `post: { text }`, the convention plugin-json-render's `chat.card` uses)
+  shows as its `text`, in its place after that result's files. Slack's
+  blocks (`post.slack`) aren't shown here, a post in an `external` result
+  isn't posted, and like everything the agent writes it pings nobody. A
+  refused post is logged and the turn goes on.
+
 ## Not built yet
 
 Saving a large text file someone sends to the agent's workspace instead of

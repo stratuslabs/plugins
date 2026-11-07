@@ -69,6 +69,12 @@ const fakeGateway = (agents = ['ava']) => {
               ],
             });
           },
+          /** Resolve with this session as it stands: a repeat's, say. */
+          finishWith(session) {
+            active = undefined;
+            turn.settled = true;
+            resolve(session);
+          },
           reject(error) {
             active = undefined;
             turn.settled = true;
@@ -823,4 +829,43 @@ test('with no permission to add reactions, a silent turn stays silent and the op
   const said = warns.filter((line) => /reaction/i.test(line));
   assert.equal(said.length, 1, `warned once (${said})`);
   assert.match(said[0], /Add Reactions/);
+});
+
+test('a silent turn whose tool posted something leaves no reaction: it said something', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000039', guild_id: GUILD, channel_id: thread, content: 'cheers' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  const turn = gateway.turns[1];
+  turn.start();
+  turn.emit({ type: 'tool.called', call: { id: 'c1', toolName: 'chat.card', input: {} } });
+  turn.emit({ type: 'tool.completed', result: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'A card.' } } } });
+  turn.finish('', { reaction: 'heart' });
+  await until(() => discord.state.posts.some((post) => post.body.content === 'A card.'), 'the post');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(discord.state.reactions.length, 0);
+});
+
+test('a repeat of a finished silent turn leaves that turn\'s reaction, though a later turn has answered since', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000040', guild_id: GUILD, channel_id: thread, content: 'thanks' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  const turn = gateway.turns[1];
+  turn.input.onRepeat('finished');
+  turn.finishWith({
+    id: turn.input.sessionId,
+    status: 'completed',
+    messages: [
+      { role: 'user', content: turn.input.userMessage, idempotencyKey: turn.input.idempotencyKey },
+      { role: 'assistant', content: '', reaction: 'laughing' },
+      { role: 'user', content: 'Dylan: and now?', idempotencyKey: 'discord:600000000000000041' },
+      { role: 'assistant', content: 'Now this.' },
+    ],
+  });
+  await until(() => discord.state.reactions.length === 1, 'the reaction');
+  assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000040', emoji: '😆' });
+  assert.equal(discord.state.posts.length, 1, 'the later turn\'s answer is not this one\'s');
 });

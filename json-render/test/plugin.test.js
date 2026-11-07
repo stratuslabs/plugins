@@ -78,7 +78,7 @@ test('the skill lists the catalog exactly as json-render describes it, Button le
 });
 
 test('the manifest ships what the plugin needs to load', () => {
-  for (const file of ['index.js', 'lib/', 'skills/', 'README.md']) {
+  for (const file of ['index.js', 'lib/', 'skills/', 'README.md', 'NOTICE']) {
     assert.ok(manifest.files.includes(file), file);
   }
   assert.equal(manifest.name, '@stratusagent/plugin-json-render');

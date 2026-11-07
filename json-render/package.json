@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "json-render" },
   "engines": { "node": ">=22" },
-  "files": ["index.js", "lib/", "skills/", "README.md"],
+  "files": ["index.js", "lib/", "skills/", "README.md", "NOTICE"],
   "scripts": {
     "test": "node --test test/*.test.js",
     "skill": "node scripts/components.js"

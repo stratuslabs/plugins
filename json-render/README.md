@@ -21,10 +21,10 @@ it wrote stays in the call's input.
 
 ## Needs
 
-A Stratus daemon whose core reads tool posts and whose Slack channel sends
-them. That is [stratuslabs/agent#626](https://github.com/stratuslabs/agent/pull/626),
-not yet in a release. An older daemon runs the tool but posts nothing, and
-shows the model the whole result, blocks included.
+Stratus 0.14.10 or later, whose core reads tool posts and whose Slack channel
+sends them ([stratuslabs/agent#626](https://github.com/stratuslabs/agent/pull/626)).
+An older daemon runs the tool but posts nothing, and shows the model the whole
+result, blocks included.
 
 ## Setup
 

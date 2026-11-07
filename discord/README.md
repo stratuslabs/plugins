@@ -26,10 +26,10 @@ the private plans repo (roadmap/20, V1 section).
 
 4. Invite each bot to its guilds with View Channels, Send Messages, Send
    Messages in Threads, Create Public Threads, Read Message History, Attach
-   Files and Add Reactions. Without Create Public Threads it answers a mention in the
-   channel, as a reply. Replying to one of those answers (Discord's Reply)
-   carries that conversation on, after a restart too; a new mention there
-   starts a new one.
+   Files and Add Reactions. Without Create Public Threads it answers a
+   mention in the channel, as a reply. Replying to one of those answers
+   (Discord's Reply) carries that conversation on, after a restart too; a
+   new mention there starts a new one.
 
 Every agent with a stored token is on Discord; one with no approvers in
 either place fails the load with its name.

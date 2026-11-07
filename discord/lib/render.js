@@ -60,7 +60,8 @@ const postTextOf = (result) => {
  * written before it, because it was said. At the end, a reply with words
  * goes up the way any turn's does, after the words still held; a turn
  * that ends with none posts nothing more, not `(no reply)`, and the words
- * it held stay unsaid. A failure or a stop still says so.
+ * it held stay unsaid. A failure or a stop still says so, without the
+ * words the turn was writing when it ended, since they were held.
  *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
@@ -114,9 +115,14 @@ export const createRenderer = ({
     }
   };
 
-  /** Bring every segment's messages in line with what it should show. */
-  const syncNow = async () => {
-    for (const segment of segments) {
+  /**
+   * Bring every segment's messages in line with what it should show, or
+   * only the first `upTo`: a quiet turn's tool output takes up the
+   * segments as far as its own, never the words written after it.
+   */
+  const syncNow = async (upTo = Infinity) => {
+    for (let index = 0; index < Math.min(upTo, segments.length); index += 1) {
+      const segment = segments[index];
       const body = display(segment);
       const pieces = body ? chunk(body) : [];
       // Outputs already queued when the segment was read: what was read
@@ -194,8 +200,8 @@ export const createRenderer = ({
     }
   };
 
-  const sync = () => {
-    chain = chain.then(syncNow);
+  const sync = (upTo) => {
+    chain = chain.then(() => syncNow(upTo));
     return chain;
   };
 
@@ -238,6 +244,13 @@ export const createRenderer = ({
       segments.push(newSegment());
     }
   };
+
+  /**
+   * The live segment ending in a failure or stop notice. A quiet turn's
+   * live words were held, never shown, and may be the silent answer, so
+   * the notice goes up without them.
+   */
+  const withNotice = (notice) => (!quiet && live().text.trim().length > 0 ? `${live().text}\n\n${notice}` : notice);
 
   const typingLoop = () => {
     if (finished) {
@@ -317,7 +330,10 @@ export const createRenderer = ({
           timer = undefined;
         }
         lastSyncAt = now();
-        void sync();
+        // A quiet turn's next words may be the silent answer, so this sync
+        // stops at the segment the outputs belong to, wherever its turn in
+        // the chain comes.
+        void sync(quiet ? segments.length - 1 : undefined);
       }
     },
 
@@ -358,8 +374,7 @@ export const createRenderer = ({
       finished = true;
       stopTimers();
       tool = undefined;
-      const said = live().text.trim().length > 0 ? `${live().text}\n\n` : '';
-      live().text = `${said}⚠ ${message}`;
+      live().text = withNotice(`⚠ ${message}`);
       await sync();
       return { spoke: posted > 0 };
     },
@@ -369,8 +384,7 @@ export const createRenderer = ({
       finished = true;
       stopTimers();
       tool = undefined;
-      const said = live().text.trim().length > 0 ? `${live().text}\n\n` : '';
-      live().text = `${said}-# Stopped by ${by}.`;
+      live().text = withNotice(`-# Stopped by ${by}.`);
       await sync();
       return { spoke: posted > 0 };
     },

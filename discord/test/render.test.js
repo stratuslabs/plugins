@@ -656,6 +656,34 @@ test('a quiet turn speaks when a tool posts: the words before it go up, then the
   assert.equal(spoke, true);
 });
 
+test('a quiet turn keeps words that arrive before a tool\'s post has gone up out of that post\'s sync (Codex on plugins#65)', async () => {
+  const { renderer, visible, advance, settle } = harness({ quiet: true });
+  renderer.onEvent(text('Counting the PRs.'));
+  await settle();
+  renderer.onEvent(response('Counting the PRs.'));
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('13 open PRs')));
+  // The next response starts before the post's sync has run.
+  renderer.onEvent(text('NO_REPLY heart'));
+  await settle();
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs'], 'the post and the words before it, not the marker');
+  await advance(5000);
+  const { spoke } = await renderer.finalize('');
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs']);
+  assert.equal(spoke, true);
+});
+
+test('a quiet turn that answers after a post that went up while it was writing posts the answer after the post', async () => {
+  const { renderer, visible, settle } = harness({ quiet: true });
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('13 open PRs')));
+  renderer.onEvent(text('Most are'));
+  await settle();
+  renderer.onEvent(text(' Dependabot.'));
+  await renderer.finalize('Most are Dependabot.');
+  assert.deepEqual(visible(), ['13 open PRs', 'Most are Dependabot.']);
+});
+
 test('a quiet turn shows no status for a tool called while an earlier tool\'s post is still going up', async () => {
   const { renderer, visible, settle } = harness({ quiet: true });
   renderer.onEvent(called('chat.card'));
@@ -676,5 +704,45 @@ test('a quiet turn that fails, or is stopped, still says so', async () => {
     const { renderer, visible } = harness({ quiet: true });
     await renderer.stopped('Dylan');
     assert.deepEqual(visible(), ['-# Stopped by Dylan.']);
+  }
+});
+
+test('a quiet turn that fails or is stopped says so without the words it was holding: they may be the silent marker (Codex on plugins#65)', async () => {
+  for (const end of [(renderer) => renderer.fail('The provider timed out.'), (renderer) => renderer.stopped('Dylan')]) {
+    const { renderer, visible, advance, settle } = harness({ quiet: true });
+    renderer.onEvent(text('NO_REPLY'));
+    await settle();
+    renderer.onEvent(text(' thumbsup'));
+    await advance(5000);
+    await end(renderer);
+    assert.equal(visible().length, 1);
+    assert.doesNotMatch(visible()[0], /NO_REPLY|thumbsup/);
+    assert.match(visible()[0], /^(⚠ The provider timed out\.|-# Stopped by Dylan\.)$/);
+  }
+});
+
+test('a quiet turn that fails after a tool posted keeps what went up and says so below it', async () => {
+  const { renderer, visible, settle } = harness({ quiet: true });
+  renderer.onEvent(text('Counting the PRs.'));
+  await settle();
+  renderer.onEvent(response('Counting the PRs.'));
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('13 open PRs')));
+  await settle();
+  renderer.onEvent(text('NO_REPLY'));
+  await renderer.fail('The provider timed out.');
+  assert.deepEqual(visible(), ['Counting the PRs.', '13 open PRs', '⚠ The provider timed out.']);
+});
+
+test('a turn that is not quiet still keeps what it streamed when it fails or is stopped', async () => {
+  for (const [end, notice] of [
+    [(renderer) => renderer.fail('The provider timed out.'), '⚠ The provider timed out.'],
+    [(renderer) => renderer.stopped('Dylan'), '-# Stopped by Dylan.'],
+  ]) {
+    const { renderer, visible, settle } = harness();
+    renderer.onEvent(text('Half an answer'));
+    await settle();
+    await end(renderer);
+    assert.deepEqual(visible(), [`Half an answer\n\n${notice}`]);
   }
 });

@@ -53,6 +53,15 @@ const postTextOf = (result) => {
  * way, as one or more messages of its own after that result's files, the
  * order Slack shows them in. Like a file, it is something said.
  *
+ * A `quiet` turn is one that may end without a reply (a reply-optional
+ * turn, AGT-329). Its words never stream, since they may be the silent
+ * answer `NO_REPLY`, and no tool status shows: nothing goes up while it
+ * runs. A tool's file or post goes up when it arrives, after the words
+ * written before it, because it was said. At the end, a reply with words
+ * goes up the way any turn's does, after the words still held; a turn
+ * that ends with none posts nothing more, not `(no reply)`, and the words
+ * it held stay unsaid. A failure or a stop still says so.
+ *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
  * serialized, and a failed one is logged through `warn`, never thrown into
@@ -65,6 +74,7 @@ export const createRenderer = ({
   timers = globalThis,
   now = Date.now,
   warn = () => {},
+  quiet = false,
 }) => {
   // `outputs`: a tool's files (`{ file }`) and posts (`{ text }`) waiting
   // to go up after the segment's messages.
@@ -87,7 +97,7 @@ export const createRenderer = ({
   const live = () => segments[segments.length - 1];
 
   const display = (segment) => {
-    const status = segment === live() && tool !== undefined ? `-# ⚙ ${tool}…` : '';
+    const status = segment === live() && tool !== undefined && !quiet ? `-# ⚙ ${tool}…` : '';
     const words = segment.text.trim().length > 0 ? segment.text : '';
     return words && status ? `${words}\n${status}` : words || status;
   };
@@ -190,7 +200,8 @@ export const createRenderer = ({
   };
 
   const schedule = () => {
-    if (finished || timer !== undefined) {
+    // A quiet turn's words wait for its end, or for a tool's output.
+    if (finished || quiet || timer !== undefined) {
       return;
     }
     // Nothing on screen yet: the first words go up at once, and the
@@ -330,6 +341,11 @@ export const createRenderer = ({
       // A file or post is something said; NO_REPLY_TEXT is for a turn with
       // nothing to show. Each one's sync is in the chain, so wait first.
       await chain;
+      if (quiet && text.trim().length === 0) {
+        // Silent: nothing more goes up, so what it held stays unsaid, the
+        // streamed marker with it. What a tool's output took up was said.
+        return { spoke: posted > 0 };
+      }
       if (delivered === 0 && segments.every((segment) => display(segment) === '')) {
         live().text = NO_REPLY_TEXT;
       }

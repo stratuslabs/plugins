@@ -810,6 +810,9 @@ test('another agent\'s bot naming this one in its thread may go unanswered', asy
   }));
   await until(() => gateway.turns.length === 2, 'the bot\'s message dispatched');
   assert.equal(gateway.turns[1].input.replyOptional, true);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000042', channel_id: DM, content: 'thanks', author: { id: PEER, username: 'max', bot: true } }));
+  await until(() => gateway.turns.length === 3, 'the bot\'s DM dispatched');
+  assert.equal(gateway.turns[2].input.replyOptional, undefined, 'a DM is owed an answer, from a bot too');
 });
 
 test('with no permission to add reactions, a silent turn stays silent and the operator is told once', async (t) => {

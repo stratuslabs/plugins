@@ -342,13 +342,8 @@ export const createRenderer = ({
       // nothing to show. Each one's sync is in the chain, so wait first.
       await chain;
       if (quiet && text.trim().length === 0) {
-        // Silent: what it held stays unsaid, the streamed marker with it.
-        // Anything a tool's output took up with it was said, and stays.
-        for (const segment of segments) {
-          if (segment.ids.length === 0) {
-            segment.text = '';
-          }
-        }
+        // Silent: nothing more goes up, so what it held stays unsaid, the
+        // streamed marker with it. What a tool's output took up was said.
         return { spoke: posted > 0 };
       }
       if (delivered === 0 && segments.every((segment) => display(segment) === '')) {

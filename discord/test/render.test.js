@@ -656,6 +656,16 @@ test('a quiet turn speaks when a tool posts: the words before it go up, then the
   assert.equal(spoke, true);
 });
 
+test('a quiet turn shows no status for a tool called while an earlier tool\'s post is still going up', async () => {
+  const { renderer, visible, settle } = harness({ quiet: true });
+  renderer.onEvent(called('chat.card'));
+  renderer.onEvent(produced(card('A card.')));
+  // Before the post's sync has run.
+  renderer.onEvent(called('web.fetch'));
+  await settle();
+  assert.deepEqual(visible(), ['A card.']);
+});
+
 test('a quiet turn that fails, or is stopped, still says so', async () => {
   {
     const { renderer, visible } = harness({ quiet: true });

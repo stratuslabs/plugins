@@ -209,13 +209,14 @@ test('a text the daemon was stopping for is kept: a note now, the answer after t
   photon.receive({ from: APPROVER, text: 'are you there' });
   await waitFor(() => photon.sent.length === 1);
   assert.equal(photon.sent[0].text, "I'm restarting. I'll answer this when I'm back.");
-  assert.equal(photon.sent[0].clientMessageId, undefined);
   assert.deepEqual(first.adapter.status().ava[0].kept, [1]);
   assert.equal(first.adapter.status().ava[0].cursor, 0);
   await first.stop();
   const second = await setup(t, { photon, directory });
   await waitFor(() => photon.sent.length === 2);
   assert.equal(photon.sent[1].text, 'echo: are you there');
+  // The note's id is its own, so Photon doesn't take the answer for a repeat of it.
+  assert.notEqual(photon.sent[0].clientMessageId, photon.sent[1].clientMessageId);
   assert.equal(second.adapter.status().ava[0].cursor, 1);
 });
 
@@ -448,6 +449,35 @@ test('an answer that is empty once formatted for iMessage sends nothing, says so
   assert.equal(photon.sent[0].text, 'echo: next');
   await waitFor(() => adapter.status().ava[0].cursor === 2);
   assert.ok(!logs.some((line) => /could not send its answer/.test(line)), logs.join('\n'));
+});
+
+test('a message.send or approval text Photon took but never confirmed is retried under the same id, so it arrives once', async (t) => {
+  const { adapter, photon } = await setup(t);
+  let lost = 0;
+  photon.failSends(() => (lost++ < 1 ? 'after' : false));
+  const target = await adapter.resolveOutbound({ agentId: 'ava', to: PRINCIPAL });
+  await target.post('stand-up in 5');
+  assert.deepEqual(photon.sent.map((entry) => entry.text), ['stand-up in 5']);
+  assert.ok(photon.sent[0].clientMessageId);
+  // Another text with the same words is a new message, not a repeat.
+  await target.post('stand-up in 5');
+  assert.equal(photon.sent.length, 2);
+  assert.notEqual(photon.sent[0].clientMessageId, photon.sent[1].clientMessageId);
+});
+
+test('an approver left out of principals is refused as a sender, but the chat they texted from still carries their approvals', async (t) => {
+  const gateway = fakeGateway();
+  const { photon, logs } = await setup(t, { gateway, config: { approvers: [APPROVER], principals: [PRINCIPAL] } });
+  photon.receive({ from: APPROVER, text: 'hi' });
+  // An SMS showing their number moves nothing: its sender id can be forged.
+  photon.receive({ from: APPROVER, text: 'hello', service: 'SMS', chat: `SMS;-;${APPROVER}` });
+  await waitFor(() => logs.filter((line) => /refused a message from/.test(line)).length === 2);
+  gateway.emit({ type: 'tool.approval-requested', agentId: 'ava', requestId: 'r1', call: { toolName: 'shell.run' }, risk: 'gated', metadata: { channel: 'imessage-photon', photonTo: PRINCIPAL } });
+  await waitFor(() => photon.sent.length === 1);
+  assert.equal(photon.sent[0].chat, `any;-;${APPROVER}`);
+  // Reached in the chat they opened: a shared-pool line can't start one.
+  assert.deepEqual(photon.created, []);
+  assert.equal(gateway.dispatched.length, 0);
 });
 
 test('a dedicated line is reached at its own address and answered on it', async (t) => {

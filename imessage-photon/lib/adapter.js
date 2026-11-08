@@ -104,14 +104,19 @@ export const createPhotonAdapter = ({
    * markdown is gone is refused rather than reported as sent. With
    * `wanted`, stops quietly before any attempt once it says no, and
    * returns false.
+   *
+   * Every piece carries a client message id that its retries reuse, so a
+   * send Photon took but never confirmed arrives once. `key` makes the id
+   * the same across restarts too; without one it holds for this call.
    */
   const sendPieces = async (agentId, client, chatGuid, text, { markdown = true, key, wanted } = {}) => {
     const pieces = piecesOf(text, markdown);
     if (pieces.length === 0) {
       throw new Error('there is nothing to send: the message is empty once formatted for iMessage');
     }
+    const base = key ?? randomUUID();
     for (const [index, piece] of pieces.entries()) {
-      const options = key ? { clientMessageId: clientMessageIdFor(`${key}:${index}`) } : {};
+      const options = { clientMessageId: clientMessageIdFor(`${base}:${index}`) };
       for (let attempt = 0; ; attempt += 1) {
         if (wanted && !wanted()) {
           return false;
@@ -365,6 +370,12 @@ export const createPhotonAdapter = ({
     }
     if (stopRequest(agentId, agent, message)) {
       return 'settled';
+    }
+    const from = normalizeHandle(message.from);
+    if (from !== null && agent.approvers.has(from) && message.service === 'iMessage' && !message.group && typeof message.chatGuid === 'string' && lineEntry) {
+      // Where approvals reach an approver, whether or not they may also
+      // talk to the agent: a shared-pool line can't open the chat itself.
+      entry.chats.set(from, { line: message.line, chatGuid: message.chatGuid });
     }
     const verdict = admit(message, agent);
     if (!verdict.admit) {

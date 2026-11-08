@@ -31,8 +31,9 @@ over gRPC.
 - **Nothing lost across a restart.** Photon keeps a numbered log of each
   line's events. The plugin stores how far it has read each line. At the
   next start it replays the log from there, so texts sent while the daemon
-  was down are answered, and none is answered twice. A reply is sent with
-  a stable id, so when Photon gets a reply twice it keeps one copy. Catch-up
+  was down are answered, and none is answered twice. Every text goes out
+  with an id its retries reuse, and a reply keeps its id across a restart,
+  so when Photon gets a text twice it keeps one copy. Catch-up
   skips texts older than `replayCapHours` (default 24) and logs them.
 - **`message.send` and schedules.** The agent can text its principals and
   approvers first, and nobody else. On a shared-pool line the person has
@@ -83,7 +84,7 @@ they aren't merged.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `approvers` | required | Phone numbers (E.164, like `+15551234567`) or Apple ID emails that may answer approvals by text and send `stop`. |
+| `approvers` | required | Phone numbers (E.164, like `+15551234567`) or Apple ID emails that may answer approvals by text and send `stop`. An approver who isn't a principal gets approvals in the chat they last texted the line from, though the agent doesn't answer their texts. |
 | `principals` | the approvers | Who the agent answers, and trusts as a user, when iMessage carries the text. |
 | `admit` | `"principals"` | `"anyone"` also answers strangers, as `unknown`. |
 | `replayCapHours` | `24` | Catch-up after an outage skips texts older than this. |

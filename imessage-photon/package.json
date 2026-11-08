@@ -1,0 +1,73 @@
+{
+  "name": "@stratusagent/plugin-imessage-photon",
+  "version": "0.1.0",
+  "description": "iMessage channel for Stratus on a line Photon hosts: text an agent from your phone with no Mac or Apple ID of your own.",
+  "type": "module",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "README.md",
+    "NOTICE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "imessage-photon"
+  },
+  "engines": {
+    "node": ">=22.16 <23 || >=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.7",
+    "@photon-ai/advanced-imessage": "2.5.0",
+    "@stratusagent/core": "^0.14.0",
+    "nice-grpc": "^2.1.18",
+    "nice-grpc-common": "^2.0.4"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "channels": [
+        {
+          "name": "imessage-photon"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "principals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "admit": {
+          "type": "string",
+          "enum": [
+            "principals",
+            "anyone"
+          ]
+        },
+        "replayCapHours": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

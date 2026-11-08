@@ -347,7 +347,8 @@ test('approvals go to the approver by text with a code, and Y CODE allows', asyn
   photon.receive({ from: APPROVER, text: `y ${code}`, service: 'SMS' });
   await pause(30);
   assert.equal(resolved.length, 0);
-  photon.receive({ from: APPROVER, text: `n ${code.slice(0, 5)}X` });
+  // One character off; never the code itself, which may end in X.
+  photon.receive({ from: APPROVER, text: `n ${code.slice(0, 5)}${code.endsWith('X') ? 'Y' : 'X'}` });
   await waitFor(() => photon.sent.some((entry) => entry.text === "That code doesn't match a pending request."));
   photon.receive({ from: APPROVER, text: `y ${code.toLowerCase()}` });
   await waitFor(() => resolved.length === 1);

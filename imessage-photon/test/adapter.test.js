@@ -379,6 +379,29 @@ test('an approver with no chat yet gets one opened on the line; nobody reachable
   assert.equal(resolved.length, 1);
 });
 
+test('an approval settled while its prompt is still going out is put to nobody else', async (t) => {
+  const SECOND = 'bo@example.com';
+  const gateway = fakeGateway();
+  const { photon } = await setup(t, { gateway, config: { approvers: [APPROVER, SECOND], principals: [APPROVER, SECOND, PRINCIPAL] } });
+  // The first approver's send fails once, and the request times out
+  // while that send waits to be retried.
+  let failed = false;
+  photon.failSends((chat) => {
+    if (chat === `any;-;${APPROVER}` && !failed) {
+      failed = true;
+      gateway.emit({ type: 'tool.approval-resolved', requestId: 'r1', answer: 'deny', reason: 'timeout' });
+      return true;
+    }
+    return false;
+  });
+  gateway.emit({ type: 'tool.approval-requested', agentId: 'ava', requestId: 'r1', call: { toolName: 'shell.run' }, risk: 'gated', metadata: { channel: 'imessage-photon', photonTo: PRINCIPAL } });
+  await waitFor(() => photon.sent.length >= 2);
+  await pause(50);
+  // Each approver hears how it ended, and no code arrives after that.
+  assert.deepEqual(photon.sent.map((entry) => entry.chat).sort(), [`any;-;${APPROVER}`, `any;-;${SECOND}`]);
+  assert.ok(photon.sent.every((entry) => !/Reply Y/.test(entry.text)), photon.sent.map((entry) => entry.text).join(' | '));
+});
+
 test('"stop" from an approver ends the turn running in their conversation', async (t) => {
   let release;
   const gateway = fakeGateway((input) => new Promise((resolve) => {
@@ -404,6 +427,26 @@ test('message.send reaches principals and approvers only', async (t) => {
   await assert.rejects(adapter.resolveOutbound({ agentId: 'ava', to: STRANGER }), /only texts people listed/);
   await assert.rejects(adapter.resolveOutbound({ agentId: 'ava', to: 'not a handle' }), /not an iMessage handle/);
   await assert.rejects(adapter.resolveOutbound({ agentId: 'bo', to: APPROVER }), /bo is not on iMessage here/);
+});
+
+test('message.send with nothing left to text once formatted fails instead of reporting it sent', async (t) => {
+  const { adapter, photon } = await setup(t);
+  const target = await adapter.resolveOutbound({ agentId: 'ava', to: PRINCIPAL });
+  await assert.rejects(target.post('---'), /nothing to send/);
+  await assert.rejects(target.post('  \n '), /nothing to send/);
+  assert.equal(photon.sent.length, 0);
+});
+
+test('an answer that is empty once formatted for iMessage sends nothing, says so in the log, and is not kept', async (t) => {
+  const gateway = fakeGateway((input) => ({ text: input.userMessage === 'rule' ? '---' : `echo: ${input.userMessage}` }));
+  const { photon, logs, adapter } = await setup(t, { gateway });
+  photon.receive({ from: APPROVER, text: 'rule' });
+  await waitFor(() => logs.some((line) => /empty once formatted for iMessage/.test(line)));
+  photon.receive({ from: APPROVER, text: 'next' });
+  await waitFor(() => photon.sent.length === 1);
+  assert.equal(photon.sent[0].text, 'echo: next');
+  await waitFor(() => adapter.status().ava[0].cursor === 2);
+  assert.ok(!logs.some((line) => /could not send its answer/.test(line)), logs.join('\n'));
 });
 
 test('a dedicated line is reached at its own address and answered on it', async (t) => {

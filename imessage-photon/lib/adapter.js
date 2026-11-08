@@ -27,6 +27,9 @@ const sleepFor = (ms, signal) => new Promise((resolve) => {
   }, { once: true });
 });
 
+/** The texts `text` goes out as; none when only formatting is left. */
+const piecesOf = (text, markdown) => splitMessages(markdown ? toPlainText(text) : text);
+
 /** A UUID-shaped id that is the same for the same key: Photon drops a second send with one it has seen. */
 const clientMessageIdFor = (key) => {
   const hex = createHash('sha256').update(key).digest('hex');
@@ -96,11 +99,23 @@ export const createPhotonAdapter = ({
 
   const stopping = () => stopController.signal.aborted;
 
-  const sendPieces = async (agentId, client, chatGuid, text, { markdown = true, key } = {}) => {
-    const pieces = splitMessages(markdown ? toPlainText(text) : text);
+  /**
+   * Sends `text` as one or more texts. Text with nothing left once its
+   * markdown is gone is refused rather than reported as sent. With
+   * `wanted`, stops quietly before any attempt once it says no, and
+   * returns false.
+   */
+  const sendPieces = async (agentId, client, chatGuid, text, { markdown = true, key, wanted } = {}) => {
+    const pieces = piecesOf(text, markdown);
+    if (pieces.length === 0) {
+      throw new Error('there is nothing to send: the message is empty once formatted for iMessage');
+    }
     for (const [index, piece] of pieces.entries()) {
       const options = key ? { clientMessageId: clientMessageIdFor(`${key}:${index}`) } : {};
       for (let attempt = 0; ; attempt += 1) {
+        if (wanted && !wanted()) {
+          return false;
+        }
         try {
           await client.messages.sendText(chatGuid, piece, options);
           break;
@@ -113,6 +128,7 @@ export const createPhotonAdapter = ({
         }
       }
     }
+    return true;
   };
 
   /**
@@ -145,7 +161,7 @@ export const createPhotonAdapter = ({
       throw new Error(`${agentId} is not on iMessage here`);
     }
     const { client, chatGuid } = await chatFor(entry, handle);
-    await sendPieces(agentId, client, chatGuid, text, options);
+    return sendPieces(agentId, client, chatGuid, text, options);
   };
 
   /** Sends without failing the caller: for notes whose loss costs nothing but the note. */
@@ -204,10 +220,17 @@ export const createPhotonAdapter = ({
       agentName,
     };
     asks.set(event.requestId, ask);
+    // Answered, timed out or denied while prompts were still going out:
+    // nobody else is asked, and a send waiting on a retry is dropped, so
+    // no code arrives after the note saying how it ended.
+    const pending = () => asks.get(event.requestId) === ask && !ask.spent;
     let delivered = 0;
     for (const to of recipients) {
+      if (!pending()) {
+        break;
+      }
       try {
-        await deliverTo(askingAgent, to, promptText({
+        const sent = await deliverTo(askingAgent, to, promptText({
           agentName,
           toolName: ask.toolName,
           risk: event.risk,
@@ -217,13 +240,15 @@ export const createPhotonAdapter = ({
           always: event.always,
           code,
           ...(person !== null && person !== to ? { about: maskHandle(person) } : {}),
-        }), { markdown: false });
-        delivered += 1;
+        }), { markdown: false, wanted: pending });
+        if (sent) {
+          delivered += 1;
+        }
       } catch (error) {
         warn(`imessage-photon: ${askingAgent} could not send an approval request to ${maskHandle(to)}: ${error.message}`);
       }
     }
-    if (delivered === 0 && asks.get(event.requestId) === ask) {
+    if (delivered === 0 && pending()) {
       asks.delete(event.requestId);
       decline('no approver could be texted');
     }
@@ -434,6 +459,12 @@ export const createPhotonAdapter = ({
       reply = `I couldn't start on that: ${failure instanceof Error ? failure.message : String(failure)}`;
     }
     if (reply === undefined || reply.trim().length === 0) {
+      return outcome;
+    }
+    if (piecesOf(reply, outcome !== 'kept').length === 0) {
+      // Only formatting, like a lone ---: nothing to text, so answered by
+      // saying nothing, as an empty reply is.
+      log(`imessage-photon: ${agentId}'s answer was empty once formatted for iMessage; nothing sent.`);
       return outcome;
     }
     try {

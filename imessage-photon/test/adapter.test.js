@@ -239,13 +239,34 @@ test('an answer whose send failed is sent after the restart under the same id, s
   assert.equal(gateway.dispatched[1].idempotencyKey, gateway.dispatched[0].idempotencyKey);
 });
 
-test('a send Photon took but never confirmed is retried under the same id, so the person gets one copy', async (t) => {
-  const { photon, adapter, logs } = await setup(t);
+test('a send Photon took but never confirmed is sent again after the restart under the same id, so the person gets one copy', async (t) => {
+  const photon = createFakePhoton();
+  const directory = mkdtempSync(path.join(tmpdir(), 'imessage-photon-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = await setup(t, { photon, directory });
   photon.failSends(() => 'after');
   photon.receive({ from: APPROVER, text: 'hello' });
-  await waitFor(() => adapter.status().ava[0].cursor === 1);
-  assert.ok(logs.some((line) => line.includes('could not send, retrying: deadline exceeded')));
+  await waitFor(() => first.logs.some((line) => line.includes('could not send its answer')));
+  assert.ok(first.logs.some((line) => line.includes('could not send, retrying: deadline exceeded')));
+  await first.stop();
+  photon.failSends(() => false);
+  const second = await setup(t, { photon, directory });
+  await waitFor(() => second.adapter.status().ava[0].cursor === 1);
   assert.deepEqual(photon.sent.map((entry) => entry.text), ['echo: hello']);
+});
+
+test('a text in both the catch-up and the live stream is answered once', async (t) => {
+  const photon = createFakePhoton();
+  const directory = mkdtempSync(path.join(tmpdir(), 'imessage-photon-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = await setup(t, { photon, directory });
+  await first.stop();
+  photon.onNextCatchUp(() => photon.receive({ from: APPROVER, text: 'just as you came back' }));
+  const second = await setup(t, { photon, directory });
+  await waitFor(() => photon.sent.length === 1);
+  await pause(50);
+  assert.deepEqual(second.gateway.dispatched.map((input) => input.userMessage), ['just as you came back']);
+  assert.equal(photon.sent.length, 1);
 });
 
 test('a later text answered while an earlier one is kept is not answered again after the restart', async (t) => {
@@ -322,6 +343,10 @@ test('approvals go to the approver by text with a code, and Y CODE allows', asyn
   assert.equal(prompt.chat, `any;-;${APPROVER}`, 'asked in the chat they texted from');
   const code = /Reply Y ([A-Z0-9]{6})/.exec(prompt.text)?.[1];
   assert.ok(code);
+  // The right code over SMS is refused: an SMS sender id can be forged.
+  photon.receive({ from: APPROVER, text: `y ${code}`, service: 'SMS' });
+  await pause(30);
+  assert.equal(resolved.length, 0);
   photon.receive({ from: APPROVER, text: `n ${code.slice(0, 5)}X` });
   await waitFor(() => photon.sent.some((entry) => entry.text === "That code doesn't match a pending request."));
   photon.receive({ from: APPROVER, text: `y ${code.toLowerCase()}` });

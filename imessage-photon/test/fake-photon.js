@@ -121,6 +121,7 @@ export const createFakePhoton = () => {
   let offline;
   let rejectCursor;
   let failSend = () => false;
+  let duringCatchUp;
 
   const client = {
     events: {
@@ -130,7 +131,9 @@ export const createFakePhoton = () => {
         if (reject) {
           rejectCursor = undefined;
         }
-        return replayOf(events, since, { reject: offline ?? reject });
+        const onOpen = duringCatchUp;
+        duringCatchUp = undefined;
+        return replayOf(events, since, { reject: offline ?? reject, onOpen });
       },
     },
     messages: {
@@ -148,18 +151,18 @@ export const createFakePhoton = () => {
         if (failure === true) {
           throw new Error('Photon refused the send: test');
         }
-        if (options.clientMessageId && seenIds.has(options.clientMessageId)) {
-          return { guid: 'repeat' };
+        const repeat = options.clientMessageId !== undefined && seenIds.has(options.clientMessageId);
+        if (!repeat) {
+          if (options.clientMessageId) {
+            seenIds.add(options.clientMessageId);
+          }
+          sent.push({ chat, text, clientMessageId: options.clientMessageId });
         }
-        if (options.clientMessageId) {
-          seenIds.add(options.clientMessageId);
-        }
-        sent.push({ chat, text, clientMessageId: options.clientMessageId });
         if (failure === 'after') {
           // Photon took it, and the answer was lost on the way back.
           throw new Error('deadline exceeded: test');
         }
-        return { guid: `out-${sent.length}` };
+        return { guid: repeat ? 'repeat' : `out-${sent.length}` };
       },
     },
     chats: {
@@ -236,6 +239,10 @@ export const createFakePhoton = () => {
     },
     failSends(check) {
       failSend = check;
+    },
+    /** Runs `fn` as the next catch-up starts, before it reads the log: what it adds is in both streams. */
+    onNextCatchUp(fn) {
+      duringCatchUp = fn;
     },
   };
 };

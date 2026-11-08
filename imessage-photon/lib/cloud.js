@@ -20,6 +20,7 @@ export const lineAddress = (instanceId) => `${instanceId}.imsg.photon.codes:443`
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INSTANCE = /^[a-z0-9][a-z0-9-]{0,62}$/i;
 const RENEW_AT = 0.8;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export class PhotonAuthError extends Error {
   constructor(message, status) {
@@ -95,7 +96,7 @@ export const createPhotonAuth = ({
       response = await fetch(`${cloudUrl}/projects/${encodeURIComponent(id)}/imessage/tokens`, {
         method: 'POST',
         headers: { Authorization: authorization },
-        ...(signal ? { signal } : {}),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
       throw new PhotonAuthError(`Could not reach Photon to get iMessage tokens: ${error?.message ?? String(error)}`);

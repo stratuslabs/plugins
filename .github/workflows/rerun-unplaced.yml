@@ -1,24 +1,29 @@
-name: Re-run Test jobs that got no runner
+name: Re-run jobs that got no runner
 
 # Every plugin is tested on macos-latest, most on ubuntu-latest too (see
 # .github/scripts/packages.mjs), and GitHub's hosted macOS runners run short at
 # busy hours. A job GitHub can't place after three tries, five minutes apart,
 # is cancelled at 15 minutes with no steps run ("The job was not acquired by
-# Runner of type hosted even after multiple attempts"). That turns the Test run
-# red without anything having been tested. This re-runs those jobs and nothing
+# Runner of type hosted even after multiple attempts"). That turns the run red
+# without anything having been tested. This re-runs those jobs and nothing
 # else. A run where any job failed or timed out after starting is left alone,
 # so a flaky test never gets retried until it passes. stratuslabs/agent runs
 # the same workflow on its CI.
+#
+# It watches Test and the nightly check against agent main. A nightly re-run
+# keeps the first attempt's packed agent main, so it tests the same SHA, and
+# its Report job runs again after the re-run jobs: it closes the issue the
+# first attempt opened when they pass.
 on:
   workflow_run:
-    workflows: [Test]
+    workflows: [Test, Nightly against agent main]
     types: [completed]
 
 permissions: {}
 
 jobs:
   rerun:
-    name: Re-run Test jobs that got no runner
+    name: Re-run jobs that got no runner
     # Only runs from this repository's own branches. A fork's run is a
     # maintainer's call. Attempts stop at 3, so a long outage ends with a red
     # run instead of a loop.
@@ -29,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: write # re-run the Test run's failed jobs
+      actions: write # re-run the run's failed jobs
     steps:
       - name: Re-run if every failed job never got a runner
         env:

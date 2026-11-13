@@ -1,7 +1,7 @@
 /**
  * Reading a turn's outcome from the session `dispatch` resolves with. The
- * same rules as `latestTurnReply`, `turnReplyFor`, `turnFailureFor`,
- * `latestTurnReaction` and `turnReactionFor` in
+ * same rules as `latestTurnReply`, `isLatestTurn`, `turnReplyFor`,
+ * `turnFailureFor`, `latestTurnReaction` and `turnReactionFor` in
  * @stratusagent/core, kept here because a plugin depends on the host's
  * contract, not on core's code. If core changes what counts as a turn's
  * reply, these follow.
@@ -23,6 +23,16 @@ export const latestTurnReply = (session) => {
     }
   }
   return undefined;
+};
+
+/**
+ * Whether the keyed message started the session's newest turn: its newest
+ * user message that was neither steered into a running turn nor only
+ * overheard carries the key.
+ */
+export const isLatestTurn = (session, key) => {
+  const latest = (session?.messages ?? []).findLast((message) => message.role === 'user' && message.steered !== true && message.observed !== true);
+  return latest !== undefined && carriesKey(latest, key);
 };
 
 /** The reply of the turn the keyed message started, which may not be the newest. */

@@ -10,7 +10,7 @@ import { createRenderer } from './render.js';
 import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, threadOn, typing, uploadFile } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
 import { isStopRequest } from './stop.js';
-import { latestTurnReply, turnFailureFor, turnReplyFor } from './turns.js';
+import { isLatestTurn, latestTurnReply, turnFailureFor, turnReplyFor } from './turns.js';
 
 /** How many message ids per agent are remembered to drop a gateway replay. */
 const SEEN_LIMIT = 2000;
@@ -48,7 +48,7 @@ export const CONNECT_TIMEOUT_MS = 60_000;
 
 export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, warn = () => {}, connect = connectBot, drainTimeoutMs = DRAIN_TIMEOUT_MS, reconnectDelaysMs = RECONNECT_DELAYS_MS, connectTimeoutMs = CONNECT_TIMEOUT_MS, cdnHosts = CDN_HOSTS, stateDirectory, positionsWriteDelayMs }) => {
   const bots = new Map();
-  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy?, halted? }]
+  const renderers = new Map(); // sessionId -> [{ turnId, renderer, controller, stoppedBy?, halted?, reportedAhead? }]
   const prompts = new Map(); // requestId -> a posted approval prompt
   const rendering = new Set(); // requestIds whose prompt is being posted
   const settledWhileRendering = new Map(); // requestId -> the resolved event
@@ -265,6 +265,51 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     return running.length > 0 || onSession > 0;
   };
 
+  /**
+   * A turn finished that no renderer here was showing: one this adapter
+   * did not start, such as a background task's outcome, a turn another
+   * surface ran in a Discord conversation, or one the restart's recovery
+   * finished after an approval. Its reply is posted as messages of its own
+   * where the session's conversation is, as channel-slack's
+   * `reportUnrenderedReply` does. Resolves `{ said }`: whether all of it
+   * reached Discord.
+   */
+  const reportUnrenderedReply = async (sessionId) => {
+    let routing;
+    try {
+      routing = await gateway.sessionRouting(sessionId);
+    } catch (error) {
+      warn(`discord: could not read where a finished turn came from: ${errorText(error)}`);
+      return { said: false };
+    }
+    const metadata = routing?.metadata;
+    const reply = routing?.reply;
+    if (metadata?.channel !== 'discord' || typeof metadata.discordChannel !== 'string' || typeof reply !== 'string' || reply.trim().length === 0) {
+      return { said: false };
+    }
+    const where = metadata.discordChannel;
+    const bot = bots.get(routing.agentId);
+    if (!bot) {
+      warn(`discord: ${routing.agentId} has no Discord connection, so the reply of a turn it finished was not posted to ${where}`);
+      return { said: false };
+    }
+    // Answered in the channel, not a thread: under the message the
+    // conversation started from, so a reply to it carries the
+    // conversation on, as the turn's own answer would.
+    const root = where === metadata.discordConversation && typeof metadata.discordThread === 'string' ? metadata.discordThread : undefined;
+    try {
+      const ids = await postText(bot.rest, where, reply, root ? { replyTo: root } : {});
+      if (root) {
+        positions.answered(routing.agentId, ids, root);
+      }
+      log(`discord: posted the reply of a turn nobody here was rendering to ${where}`);
+      return { said: true };
+    } catch (error) {
+      warn(`discord: could not post the reply of a turn nobody here was rendering to ${where}: ${errorText(error)}`);
+      return { said: false };
+    }
+  };
+
   const onBusEvent = (event) => {
     if (event?.type === 'tool.approval-requested') {
       track(askApproval(event));
@@ -279,6 +324,17 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     }
     const entry = rendererFor(event.sessionId);
     if (!entry) {
+      if (event.type === 'session.completed' && gateway.sessionRouting && event.sessionId.startsWith('discord:')) {
+        const report = reportUnrenderedReply(event.sessionId);
+        // A redelivery of the message this turn answered may be queued
+        // behind it (read again after a restart, while the recovery
+        // finished its turn). It repeats the finished turn and would post
+        // the same reply again, so it reads this first.
+        for (const queued of renderers.get(event.sessionId) ?? []) {
+          queued.reportedAhead = report;
+        }
+        track(report);
+      }
       return;
     }
     if (event.type === 'session.updated' && event.status === 'running') {
@@ -526,6 +582,14 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       const failed = turnFailureFor(session, idempotencyKey);
       if (failed !== undefined) {
         await renderer.fail(failed);
+        return;
+      }
+      // Its turn finished while this waited behind it, with nobody here
+      // rendering it, and that reply was posted then. It was this message's
+      // turn if it is the session's latest. Posted again only if it didn't
+      // all reach Discord.
+      if (repeat === 'finished' && entry.reportedAhead !== undefined && isLatestTurn(session, idempotencyKey) && (await entry.reportedAhead).said) {
+        await renderer.withdraw();
         return;
       }
       await renderer.finalize(repeat === 'finished' ? turnReplyFor(session, idempotencyKey) : latestTurnReply(session));

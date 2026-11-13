@@ -12,6 +12,23 @@ export const EDIT_INTERVAL_MS = 1500;
 export const TYPING_EVERY_MS = 8000;
 export const NO_REPLY_TEXT = '(no reply)';
 
+const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The text of the post a tool result carries for its conversation (core's
+ * post convention, AGT-324): an ok result, not `external`, whose object
+ * output has `post` with a `text` holding more than whitespace. Discord
+ * shows that text; `post.slack` is Slack's. The same reading as core's
+ * `postOf`, kept here until a released @stratusagent/core exports it.
+ */
+const postTextOf = (result) => {
+  if (!result?.ok || result.trust === 'external' || !isObject(result.output)) {
+    return undefined;
+  }
+  const post = result.output.post;
+  return isObject(post) && typeof post.text === 'string' && post.text.trim().length > 0 ? post.text : undefined;
+};
+
 /**
  * Renders one turn into a Discord conversation: streams its words by
  * editing what it posted, throttled, and finishes with the reply.
@@ -32,6 +49,10 @@ export const NO_REPLY_TEXT = '(no reply)';
  * line, and what is said after it is a new segment, so words that arrive
  * while Discord is still busy with an earlier request stay below it.
  *
+ * A post a tool returned (`post.text`, see `postTextOf`) goes the same
+ * way, as one or more messages of its own after that result's files, the
+ * order Slack shows them in. Like a file, it is something said.
+ *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
  * serialized, and a failed one is logged through `warn`, never thrown into
@@ -45,8 +66,9 @@ export const createRenderer = ({
   now = Date.now,
   warn = () => {},
 }) => {
-  // `files`: a tool's files waiting to go up after the segment's messages.
-  const newSegment = () => ({ text: '', ids: [], shown: [], files: [] });
+  // `outputs`: a tool's files (`{ file }`) and posts (`{ text }`) waiting
+  // to go up after the segment's messages.
+  const newSegment = () => ({ text: '', ids: [], shown: [], outputs: [] });
   const segments = [newSegment()];
   let tool; // name of the running tool, shown on the live segment
   let breakPending = false; // the next words belong to a new response
@@ -59,7 +81,8 @@ export const createRenderer = ({
   let chain = Promise.resolve();
   let typingTimer;
   let posted = 0;
-  let uploaded = 0;
+  // Files and posts that went up: something said, as words are.
+  let delivered = 0;
 
   const live = () => segments[segments.length - 1];
 
@@ -86,9 +109,9 @@ export const createRenderer = ({
     for (const segment of segments) {
       const body = display(segment);
       const pieces = body ? chunk(body) : [];
-      // Files already queued when the segment was read: what was read has
-      // their tool's status line gone.
-      const ready = segment.files.length;
+      // Outputs already queued when the segment was read: what was read
+      // has their tool's status line gone.
+      const ready = segment.outputs.length;
       for (const [index, piece] of pieces.entries()) {
         if (index < segment.ids.length) {
           if (segment.shown[index] !== piece) {
@@ -131,19 +154,31 @@ export const createRenderer = ({
         segment.ids.pop();
         segment.shown.pop();
       }
-      // Taken before the call, so a failed upload is logged once and
-      // not tried again.
-      for (const file of segment.files.splice(0, ready)) {
-        const id = await call(`upload ${path.basename(file)}`, () => ops.upload(file));
-        if (id !== undefined) {
+      // Taken before the call, so a failed upload or post is logged once
+      // and not tried again.
+      for (const output of segment.outputs.splice(0, ready)) {
+        if (output.file !== undefined) {
+          const id = await call(`upload ${path.basename(output.file)}`, () => ops.upload(output.file));
+          if (id !== undefined) {
+            posted += 1;
+            delivered += 1;
+          }
+          continue;
+        }
+        for (const piece of chunk(output.text)) {
+          const id = await call("post a tool's message", () => ops.post(piece));
+          if (id === undefined) {
+            // The rest of a refused post would read as a fragment.
+            break;
+          }
           posted += 1;
-          uploaded += 1;
+          delivered += 1;
         }
       }
-      if (segment.files.length > 0) {
+      if (segment.outputs.length > 0) {
         // A tool finished after this segment was read, so what this sync
         // put up may still show its status line. The sync that tool queued
-        // brings the segment in line, then its files, then what follows.
+        // brings the segment in line, then its outputs, then what follows.
         return;
       }
     }
@@ -253,15 +288,18 @@ export const createRenderer = ({
       if (event.type === 'tool.completed' || event.type === 'tool.denied') {
         tool = undefined;
         breakPending = true;
-        const files = event.type === 'tool.completed' && event.result && ops.upload ? filePathsOf(event.result) : [];
-        if (files.length === 0) {
+        const result = event.type === 'tool.completed' ? event.result : undefined;
+        const files = result && ops.upload ? filePathsOf(result) : [];
+        const postText = result ? postTextOf(result) : undefined;
+        const outputs = [...files.map((file) => ({ file })), ...(postText !== undefined ? [{ text: postText }] : [])];
+        if (outputs.length === 0) {
           schedule();
           return;
         }
-        // The files go up after this segment (its status line comes down
+        // The outputs go up after this segment (its status line comes down
         // first), so they land below the words before them; words after
         // them go in the next segment, below them, however soon they come.
-        live().files.push(...files);
+        live().outputs.push(...outputs);
         segments.push(newSegment());
         if (timer !== undefined) {
           timers.clearTimeout(timer);
@@ -283,16 +321,16 @@ export const createRenderer = ({
       tool = undefined;
       const text = typeof reply === 'string' ? reply : '';
       // The words before the last tool call: a segment that only held a
-      // status line and a file says nothing.
+      // status line and a file or post says nothing.
       const previous = segments.slice(0, -1).findLast((earlier) => earlier.text.trim().length > 0);
       const repeatsPrevious = previous !== undefined && live().text.trim().length === 0 && previous.text.trim() === text.trim();
       if (text.trim().length > 0 && !repeatsPrevious) {
         live().text = text;
       }
-      // A file is something said; NO_REPLY_TEXT is for a turn with nothing
-      // to show. Each file's sync is in the chain, so wait for them first.
+      // A file or post is something said; NO_REPLY_TEXT is for a turn with
+      // nothing to show. Each one's sync is in the chain, so wait first.
       await chain;
-      if (uploaded === 0 && segments.every((segment) => display(segment) === '')) {
+      if (delivered === 0 && segments.every((segment) => display(segment) === '')) {
         live().text = NO_REPLY_TEXT;
       }
       await sync();

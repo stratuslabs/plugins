@@ -7,10 +7,10 @@ import { normalizeMessage } from './normalize.js';
 import { createAddressing } from './outbound.js';
 import { createPositions } from './positions.js';
 import { createRenderer } from './render.js';
-import { answerInteraction, editPrompt, editText, postPrompt, postText, removeMessage, threadFrom, threadOn, typing, uploadFile } from './send.js';
+import { answerInteraction, editPrompt, editText, postPrompt, postText, react, REACTION_EMOJI, removeMessage, threadFrom, threadOn, typing, uploadFile } from './send.js';
 import { routeFor, sessionIdFor } from './sessions.js';
 import { isStopRequest } from './stop.js';
-import { isLatestTurn, latestTurnReply, turnFailureFor, turnReplyFor } from './turns.js';
+import { isLatestTurn, latestTurnReaction, latestTurnReply, turnFailureFor, turnReactionFor, turnReplyFor } from './turns.js';
 
 /** How many message ids per agent are remembered to drop a gateway replay. */
 const SEEN_LIMIT = 2000;
@@ -405,6 +405,29 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     };
   };
 
+  // Where an agent's bot may not add reactions, by agent and channel (a
+  // thread's is its parent's): the operator is told once, not at every
+  // silent turn there.
+  const reactionsRefused = new Set();
+  const leaveReaction = async (agentId, bot, message, reaction) => {
+    if (reaction === undefined || !Object.hasOwn(REACTION_EMOJI, reaction)) {
+      return;
+    }
+    try {
+      await react(bot.rest, message.channelId, message.id, REACTION_EMOJI[reaction]);
+    } catch (error) {
+      const channelId = message.parentId ?? message.channelId;
+      if (error?.status === 403) {
+        if (!reactionsRefused.has(`${agentId}:${channelId}`)) {
+          reactionsRefused.add(`${agentId}:${channelId}`);
+          warn(`discord: ${agentId} may not add reactions in ${channelId}, so a turn that stays silent there leaves none; give its bot Add Reactions and Read Message History there`);
+        }
+        return;
+      }
+      warn(`discord: ${agentId} could not react to ${message.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const answer = async (agentId, agent, bot, message, raw, verdict) => {
     const turn = inOrder(sessionIdFor(agentId, routeOf(agentId, message)));
     try {
@@ -431,6 +454,12 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     }
     const route = routeOf(agentId, message);
     const direct = verdict.kind === 'direct';
+    // Said to the agent, but maybe needing nothing back (a reply-optional
+    // turn, as on Slack): a person's message in a thread with no mention,
+    // or another agent's bot naming it there. A DM, a person's mention and
+    // a message that opens a thread are owed an answer; a thread opened
+    // for a turn that stays silent would sit there empty.
+    const replyOptional = !direct && !route.startThread && (!verdict.addressed || message.authorIsBot);
     let replyChannel = route.thread ?? message.channelId;
     let replyTo;
     if (route.inChannel) {
@@ -499,6 +528,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
     };
     const renderer = createRenderer({
       warn,
+      quiet: replyOptional,
       ops: {
         post: async (piece) => {
           const ids = await postText(bot.rest, replyChannel, piece, first && replyTo ? { replyTo } : {});
@@ -536,6 +566,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         turnId: entry.turnId,
         signal: entry.controller.signal,
         idempotencyKey,
+        ...(replyOptional ? { replyOptional: true } : {}),
         onRepeat: (kind) => {
           repeat = kind;
         },
@@ -592,7 +623,14 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
         await renderer.withdraw();
         return;
       }
-      await renderer.finalize(repeat === 'finished' ? turnReplyFor(session, idempotencyKey) : latestTurnReply(session));
+      const reply = repeat === 'finished' ? turnReplyFor(session, idempotencyKey) : latestTurnReply(session);
+      const { spoke } = await renderer.finalize(reply);
+      // A reply-optional turn that said nothing may have named a reaction
+      // to leave instead, and it goes on the message only if nothing of the
+      // turn's was posted.
+      if (replyOptional && !spoke && (reply ?? '').trim().length === 0) {
+        await leaveReaction(agentId, bot, message, repeat === 'finished' ? turnReactionFor(session, idempotencyKey) : latestTurnReaction(session));
+      }
       return;
     }
     if (failure?.name === 'GatewayStoppingError') {

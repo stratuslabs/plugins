@@ -25,11 +25,11 @@ the private plans repo (roadmap/20, V1 section).
 ```
 
 4. Invite each bot to its guilds with View Channels, Send Messages, Send
-   Messages in Threads, Create Public Threads, Read Message History and
-   Attach Files. Without Create Public Threads it answers a mention in the
-   channel, as a reply. Replying to one of those answers (Discord's Reply)
-   carries that conversation on, after a restart too; a new mention there
-   starts a new one.
+   Messages in Threads, Create Public Threads, Read Message History, Attach
+   Files and Add Reactions. Without Create Public Threads it answers a
+   mention in the channel, as a reply. Replying to one of those answers
+   (Discord's Reply) carries that conversation on, after a restart too; a
+   new mention there starts a new one.
 
 Every agent with a stored token is on Discord; one with no approvers in
 either place fails the load with its name.
@@ -110,6 +110,20 @@ either place fails the load with its name.
   blocks (`post.slack`) aren't shown here, a post in an `external` result
   isn't posted, and like everything the agent writes it pings nobody. A
   refused post is logged and the turn goes on.
+
+- Messages that may need no answer: in a thread, a person's message that
+  doesn't mention the agent, or another agent's bot naming it, is
+  reply-optional, as on Slack. The agent answers a question or a request,
+  and may stay silent on a thanks or an acknowledgment. Such a turn streams
+  nothing and shows no tool status while it runs (it may be writing the
+  silent answer); its answer goes up when it ends, and a file or post a
+  tool returns goes up when it arrives. One that ends silent posts nothing,
+  not `(no reply)`, and may leave a reaction on the message instead (👍,
+  😆, ❤️ or 🎉, whichever it named). Without Add Reactions there, it stays
+  plain silence and the warning log says so once per channel. A DM, a
+  person's mention and a message that opens a thread are always answered.
+  Reply-optional turns need Stratus 0.14.3 or later, and reactions 0.14.10
+  or later.
 
 ## Not built yet
 

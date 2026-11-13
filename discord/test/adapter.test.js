@@ -56,7 +56,8 @@ const fakeGateway = (agents = ['ava']) => {
             bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
           },
           emit: (event) => bus.emit({ sessionId: input.sessionId, ...event }),
-          finish(reply) {
+          // `fields` go on the reply: a silent one's `reaction`, say.
+          finish(reply, fields = {}) {
             active = undefined;
             turn.settled = true;
             resolve({
@@ -64,9 +65,15 @@ const fakeGateway = (agents = ['ava']) => {
               status: 'completed',
               messages: [
                 { role: 'user', content: input.userMessage, idempotencyKey: input.idempotencyKey },
-                { role: 'assistant', content: reply },
+                { role: 'assistant', content: reply, ...fields },
               ],
             });
+          },
+          /** Resolve with this session as it stands: a repeat's, say. */
+          finishWith(session) {
+            active = undefined;
+            turn.settled = true;
+            resolve(session);
           },
           reject(error) {
             active = undefined;
@@ -719,4 +726,181 @@ test('with no permission to open threads, an approver\'s stop as a reply to the 
   await until(() => gateway.aborts.length === 1, 'the stop');
   assert.equal(gateway.aborts[0].sessionId, `discord:ava:${GUILD}:${CHANNEL}:${root}`);
   assert.equal(gateway.turns.length, 1, 'the stop is not a turn of its own');
+});
+
+// Reply-optional turns and the reaction a silent one leaves (AGT-329).
+
+/** A mention opens a thread and is answered there: the thread the agent works in. */
+const openThread = async (discord, gateway) => {
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000030', guild_id: GUILD, channel_id: CHANNEL, content: `<@${BOT}> start`, mentions: [{ id: BOT }],
+  }));
+  await until(() => gateway.turns.length === 1, 'the first dispatch');
+  gateway.turns[0].start();
+  gateway.turns[0].finish('Started.');
+  await until(() => discord.state.posts.length === 1, 'the first reply');
+  return discord.state.threads[0].id;
+};
+
+test('an untagged follow-up in its thread may go unanswered: silence posts nothing and leaves the reaction it named', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  assert.equal(gateway.turns[0].input.replyOptional, undefined, 'a mention is owed an answer');
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000031', guild_id: GUILD, channel_id: thread, content: 'thanks!' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  const turn = gateway.turns[1];
+  assert.equal(turn.input.replyOptional, true);
+  turn.start();
+  turn.emit({ type: 'provider.delta', delta: { type: 'text', text: 'NO_REPLY thumbsup' } });
+  turn.emit({ type: 'provider.response', parts: [{ type: 'text', text: 'NO_REPLY thumbsup' }] });
+  turn.finish('', { reaction: 'thumbsup' });
+  await until(() => discord.state.reactions.length === 1, 'the reaction');
+  assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000031', emoji: '👍' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(discord.state.posts.length, 1, 'nothing posted for the silent turn');
+  assert.equal(discord.state.patches.length, 0);
+});
+
+test('a reply-optional turn that answers is posted; one silent with no reaction leaves nothing at all', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000032', guild_id: GUILD, channel_id: thread, content: 'and the date?' }));
+  await until(() => gateway.turns.length === 2, 'the question dispatched');
+  gateway.turns[1].start();
+  gateway.turns[1].finish('It is the 7th.');
+  await until(() => discord.state.posts.length === 2, 'the answer');
+  assert.equal(discord.state.posts[1].body.content, 'It is the 7th.');
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000033', guild_id: GUILD, channel_id: thread, content: 'ok' }));
+  await until(() => gateway.turns.length === 3, 'the acknowledgment dispatched');
+  gateway.turns[2].start();
+  gateway.turns[2].finish('');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(discord.state.posts.length, 2, 'no (no reply)');
+  assert.equal(discord.state.reactions.length, 0);
+});
+
+test('a DM, a mention and a message that opens a thread are owed an answer: never reply-optional, and silence still says so', async (t) => {
+  const pluginConfig = { agents: { ava: { allowFrom: [OWNER], approvers: [OWNER], guilds: { [GUILD]: { requireMention: false } } } } };
+  const { discord, registered, gateway } = await setUp(t, { pluginConfig });
+  await registered[0].adapter.start(gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000034', channel_id: DM, content: 'thanks' }));
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000035', guild_id: GUILD, channel_id: CHANNEL, content: 'no mention needed here' }));
+  await until(() => gateway.turns.length === 2, 'both dispatched');
+  for (const turn of gateway.turns) {
+    assert.equal(turn.input.replyOptional, undefined, turn.input.userMessage);
+  }
+  gateway.turns[0].start();
+  gateway.turns[0].finish('', { reaction: 'heart' });
+  await until(() => discord.state.posts.some((post) => post.channelId === DM), 'the DM\'s answer');
+  assert.equal(discord.state.posts.find((post) => post.channelId === DM).body.content, '(no reply)');
+  assert.equal(discord.state.reactions.length, 0, 'a reaction is only ever instead of a reply that was optional');
+});
+
+test('another agent\'s bot naming this one in its thread may go unanswered', async (t) => {
+  const PEER = '222222222222222299';
+  const pluginConfig = { agents: { ava: { allowFrom: [OWNER], approvers: [OWNER], allowBots: [PEER], guilds: { [GUILD]: {} } } } };
+  const { discord, registered, gateway } = await setUp(t, { pluginConfig });
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({
+    id: '600000000000000036', guild_id: GUILD, channel_id: thread, content: `<@${BOT}> done, thanks`,
+    author: { id: PEER, username: 'max', bot: true }, mentions: [{ id: BOT }],
+  }));
+  await until(() => gateway.turns.length === 2, 'the bot\'s message dispatched');
+  assert.equal(gateway.turns[1].input.replyOptional, true);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000042', channel_id: DM, content: 'thanks', author: { id: PEER, username: 'max', bot: true } }));
+  await until(() => gateway.turns.length === 3, 'the bot\'s DM dispatched');
+  assert.equal(gateway.turns[2].input.replyOptional, undefined, 'a DM is owed an answer, from a bot too');
+});
+
+test('with no permission to add reactions, a silent turn stays silent and the operator is told once', async (t) => {
+  const warns = [];
+  const { discord, registered, gateway } = await setUp(t, { warns });
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.state.refuseReactions = true;
+  for (const [index, id] of ['600000000000000037', '600000000000000038'].entries()) {
+    discord.dispatch('MESSAGE_CREATE', message({ id, guild_id: GUILD, channel_id: thread, content: 'thanks' }));
+    await until(() => gateway.turns.length === index + 2, 'the follow-up dispatched');
+    gateway.turns[index + 1].start();
+    gateway.turns[index + 1].finish('', { reaction: 'tada' });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  assert.equal(discord.state.posts.length, 1, 'nothing posted in its place');
+  const said = warns.filter((line) => /reaction/i.test(line));
+  assert.equal(said.length, 1, `warned once (${said})`);
+  assert.match(said[0], /Add Reactions/);
+});
+
+test('a silent turn whose tool posted something leaves no reaction: it said something', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000039', guild_id: GUILD, channel_id: thread, content: 'cheers' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  const turn = gateway.turns[1];
+  turn.start();
+  turn.emit({ type: 'tool.called', call: { id: 'c1', toolName: 'chat.card', input: {} } });
+  turn.emit({ type: 'tool.completed', result: { callId: 'c1', toolName: 'chat.card', ok: true, trust: 'agent', output: { post: { text: 'A card.' } } } });
+  turn.finish('', { reaction: 'heart' });
+  await until(() => discord.state.posts.some((post) => post.body.content === 'A card.'), 'the post');
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(discord.state.reactions.length, 0);
+});
+
+test('a repeat of a finished silent turn leaves that turn\'s reaction, though a later turn has answered since', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000040', guild_id: GUILD, channel_id: thread, content: 'thanks' }));
+  await until(() => gateway.turns.length === 2, 'the follow-up dispatched');
+  const turn = gateway.turns[1];
+  turn.input.onRepeat('finished');
+  turn.finishWith({
+    id: turn.input.sessionId,
+    status: 'completed',
+    messages: [
+      { role: 'user', content: turn.input.userMessage, idempotencyKey: turn.input.idempotencyKey },
+      { role: 'assistant', content: '', reaction: 'laughing' },
+      { role: 'user', content: 'Dylan: and now?', idempotencyKey: 'discord:600000000000000041' },
+      { role: 'assistant', content: 'Now this.' },
+    ],
+  });
+  await until(() => discord.state.reactions.length === 1, 'the reaction');
+  assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000040', emoji: '😆' });
+  assert.equal(discord.state.posts.length, 1, 'the later turn\'s answer is not this one\'s');
+});
+
+test('a reply-optional redelivery behind a silent turn nobody here rendered still leaves the reaction that turn named', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  // Read again after a restart and queued behind the recovery that finishes
+  // its turn, which no renderer here is showing (AGT-360).
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000050', guild_id: GUILD, channel_id: thread, content: 'thanks' }));
+  await until(() => gateway.turns.length === 2, 'the redelivery dispatched');
+  const turn = gateway.turns[1];
+  assert.equal(turn.input.replyOptional, true);
+  const reads = [];
+  gateway.sessionRouting = async (sessionId) => {
+    reads.push(sessionId);
+    return { agentId: 'ava', metadata: { channel: 'discord', team: GUILD, discordChannel: thread, discordConversation: thread } };
+  };
+  gateway.bus.emit({ type: 'session.completed', sessionId: turn.input.sessionId, usage: [] });
+  await until(() => reads.length === 1, 'the report to read the routing');
+  turn.input.onRepeat('finished');
+  turn.finishWith({
+    id: turn.input.sessionId,
+    status: 'completed',
+    messages: [
+      { role: 'user', content: turn.input.userMessage, idempotencyKey: turn.input.idempotencyKey },
+      { role: 'assistant', content: '', reaction: 'thumbsup' },
+    ],
+  });
+  await until(() => discord.state.reactions.length === 1, 'the reaction');
+  assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000050', emoji: '👍' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(discord.state.posts.length, 1, 'the silent turn posted nothing, from the report or the redelivery');
 });

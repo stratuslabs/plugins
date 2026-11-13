@@ -4,6 +4,8 @@ import { parseDiscordConfig } from '../lib/config.js';
 import { admit } from '../lib/admission.js';
 import { routeFor, sessionIdFor } from '../lib/sessions.js';
 import { chunk, DISCORD_LIMIT } from '../lib/chunk.js';
+import { latestTurnReaction, turnReactionFor } from '../lib/turns.js';
+import { REACTION_EMOJI } from '../lib/send.js';
 
 const OWNER = '111111111111111111';
 const OTHER = '222222222222222222';
@@ -251,4 +253,34 @@ test('deleting a message that is already gone is done; any other refusal is not'
   const refusing = (status) => ({ delete: async () => { throw Object.assign(new Error(`status ${status}`), { status }); } });
   await removeMessage(refusing(404), '1', '2');
   await assert.rejects(removeMessage(refusing(403), '1', '2'), /status 403/);
+});
+
+test('the reaction a silent turn named is read off its own last reply, never an earlier turn\'s', () => {
+  const session = {
+    messages: [
+      { role: 'user', content: 'thanks', idempotencyKey: 'discord:1' },
+      { role: 'assistant', content: '', reaction: 'heart' },
+      { role: 'user', content: 'and?', idempotencyKey: 'discord:2' },
+      { role: 'assistant', content: 'And then this.' },
+    ],
+  };
+  assert.equal(turnReactionFor(session, 'discord:1'), 'heart');
+  assert.equal(turnReactionFor(session, 'discord:2'), undefined, 'a turn that answered named none');
+  assert.equal(turnReactionFor(session, 'discord:3'), undefined, 'no such message');
+  assert.equal(latestTurnReaction(session), undefined);
+  assert.equal(latestTurnReaction({ messages: session.messages.slice(0, 2) }), 'heart');
+  assert.equal(latestTurnReaction({ messages: session.messages.slice(0, 3) }), undefined, 'not past the newest message');
+  assert.equal(latestTurnReaction(undefined), undefined);
+  const steered = {
+    messages: [
+      { role: 'user', content: 'thanks', idempotencyKey: 'discord:1' },
+      { role: 'user', content: 'all good', idempotencyKey: 'discord:2', steered: true },
+      { role: 'assistant', content: '', reaction: 'tada' },
+    ],
+  };
+  assert.equal(turnReactionFor(steered, 'discord:1'), 'tada', 'a message steered into the turn does not end it');
+});
+
+test('each reaction core names has its Discord emoji', () => {
+  assert.deepEqual(REACTION_EMOJI, { thumbsup: '👍', laughing: '😆', heart: '❤️', tada: '🎉' });
 });

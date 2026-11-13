@@ -53,6 +53,16 @@ const postTextOf = (result) => {
  * way, as one or more messages of its own after that result's files, the
  * order Slack shows them in. Like a file, it is something said.
  *
+ * A `quiet` turn is one that may end without a reply (a reply-optional
+ * turn, AGT-329). Its words never stream, since they may be the silent
+ * answer `NO_REPLY`, and no tool status shows: nothing goes up while it
+ * runs. A tool's file or post goes up when it arrives, after the words
+ * written before it, because it was said. At the end, a reply with words
+ * goes up the way any turn's does, after the words still held; a turn
+ * that ends with none posts nothing more, not `(no reply)`, and the words
+ * it held stay unsaid. A failure or a stop still says so, without the
+ * words the turn was writing when it ended, since they were held.
+ *
  * `ops` does the Discord calls: `post(text) -> id`, `edit(id, text)`,
  * `remove(id)`, `typing()` and `upload(filePath) -> id`. Every call is
  * serialized, and a failed one is logged through `warn`, never thrown into
@@ -65,6 +75,7 @@ export const createRenderer = ({
   timers = globalThis,
   now = Date.now,
   warn = () => {},
+  quiet = false,
 }) => {
   // `outputs`: a tool's files (`{ file }`) and posts (`{ text }`) waiting
   // to go up after the segment's messages.
@@ -87,7 +98,7 @@ export const createRenderer = ({
   const live = () => segments[segments.length - 1];
 
   const display = (segment) => {
-    const status = segment === live() && tool !== undefined ? `-# ⚙ ${tool}…` : '';
+    const status = segment === live() && tool !== undefined && !quiet ? `-# ⚙ ${tool}…` : '';
     const words = segment.text.trim().length > 0 ? segment.text : '';
     return words && status ? `${words}\n${status}` : words || status;
   };
@@ -104,9 +115,14 @@ export const createRenderer = ({
     }
   };
 
-  /** Bring every segment's messages in line with what it should show. */
-  const syncNow = async () => {
-    for (const segment of segments) {
+  /**
+   * Bring every segment's messages in line with what it should show, or
+   * only the first `upTo`: a quiet turn's tool output takes up the
+   * segments as far as its own, never the words written after it.
+   */
+  const syncNow = async (upTo = Infinity) => {
+    for (let index = 0; index < Math.min(upTo, segments.length); index += 1) {
+      const segment = segments[index];
       const body = display(segment);
       const pieces = body ? chunk(body) : [];
       // Outputs already queued when the segment was read: what was read
@@ -184,13 +200,14 @@ export const createRenderer = ({
     }
   };
 
-  const sync = () => {
-    chain = chain.then(syncNow);
+  const sync = (upTo) => {
+    chain = chain.then(() => syncNow(upTo));
     return chain;
   };
 
   const schedule = () => {
-    if (finished || timer !== undefined) {
+    // A quiet turn's words wait for its end, or for a tool's output.
+    if (finished || quiet || timer !== undefined) {
       return;
     }
     // Nothing on screen yet: the first words go up at once, and the
@@ -227,6 +244,13 @@ export const createRenderer = ({
       segments.push(newSegment());
     }
   };
+
+  /**
+   * The live segment ending in a failure or stop notice. A quiet turn's
+   * live words were held, never shown, and may be the silent answer, so
+   * the notice goes up without them.
+   */
+  const withNotice = (notice) => (!quiet && live().text.trim().length > 0 ? `${live().text}\n\n${notice}` : notice);
 
   const typingLoop = () => {
     if (finished) {
@@ -306,7 +330,10 @@ export const createRenderer = ({
           timer = undefined;
         }
         lastSyncAt = now();
-        void sync();
+        // A quiet turn's next words may be the silent answer, so this sync
+        // stops at the segment the outputs belong to, wherever its turn in
+        // the chain comes.
+        void sync(quiet ? segments.length - 1 : undefined);
       }
     },
 
@@ -330,6 +357,11 @@ export const createRenderer = ({
       // A file or post is something said; NO_REPLY_TEXT is for a turn with
       // nothing to show. Each one's sync is in the chain, so wait first.
       await chain;
+      if (quiet && text.trim().length === 0) {
+        // Silent: nothing more goes up, so what it held stays unsaid, the
+        // streamed marker with it. What a tool's output took up was said.
+        return { spoke: posted > 0 };
+      }
       if (delivered === 0 && segments.every((segment) => display(segment) === '')) {
         live().text = NO_REPLY_TEXT;
       }
@@ -342,8 +374,7 @@ export const createRenderer = ({
       finished = true;
       stopTimers();
       tool = undefined;
-      const said = live().text.trim().length > 0 ? `${live().text}\n\n` : '';
-      live().text = `${said}⚠ ${message}`;
+      live().text = withNotice(`⚠ ${message}`);
       await sync();
       return { spoke: posted > 0 };
     },
@@ -353,8 +384,7 @@ export const createRenderer = ({
       finished = true;
       stopTimers();
       tool = undefined;
-      const said = live().text.trim().length > 0 ? `${live().text}\n\n` : '';
-      live().text = `${said}-# Stopped by ${by}.`;
+      live().text = withNotice(`-# Stopped by ${by}.`);
       await sync();
       return { spoke: posted > 0 };
     },

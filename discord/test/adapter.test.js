@@ -872,3 +872,35 @@ test('a repeat of a finished silent turn leaves that turn\'s reaction, though a 
   assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000040', emoji: '😆' });
   assert.equal(discord.state.posts.length, 1, 'the later turn\'s answer is not this one\'s');
 });
+
+test('a reply-optional redelivery behind a silent turn nobody here rendered still leaves the reaction that turn named', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const thread = await openThread(discord, gateway);
+  // Read again after a restart and queued behind the recovery that finishes
+  // its turn, which no renderer here is showing (AGT-360).
+  discord.dispatch('MESSAGE_CREATE', message({ id: '600000000000000050', guild_id: GUILD, channel_id: thread, content: 'thanks' }));
+  await until(() => gateway.turns.length === 2, 'the redelivery dispatched');
+  const turn = gateway.turns[1];
+  assert.equal(turn.input.replyOptional, true);
+  const reads = [];
+  gateway.sessionRouting = async (sessionId) => {
+    reads.push(sessionId);
+    return { agentId: 'ava', metadata: { channel: 'discord', team: GUILD, discordChannel: thread, discordConversation: thread } };
+  };
+  gateway.bus.emit({ type: 'session.completed', sessionId: turn.input.sessionId, usage: [] });
+  await until(() => reads.length === 1, 'the report to read the routing');
+  turn.input.onRepeat('finished');
+  turn.finishWith({
+    id: turn.input.sessionId,
+    status: 'completed',
+    messages: [
+      { role: 'user', content: turn.input.userMessage, idempotencyKey: turn.input.idempotencyKey },
+      { role: 'assistant', content: '', reaction: 'thumbsup' },
+    ],
+  });
+  await until(() => discord.state.reactions.length === 1, 'the reaction');
+  assert.deepEqual(discord.state.reactions[0], { channelId: thread, messageId: '600000000000000050', emoji: '👍' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(discord.state.posts.length, 1, 'the silent turn posted nothing, from the report or the redelivery');
+});

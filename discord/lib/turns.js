@@ -1,10 +1,9 @@
 /**
  * Reading a turn's outcome from the session `dispatch` resolves with. The
  * same rules as `latestTurnReply`, `isLatestTurn`, `turnReplyFor` and
- * `turnFailureFor` in
- * @stratusagent/core, kept here because a plugin depends on the host's
- * contract, not on core's code. If core changes what counts as a turn's
- * reply, these follow.
+ * `turnFailureFor` in @stratusagent/core, kept here because a plugin
+ * depends on the host's contract, not on core's code. If core changes what
+ * counts as a turn's reply, these follow.
  */
 
 const carriesKey = (message, key) =>

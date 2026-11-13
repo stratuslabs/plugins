@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package photon.imessage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "photon/imessage/v1/address_types.proto";
+import "photon/imessage/v1/message_types.proto";
+
+option swift_prefix = "PIMsg_";
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
+// Canonical projection of a row in chat.db's `chat` table joined with its
+// participants and (optionally) its most recent message.
+message Chat {
+  // System-assigned chat GUID. Stable across renames and participant
+  // changes; the canonical key for every chat-scoped RPC.
+  string guid = 1;
+
+  // Apple's `chat_identifier` column. For 1:1 chats this is the peer's
+  // E.164 phone or email; for group chats it is the synthetic group ID.
+  optional string chat_identifier = 2;
+
+  // Stable iMessage group ID. Set on group chats only.
+  optional string group_id = 3;
+
+  optional string display_name = 4;
+
+  bool is_group = 5;
+
+  ChatServiceType service = 6;
+
+  bool is_archived = 7;
+
+  // `true` when Apple has routed the chat to "Unknown Senders" / the
+  // junk filter.
+  bool is_filtered = 8;
+
+  // Absent when the underlying count is unavailable (e.g. chat row not
+  // yet hydrated). `0` is a real "all read" value, not "unknown".
+  optional int32 unread_count = 9;
+
+  repeated SingleServiceAddressInfo participants = 10;
+
+  optional Message last_message = 11;
+}
+
+// ---------------------------------------------------------------------------
+// Background
+// ---------------------------------------------------------------------------
+
+// Built-in chat backgrounds offered by Messages: the Sky, Water, and Aurora
+// looks plus the Color gradients.
+enum BackgroundPreset {
+  BACKGROUND_PRESET_UNSPECIFIED = 0;
+
+  BACKGROUND_PRESET_SKY_DUSK = 1;
+
+  BACKGROUND_PRESET_SKY_HAZE = 2;
+
+  BACKGROUND_PRESET_SKY_SUNSET = 3;
+
+  BACKGROUND_PRESET_SKY_CLEAR = 4;
+
+  BACKGROUND_PRESET_SKY_SUNRISE = 5;
+
+  BACKGROUND_PRESET_SKY_DAWN = 6;
+
+  BACKGROUND_PRESET_WATER_LIGHT = 7;
+
+  BACKGROUND_PRESET_WATER_DARK = 8;
+
+  BACKGROUND_PRESET_AURORA_GREEN = 9;
+
+  BACKGROUND_PRESET_AURORA_PURPLE = 10;
+
+  BACKGROUND_PRESET_AURORA_PINK = 11;
+
+  BACKGROUND_PRESET_COLOR_MANGO = 12;
+
+  BACKGROUND_PRESET_COLOR_ICE = 13;
+
+  BACKGROUND_PRESET_COLOR_PLUM = 14;
+
+  BACKGROUND_PRESET_COLOR_DEEP_SEA = 15;
+
+  BACKGROUND_PRESET_COLOR_GREEN_APPLE = 16;
+
+  BACKGROUND_PRESET_COLOR_CHERRY = 17;
+
+  BACKGROUND_PRESET_COLOR_BUBBLEGUM = 18;
+
+  BACKGROUND_PRESET_COLOR_TANGERINE = 19;
+
+  BACKGROUND_PRESET_COLOR_MAGENTA = 20;
+
+  BACKGROUND_PRESET_COLOR_LIME = 21;
+
+  BACKGROUND_PRESET_COLOR_SILVER = 22;
+
+  BACKGROUND_PRESET_COLOR_CARBON = 23;
+
+  BACKGROUND_PRESET_COLOR_STONE = 24;
+}
+
+// ---------------------------------------------------------------------------
+// Change variants
+// ---------------------------------------------------------------------------
+
+// Chat background bytes have been replaced. The new bytes are not
+// embedded; fetch via `ChatService.HasBackground` / out-of-band asset
+// retrieval. Mirrors the `GroupIconChanged` pattern.
+message ChatBackgroundChanged {}
+
+// Chat background bytes have been removed.
+message ChatBackgroundRemoved {}
+
+// Chat unread count transitioned to zero (locally or via continuity).
+message ChatMarkedRead {}
+
+// Chat moved into the archived view.
+message ChatArchived {}
+
+// Chat moved out of the archived view.
+message ChatUnarchived {}
+
+// ---------------------------------------------------------------------------
+// Envelope
+// ---------------------------------------------------------------------------
+
+// A discrete state transition observed on a chat row itself (not on its
+// messages). Membership and group-name transitions remain on
+// `GroupChangeEvent`.
+message ChatChangeEvent {
+  string chat_guid = 1;
+
+  google.protobuf.Timestamp occurred_at = 2;
+
+  optional SingleServiceAddressInfo actor = 3;
+
+  bool is_from_me = 4;
+
+  oneof change {
+    ChatBackgroundChanged background_changed = 10;
+
+    ChatBackgroundRemoved background_removed = 11;
+
+    ChatMarkedRead marked_read = 12;
+
+    ChatArchived archived = 13;
+
+    ChatUnarchived unarchived = 14;
+  }
+}

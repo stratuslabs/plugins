@@ -3,9 +3,8 @@ import test from 'node:test';
 import { createPlugin } from '../index.js';
 import { BOT, fakeDiscord } from './fake-discord.js';
 
-// A turn this adapter did not start: a background task's outcome (AGT-211),
-// a turn another surface ran in a Discord conversation, one the restart's
-// recovery finished. Nobody here is rendering it, so its reply is posted
+// A turn this adapter did not start: a turn another surface ran in a
+// Discord conversation, or one the restart's recovery finished. Nobody here is rendering it, so its reply is posted
 // from the session's routing, as channel-slack's `reportUnrenderedReply`.
 
 const until = async (check, what) => {

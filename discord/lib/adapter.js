@@ -267,9 +267,9 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
 
   /**
    * A turn finished that no renderer here was showing: one this adapter
-   * did not start, such as a background task's outcome, a turn another
-   * surface ran in a Discord conversation, or one the restart's recovery
-   * finished after an approval. Its reply is posted as messages of its own
+   * did not start, such as a turn another surface ran in a Discord
+   * conversation, or one the restart's recovery finished after an
+   * approval. Its reply is posted as messages of its own
    * where the session's conversation is, as channel-slack's
    * `reportUnrenderedReply` does. Resolves `{ said }`: whether all of it
    * reached Discord.

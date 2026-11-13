@@ -23,6 +23,8 @@ import {
   pinnedCapRefusal,
   pinnedInertRefusal,
   supersededMemoryIdsAt,
+  assertUnprotectedMemoryTargets,
+  memorySupersedesWriteIds,
   tokenizeMemoryText,
 } from '@stratusagent/core';
 import { expandHome } from '@stratusagent/plugins';
@@ -248,6 +250,23 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
       ' ON CONFLICT(id, agent_id) DO UPDATE SET recall_count = recall_count + 1, last_recalled_at = excluded.last_recalled_at',
   );
 
+  /**
+   * Runs `work` (synchronous) in one write transaction. A check and the write
+   * it guards then see the same state: another process's write either landed
+   * before the check or waits until this one commits.
+   */
+  const inWriteTransaction = (work) => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  };
+
   /** Un-tombstoned, minus everything a successor that is current at `at` retires. */
   const liveEntries = (agentId, at) => {
     const kept = selectLive.all(agentId).map((row) => live(toEntry(row)));
@@ -275,12 +294,10 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
     async append(agentId, content, appendOptions = {}) {
       assertMemoryContentWithinCap(content);
       const at = now();
-      // Same write-path check as every other store: an id a new record
-      // names must resolve to a live entry the caller owns, or nothing is
-      // stored. Skipping it would let one agent retire another's memory.
-      if (appendOptions.supersedes !== undefined) {
-        assertSupersedableMemoryEntry(liveEntries(agentId, at), appendOptions.supersedes);
-      }
+      // One id or a list (a merge: one record retiring several facts, so one
+      // forget brings them all back). A malformed value throws here rather
+      // than storing a plain fact beside the ones the caller meant to replace.
+      const supersedes = memorySupersedesWriteIds(appendOptions);
       const fields = memoryEntryFields(appendOptions);
       assertMemoryAboutWithinCap(fields.about ?? []);
       const createdAt = at.toISOString();
@@ -289,6 +306,21 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
       // appends on one connection can never claim one id.
       db.exec('BEGIN IMMEDIATE');
       try {
+        // Inside the write transaction, so a pin or an operator's assertion
+        // that another process lands meanwhile is seen. Same check as every
+        // other store: each id must resolve to a live entry the caller owns,
+        // or nothing is stored. Skipping it would let one agent retire
+        // another's memory.
+        if (supersedes.length > 0) {
+          const live = liveEntries(agentId, at);
+          for (const id of supersedes) {
+            assertSupersedableMemoryEntry(live, id);
+          }
+          // A memory pass may not retire a pinned fact or one an operator asserted.
+          if (appendOptions.refuseProtected === true) {
+            assertUnprotectedMemoryTargets(supersedes, live, new Set(selectPins.all(agentId).map((row) => row.id)));
+          }
+        }
         // The id encodes the sequence, and an import preserves ids from
         // wherever the corpus came from — so a corpus with gaps in it (an
         // export drops forgotten entries) can already hold the id this
@@ -383,33 +415,42 @@ export const createSqliteMemoryStore = (filePath, options = {}) => {
     },
 
     async reassertTrust(agentId, entryId, trust) {
-      if (!liveEntries(agentId, now()).some((entry) => entry.id === entryId)) {
-        return false;
-      }
-      return relabel.run(trust, agentId, entryId).changes > 0;
+      // One transaction, so a superseding write (a memory pass's, which
+      // refuses to retire an operator-asserted fact) can't land between
+      // this liveness check and the relabel.
+      return inWriteTransaction(() => {
+        if (!liveEntries(agentId, now()).some((entry) => entry.id === entryId)) {
+          return false;
+        }
+        return relabel.run(trust, agentId, entryId).changes > 0;
+      });
     },
 
     async pin(agentId, entryId) {
-      const { effective, inert, bytes, allocated } = pinBudget(agentId);
-      // Pinnable means live; the budget above is a different question.
-      const entry = liveEntries(agentId, now()).find((candidate) => candidate.id === entryId);
-      if (!entry || !allocated.has(entryId)) {
-        throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
-      }
-      if (effective.includes(entryId)) {
-        return { pinned: true, bytes };
-      }
-      // An inert pin blocks everything after it whatever its size — the
-      // budget is a prefix — and the effective total below cannot see that.
-      if (inert[0] !== undefined) {
-        return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
-      }
-      const size = memoryContentByteLength(entry.content);
-      if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
-        return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
-      }
-      insertPin.run(entryId, agentId);
-      return { pinned: true, bytes: bytes + size };
+      // One transaction, for the same reason as reassertTrust: a pass that
+      // refuses to retire a pinned fact must not slip between check and pin.
+      return inWriteTransaction(() => {
+        const { effective, inert, bytes, allocated } = pinBudget(agentId);
+        // Pinnable means live; the budget above is a different question.
+        const entry = liveEntries(agentId, now()).find((candidate) => candidate.id === entryId);
+        if (!entry || !allocated.has(entryId)) {
+          throw new Error(`No live memory entry with id ${entryId} belongs to this agent — nothing was pinned.`);
+        }
+        if (effective.includes(entryId)) {
+          return { pinned: true, bytes };
+        }
+        // An inert pin blocks everything after it whatever its size — the
+        // budget is a prefix — and the effective total below cannot see that.
+        if (inert[0] !== undefined) {
+          return { pinned: false, reason: pinnedInertRefusal(inert[0]), bytes };
+        }
+        const size = memoryContentByteLength(entry.content);
+        if (bytes + size > MEMORY_PINNED_MAX_BYTES) {
+          return { pinned: false, reason: pinnedCapRefusal(bytes, size), bytes };
+        }
+        insertPin.run(entryId, agentId);
+        return { pinned: true, bytes: bytes + size };
+      });
     },
 
     async unpin(agentId, entryId) {
@@ -509,7 +550,8 @@ export const createSqliteMemoryPlugin = (config = {}) => {
         );
       }
       store = createSqliteMemoryStore(path.resolve(expandHome(configured)));
-      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store, contract: MEMORY_STORE_CONTRACT_VERSION });
+      // It reads and writes a list in `supersedes`, so tidy passes can merge here.
+      context.memory.register({ name: SQLITE_MEMORY_STORE_NAME, store, contract: MEMORY_STORE_CONTRACT_VERSION, supersedesMany: true });
     },
     dispose() {
       store?.close();

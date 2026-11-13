@@ -1,0 +1,74 @@
+{
+  "name": "@stratusagent/memory-upkeep",
+  "version": "0.1.0",
+  "description": "Decides when an agent's memory passes run: a save pass once a conversation goes quiet or its floor rises, and a nightly tidy. Core runs the passes; this plugin only asks.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "README.md",
+    "NOTICE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "memory-upkeep"
+  },
+  "engines": {
+    "node": ">=22.16 <23 || >=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@stratusagent/core": "^0.14.3"
+  },
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "memory"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "config": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "mode": { "type": "string", "enum": ["shadow", "write"] },
+        "save": {
+          "type": "object",
+          "properties": {
+            "quietMinutes": { "type": "number" },
+            "from": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["public", "private", "group", "direct"] }
+            },
+            "scheduled": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "tidy": {
+          "type": "object",
+          "properties": {
+            "window": { "type": "string" },
+            "timeZone": { "type": "string" },
+            "maxGroupsPerNight": { "type": "number" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -80,6 +80,15 @@ either place fails the load with its name.
   it isn't. Only conversations the agent has answered in are read, back at
   most a day and 200 messages each.
 
+- Turns it didn't start: when a turn on a Discord conversation's session
+  finishes and this channel wasn't showing it (another surface ran it, or
+  a restart's recovery finished it after an approval), its reply is posted
+  there as messages of their own, under the conversation's first message
+  when it was answered in the channel. A message read again after a
+  restart that was waiting on that same turn doesn't post the reply a
+  second time, unless the first post failed. Only the reply text: such a
+  turn's files aren't posted, and a failed one gets no note.
+
 - Attachments sent to the agent: an image the model can take (PNG, JPEG,
   GIF, WebP, within core's size, pixel and count limits) goes with the
   turn as an image, and a small UTF-8 text file (100 KB each, 200 KB a

@@ -12,11 +12,13 @@ agent's core any bigger.
 | [`plugin-fleet`](./fleet) | `fleet.agents`, `fleet.sessions`, `fleet.schedules`, `fleet.approvals`: read-only fleet metadata for an agent that reports what needs a person | Needs `PluginContext.fleet` (agent#412). No messages, prompts or approval inputs |
 | [`plugin-peer`](./peer) | `peer.delegate`: hand a task to an agent on another Stratus daemon and get its answer | Signed HTTP, a secret per pair of agents, and one hop budget (`maxDepth`, default 3) shared by every daemon in a chain |
 | [`plugin-a2ui`](./a2ui) | `ui.render`, `ui.catalog`: an agent shows a native screen as A2UI v1.0, validated against your catalogs | Comes with the `a2ui-screens` skill |
+| [`plugin-json-render`](./json-render) | `chat.card`: an agent posts a native Slack card (fields, a table, charts, link buttons) from a json-render spec, checked before it goes out | Comes with the `json-render-cards` skill. Needs a daemon with tool posts (agent#626) |
 | [`plugin-sandbox`](./sandbox) | A `sandbox` executor: every agent command runs under `sandbox-exec` and can write only the agent's workspace | macOS. Turn it on with `"executor": "sandbox"` |
 | [`plugin-backup`](./backup) | `stratus-backup`: a nightly, model-free copy of a Stratus home in a private git repo, with age encryption you choose per kind of file | A command, not an agent tool |
 | [`plugin-dreams`](./dreams) | Overnight experiment dreams: in a nightly window, run [overnight-experimenter](https://github.com/dylanfeltus/overnight-experimenter) at most once per experiment, and `dreams.report` in the morning | macOS. Runs host code under `sandbox-exec`; read its README first |
 | [`provider-openai`](./provider-openai) | `openai-compatible`: any OpenAI-compatible chat-completions endpoint as a provider a soul selects, with the key resolved per agent | Moved here from the agent repository; keeps its name |
 | [`memory-sqlite`](./memory-sqlite) | A memory store named `sqlite`: every agent's memory in one owner-only SQLite file, selected with `"memoryStore": "sqlite"` | Moved here from the agent repository; keeps its name |
+| [`memory-upkeep`](./memory-upkeep) | Decides when an agent's memory passes run: a save pass once a conversation goes quiet or its floor rises, and a nightly tidy | Needs `PluginContext.memoryPasses` (core 0.14.3). Core runs the passes; this never sees a message or a fact |
 
 Each is released to npm as `@stratusagent/plugin-<name>` from the directory
 of the same name, on its own version (see [Releasing a plugin](#releasing-a-plugin)).

@@ -1,0 +1,33 @@
+{
+  "name": "@stratusagent/plugin-json-render",
+  "version": "0.1.0",
+  "description": "chat.card: an agent posts a native Slack card from a json-render spec, checked before it goes out.",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/stratuslabs/plugins.git", "directory": "json-render" },
+  "engines": { "node": ">=22" },
+  "files": ["index.js", "lib/", "skills/", "README.md", "NOTICE"],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "skill": "node scripts/components.js"
+  },
+  "dependencies": {
+    "@chat-adapter/slack": "4.44.0",
+    "@json-render/chat": "0.22.0",
+    "@json-render/core": "0.22.0",
+    "chat": "4.44.0",
+    "zod": "^4.1.0"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        { "name": "chat.card", "risk": "safe" }
+      ],
+      "skills": [
+        { "id": "json-render-cards", "path": "./skills/json-render-cards/SKILL.md" }
+      ]
+    }
+  }
+}

@@ -7,9 +7,10 @@
 //   node load-plugin.mjs <package-name> <config.json> <state-dir>
 //
 // The host seams are stand-ins: no credential or channel secret is stored,
-// workspaces and state directories are under <state-dir>, and the fleet is
-// empty. A plugin that needs a real one at setup fails here, which is the
-// point: it would fail the same way on a daemon that lacks it.
+// workspaces and state directories are under <state-dir>, the fleet is
+// empty, and memory passes start but never run. A plugin that needs a real
+// one at setup fails here, which is the point: it would fail the same way on
+// a daemon that lacks it.
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -51,6 +52,15 @@ const result = await loadPlugins({
   subAgents: {
     async run() {
       throw new Error('this host runs no sub-agents');
+    },
+  },
+  // Passes start and are refused as not started, as on a daemon still loading.
+  memoryPasses: {
+    async start() {
+      return { startedAt: new Date().toISOString() };
+    },
+    async run() {
+      return { passId: 'stand-in', status: 'skipped', reason: 'not-started', saved: 0, superseded: 0, more: false };
     },
   },
   fleet: () => ({

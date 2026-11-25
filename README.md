@@ -31,6 +31,11 @@ Each directory's README covers setup and configuration.
 offers under Plugins → More plugins, published as `@stratusagent/plugin-index`.
 To list a plugin there, add it to that package's `stratusPluginIndex`.
 
+[`dashboard`](./dashboard) isn't a plugin either. It's the web dashboard that
+`@stratusagent/control-api` serves when it's installed, and `stratus dashboard`
+opens. It moved here from the agent repository and is still
+`@stratusagent/dashboard`.
+
 ## Installing one grants nothing
 
 There are two gates, and both are yours. First, a config you trust enables the

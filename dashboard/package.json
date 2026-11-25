@@ -1,0 +1,48 @@
+{
+  "name": "@stratusagent/dashboard",
+  "version": "0.15.0",
+  "description": "The Stratus web dashboard: a static, build-step-free UI served by @stratusagent/control-api — roster, live chat, approvals, and settings",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "ui",
+    "README.md",
+    "NOTICE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/plugins.git",
+    "directory": "dashboard"
+  },
+  "engines": {
+    "node": ">=22.16 <23 || >=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "@stratusagent/control-api": "^0.14.23",
+    "@stratusagent/gateway": "^0.14.23"
+  },
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "dashboard"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

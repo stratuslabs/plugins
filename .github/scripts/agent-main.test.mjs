@@ -8,7 +8,12 @@ import { closure, HOST_PACKAGES, hostManifest, loaderConfig, mainOverrides, poin
 
 // What `pnpm pack` makes from agent main, cut down: plugins needs core and
 // agents, executor-local needs core and executors, providers needs core.
-const pack = (name, dependencies = []) => [`@stratusagent/${name}`, { file: `/packs/stratusagent-${name}-0.13.6.tgz`, version: '0.13.6', dependencies: dependencies.map((dep) => `@stratusagent/${dep}`) }];
+const pack = (name, dependencies = [], optional = []) => [`@stratusagent/${name}`, {
+  file: `/packs/stratusagent-${name}-0.13.6.tgz`,
+  version: '0.13.6',
+  dependencies: dependencies.map((dep) => `@stratusagent/${dep}`),
+  optional: optional.map((dep) => `@stratusagent/${dep}`),
+}];
 const PACKS = new Map([
   pack('agents', ['core']),
   pack('core'),
@@ -120,6 +125,18 @@ test('loader config: the entry for the package with its placeholders filled in, 
   assert.deepEqual(loaderConfig(table, '@stratusagent/plugin-fleet', dirs), {});
 });
 
+test('an optional peer main does not pack is left out, and one it packs is followed', () => {
+  // The control API serves the dashboard when it's installed, and the
+  // dashboard releases from this repository, not agent main. npm doesn't
+  // install an optional peer, so nothing would come from the registry.
+  const packs = new Map([...PACKS, pack('control-api', ['core', 'dashboard'], ['dashboard'])]);
+  assert.deepEqual(closure(['@stratusagent/control-api'], packs), ['@stratusagent/control-api', '@stratusagent/core']);
+  const withPeer = new Map([...PACKS, pack('cli', ['core', 'control-api'], ['control-api']), pack('control-api', ['core'])]);
+  assert.deepEqual(closure(['@stratusagent/cli'], withPeer), ['@stratusagent/cli', '@stratusagent/control-api', '@stratusagent/core']);
+  // Required stays required.
+  assert.throws(() => closure(['@stratusagent/control-api'], new Map([...PACKS, pack('control-api', ['core', 'dashboard'])])), /@stratusagent\/control-api needs @stratusagent\/dashboard/);
+});
+
 test('readPacks reads each tarball\'s name, version and @stratusagent run-time dependencies', () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-main-packs-'));
   const make = (file, pkg) => {
@@ -132,7 +149,8 @@ test('readPacks reads each tarball\'s name, version and @stratusagent run-time d
     name: '@stratusagent/plugins',
     version: '0.13.6',
     dependencies: { '@stratusagent/core': '0.13.6', ajv: '^8' },
-    peerDependencies: { '@stratusagent/agents': '0.13.6' },
+    peerDependencies: { '@stratusagent/agents': '0.13.6', '@stratusagent/dashboard': '*' },
+    peerDependenciesMeta: { '@stratusagent/dashboard': { optional: true } },
     devDependencies: { '@stratusagent/state': '0.13.6' },
   });
   make('stratusagent-core-0.13.6.tgz', { name: '@stratusagent/core', version: '0.13.6' });
@@ -142,9 +160,11 @@ test('readPacks reads each tarball\'s name, version and @stratusagent run-time d
   assert.deepEqual(packs.get('@stratusagent/plugins'), {
     file: join(dir, 'stratusagent-plugins-0.13.6.tgz'),
     version: '0.13.6',
-    dependencies: ['@stratusagent/core', '@stratusagent/agents'],
+    dependencies: ['@stratusagent/core', '@stratusagent/agents', '@stratusagent/dashboard'],
+    optional: ['@stratusagent/dashboard'],
   });
   assert.deepEqual(packs.get('@stratusagent/core').dependencies, []);
+  assert.deepEqual(packs.get('@stratusagent/core').optional, []);
 });
 
 test('a copy of a main package from anywhere but main\'s tarball is reported, wherever it is nested', () => {

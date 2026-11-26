@@ -39,8 +39,9 @@ export function stratusDependencies(pkg) {
 }
 
 /**
- * The packed packages, by name: { file, version, dependencies }, where
- * dependencies are the @stratusagent/* ones it needs at run time.
+ * The packed packages, by name: { file, version, dependencies, optional },
+ * where dependencies are the @stratusagent/* ones it needs at run time and
+ * optional are those of them that are optional peers.
  */
 export function readPacks(dir) {
   const packs = new Map();
@@ -48,7 +49,8 @@ export function readPacks(dir) {
     const path = resolve(dir, file);
     const pkg = JSON.parse(execFileSync('tar', ['-xzOf', path, 'package/package.json'], { encoding: 'utf8' }));
     const dependencies = Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies }).filter((name) => name.startsWith(SCOPE));
-    packs.set(pkg.name, { file: path, version: pkg.version, dependencies });
+    const optional = dependencies.filter((name) => pkg.peerDependenciesMeta?.[name]?.optional === true && !pkg.dependencies?.[name]);
+    packs.set(pkg.name, { file: path, version: pkg.version, dependencies, optional });
   }
   return packs;
 }
@@ -57,7 +59,9 @@ export function readPacks(dir) {
  * Every packed package the given names need, the names included. A name
  * agent main no longer has is an error, since that is a break too. So is a
  * packed package needing one main doesn't pack: npm would fetch the
- * released one, and the check would run on a mix of main and npm.
+ * released one, and the check would run on a mix of main and npm. An
+ * optional peer main doesn't pack is left out instead, since npm doesn't
+ * install one (the control API's peer on the dashboard, which releases here).
  */
 export function closure(names, packs) {
   const missing = names.filter((name) => !packs.has(name));
@@ -66,7 +70,9 @@ export function closure(names, packs) {
   const visit = (name) => {
     if (seen.has(name)) return;
     seen.add(name);
-    for (const dependency of packs.get(name).dependencies) {
+    const { dependencies, optional = [] } = packs.get(name);
+    for (const dependency of dependencies) {
+      if (!packs.has(dependency) && optional.includes(dependency)) continue;
       if (!packs.has(dependency)) throw new Error(`agent main's ${name} needs ${dependency}, which agent main does not pack`);
       visit(dependency);
     }

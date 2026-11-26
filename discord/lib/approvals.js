@@ -56,15 +56,35 @@ const alwaysOffer = (always, agentName) => {
   }
 };
 
+/**
+ * What the prompt shows of a call's input: `text` when there is something
+ * to show, and `whole` when nothing was cut or left out. An approver's yes
+ * on a prompt that showed it whole is sent as `shownInFull`, which is what
+ * lets core count it as that person's own request (a schedule's prompt,
+ * say). An input that isn't an object isn't shown, so it is never whole.
+ */
+export const shownInput = (input) => {
+  if (input === undefined || input === null) {
+    return { whole: true };
+  }
+  if (typeof input !== 'object') {
+    return { whole: false };
+  }
+  if (Object.keys(input).length === 0) {
+    return { whole: true };
+  }
+  const rendered = JSON.stringify(input, null, 2);
+  const whole = rendered.length <= APPROVAL_INPUT_LIMIT;
+  return { text: whole ? rendered : rendered.slice(0, APPROVAL_INPUT_LIMIT), whole };
+};
+
 /** The prompt: who wants to run what, with what, and what each button does. */
 export const approvalMessage = ({ agentName, toolName, risk, input, origin, oneShot, always, requestId }) => {
   const lines = [`**${agentName}** wants to run ${code(toolName)} (${risk})${origin ? ` on ${code(origin)}` : ''}.`];
-  const keys = input && typeof input === 'object' ? Object.keys(input) : [];
-  if (keys.length > 0) {
-    const rendered = JSON.stringify(input, null, 2);
-    const truncated = rendered.length > APPROVAL_INPUT_LIMIT;
-    lines.push('```json', fenced(truncated ? rendered.slice(0, APPROVAL_INPUT_LIMIT) : rendered), '```');
-    if (truncated) {
+  const shown = shownInput(input);
+  if (shown.text !== undefined) {
+    lines.push('```json', fenced(shown.text), '```');
+    if (!shown.whole) {
       lines.push('-# ⚠ Arguments shown are truncated: the full call is longer than this.');
     }
   }

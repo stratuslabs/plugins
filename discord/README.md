@@ -4,6 +4,15 @@ A Discord channel for Stratus: each agent answers as its own Discord bot in
 DMs and in guild channels you allowlist. The plan and its decisions are in
 the private plans repo (roadmap/20, V1 section).
 
+## Needs
+
+Stratus 0.14 or later. On Stratus 0.15.0 or later
+([stratuslabs/agent#728](https://github.com/stratuslabs/agent/pull/728)), an
+approver's yes on a prompt that showed the whole call is also recorded as
+theirs, which is what lets a schedule set after the agent read outside content
+have its prompt count as their request. An older daemon ignores that part, and
+its approvals still settle calls.
+
 ## Setup (as built so far)
 
 1. Create one Discord application per agent. Under Bot, turn on
@@ -56,7 +65,9 @@ either place fails the load with its name.
   remembered). Only the agent's approvers can decide; anyone else is told
   privately and the request stays pending. Every ending rewrites the prompt
   without buttons. A request from another surface's conversation is left
-  to that surface.
+  to that surface. A yes on a prompt that showed the call's whole input is
+  sent as shown in full (`shownInFull`); one whose arguments were cut, past
+  1,400 characters, is not.
 - Stop: an approver sending `stop` in a DM or thread, or as a reply to an
   answer in a channel, ends the running turn, which keeps what it said and
   adds who stopped it. With nothing running, `stop` is an ordinary message.

@@ -356,12 +356,24 @@ test('an approval is asked in the conversation, and an approver\'s click decides
 
   click(discord, { requestId: 'req-1', answer: 'always', user: OWNER });
   await until(() => discord.state.callbacks.length === 1, 'the click answered');
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: OWNER }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: OWNER, shownInFull: true }], 'the prompt showed the whole call');
   assert.equal(discord.state.callbacks[0].body.type, 6, 'acknowledged without a message');
   assert.equal(discord.state.callbacks[0].authorization, undefined, 'answered with the interaction token, not the bot token');
   await until(() => discord.state.patches.length === 1, 'the prompt settled');
   assert.match(discord.state.patches[0].body.content, /Allowed, and this command's scope now runs without asking/);
   assert.deepEqual(discord.state.patches[0].body.components, [], 'no buttons left on a settled prompt');
+});
+
+test('a yes on a prompt that cut the call\'s input is not vouched for as shown in full', async (t) => {
+  const { discord, registered, gateway } = await setUp(t);
+  await registered[0].adapter.start(gateway);
+  const call = { id: 'c1', toolName: 'schedule.every', input: { prompt: 'x'.repeat(2000) } };
+  gateway.ask({ sessionId: `discord:ava:@dm:${DM}`, requestId: 'req-long', call, metadata: { channel: 'discord', discordChannel: DM } });
+  await until(() => discord.state.posts.length === 1, 'the prompt');
+  assert.match(discord.state.posts[0].body.content, /Arguments shown are truncated/);
+  click(discord, { requestId: 'req-long', answer: 'once', user: OWNER });
+  await until(() => discord.state.callbacks.length === 1, 'the click answered');
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-long', answer: 'once', actor: OWNER }], 'no shownInFull');
 });
 
 test('a schedule whose thread names a message asks under that message, and one naming a thread asks in it', async (t) => {

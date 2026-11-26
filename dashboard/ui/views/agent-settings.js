@@ -2,6 +2,7 @@ import { el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { icon } from '../lib/icons.js';
 import { syncOptions, touchOnChange } from '../lib/forms.js';
+import { frontLine } from '../lib/front.js';
 import { navigate, refreshCore, store } from '../app.js';
 import { createDeleteSection } from './agent-delete.js';
 
@@ -99,6 +100,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
     const notice = el('div', {});
     // Refreshed with the form, so a saved model change shows here at once.
     const runsOnNote = el('p', { class: 'field-note' });
+    // The soul's front: block, read-only: set by editing the soul, never here.
+    const frontNote = el('p', { class: 'field-note', id: 'agent-front' });
     const saveButton = el('button', { class: 'btn primary', onClick: () => void save() }, 'Save changes');
     const tools = soul.agent?.tools ?? [];
 
@@ -112,7 +115,8 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
         el('div', { class: 'field' },
           el('label', { for: 'agent-model' }, 'Model'),
           model,
-          runsOnNote),
+          runsOnNote,
+          frontNote),
         el('div', { class: 'field' },
           el('label', {}, 'Tools'),
           el('p', { class: 'field-note', style: 'margin: 0 0 8px;' }, 'What this agent may call. Gated tools follow your approval setting. To change the list, edit the tools line in its soul file.'),
@@ -159,6 +163,9 @@ export const createSettingsTab = ({ agentId, agent, update, getError, setError }
         syncOptions(model, [{ value: '', label: 'Use the default model' }, ...listed], pinned);
         const runsOn = agent()?.runsOn;
         runsOnNote.textContent = runsOn ? `Runs on ${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''} right now.` : '';
+        const front = frontLine(agent());
+        frontNote.hidden = !front;
+        frontNote.textContent = front ? `${front}. Conversation turns run on it. To change it, edit front: in its soul file.` : '';
         const error = getError();
         notice.replaceChildren(
           ...(saved ? [el('div', { class: 'notice ok', role: 'status' }, saved)] : []),

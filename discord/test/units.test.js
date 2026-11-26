@@ -246,6 +246,27 @@ test('approval prompt: shows the call, offers Always only when it means somethin
   assert.match(outcomeMessage(post, { answer: 'once', reason: 'decided', actor: 'dashboard' }), /by `dashboard`/);
 });
 
+test('approval prompt: says whether the person sees the call\'s whole input, by the same check as its truncation note', async () => {
+  const { approvalMessage, shownInput, APPROVAL_INPUT_LIMIT } = await import('../lib/approvals.js');
+  const ask = (input) => approvalMessage({ agentName: 'Ava', toolName: 'x', risk: 'gated', input, oneShot: false, always: 'tool', requestId: 'req' });
+  const short = { command: 'ls' };
+  assert.equal(shownInput(short).whole, true);
+  assert.doesNotMatch(ask(short).content, /truncated/);
+  const fits = { text: 'a'.repeat(APPROVAL_INPUT_LIMIT - '{\n  "text": ""\n}'.length) };
+  assert.equal(JSON.stringify(fits, null, 2).length, APPROVAL_INPUT_LIMIT);
+  assert.equal(shownInput(fits).whole, true, 'exactly at the limit is shown whole');
+  assert.doesNotMatch(ask(fits).content, /truncated/);
+  const long = { text: `${fits.text}a` };
+  assert.equal(shownInput(long).whole, false, 'one character over is cut');
+  assert.match(ask(long).content, /Arguments shown are truncated/);
+  for (const nothing of [undefined, null, {}, []]) {
+    assert.equal(shownInput(nothing).whole, true, `${JSON.stringify(nothing)}: nothing to cut`);
+  }
+  for (const hidden of ['a string', 42, true]) {
+    assert.equal(shownInput(hidden).whole, false, `${JSON.stringify(hidden)}: an input the prompt doesn't show`);
+  }
+});
+
 test('deleting a message that is already gone is done; any other refusal is not', async () => {
   const { removeMessage } = await import('../lib/send.js');
   const refusing = (status) => ({ delete: async () => { throw Object.assign(new Error(`status ${status}`), { status }); } });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { admit } from './admission.js';
-import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId } from './approvals.js';
+import { approvalMessage, EPHEMERAL, outcomeMessage, parseCustomId, shownInput } from './approvals.js';
 import { CDN_HOSTS, readAttachments, textBlocks, unreadNote } from './attachments.js';
 import { connectBot, isRetryable } from './gateway.js';
 import { normalizeMessage } from './normalize.js';
@@ -136,6 +136,9 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       oneShot: event.oneShot === true,
       always: event.always,
       approvers: agent.approvers,
+      // Read from the same input the prompt renders, so a yes is vouched
+      // for as shown in full only when the post didn't cut anything.
+      shownInFull: shownInput(event.call.input).whole,
     };
     rendering.add(event.requestId);
     let failure;
@@ -237,7 +240,7 @@ export const createDiscordAdapter = ({ config, secrets, api, log = () => {}, war
       await tell(`You are not an approver for ${post.agentName}, so that decision was not recorded.`);
       return;
     }
-    if (!gateway.resolveApproval({ requestId: parsed.requestId, answer: parsed.answer, actor: clicker })) {
+    if (!gateway.resolveApproval({ requestId: parsed.requestId, answer: parsed.answer, actor: clicker, ...(post.shownInFull ? { shownInFull: true } : {}) })) {
       await tell('That approval request is no longer pending.');
       return;
     }

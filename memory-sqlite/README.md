@@ -41,7 +41,11 @@ The same [memory contract](https://github.com/stratuslabs/agent/blob/main/docs/c
 as the built-in store: per-agent keying, `search` as whole-token AND matching
 over content *and* `about` keys, newest first with ties broken by id, bounded
 reads by count and bytes, tombstones rather than deletes, supersession scoped
-to the successor's validity window, episodic notes that leave `list` and `topics`
+to the successor's validity window (one id, or a list that merges several facts
+into one record, so one forget brings them all back, which is what a memory
+tidy pass needs), a write that may not supersede a pinned or operator-asserted
+fact when the caller asks it not to (`refuseProtected`, as memory passes do),
+episodic notes that leave `list` and `topics`
 14 days after they're written unless they set their own end (search
 still finds them, and a pin keeps one current), a pinned core that refuses rather
 than evicting, the topic index, an operator audit read, and trust re-assertion.

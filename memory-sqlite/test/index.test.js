@@ -513,3 +513,129 @@ test('the agent index survives the rebuild an older file needs', async () => {
   );
   store.close();
 });
+
+test('a list in supersedes merges several facts into one record, and one forget brings them all back, as in the kernel store', async () => {
+  const at = new Date('2026-06-01T00:00:00.000Z');
+  const sqlite = createSqliteMemoryStore(await newFile(), { now: () => at });
+  const reference = new InMemoryAgentMemoryStore({ now: () => at });
+  for (const [label, store] of [
+    ['sqlite', sqlite],
+    ['in-memory', reference],
+  ]) {
+    const tea = await store.append('ava', 'Ava likes tea', { about: ['ava'] });
+    const morning = await store.append('ava', 'Ava drinks tea in the morning', { about: ['ava'] });
+    const other = await store.append('ava', 'Ava runs on Sundays', { about: ['ava'] });
+    const merged = await store.append('ava', 'Ava drinks tea, mostly in the morning', {
+      about: ['ava'],
+      supersedes: [tea.id, morning.id],
+    });
+    assert.deepEqual(merged.supersedes, [tea.id, morning.id], label);
+    assert.deepEqual(
+      (await store.list('ava')).entries.map((entry) => entry.content).sort(),
+      ['Ava drinks tea, mostly in the morning', 'Ava runs on Sundays'],
+      label,
+    );
+    assert.equal((await store.search('ava', 'likes')).entries.length, 0, label);
+    // One id is still written as a plain string.
+    const single = await store.append('ava', 'Ava runs on Saturdays', { supersedes: [other.id] });
+    assert.equal(single.supersedes, other.id, label);
+
+    assert.equal(await store.forget('ava', merged.id), true, label);
+    assert.deepEqual(
+      (await store.list('ava')).entries.map((entry) => entry.content).sort(),
+      ['Ava drinks tea in the morning', 'Ava likes tea', 'Ava runs on Saturdays'],
+      label,
+    );
+  }
+  sqlite.close();
+});
+
+test('a list naming any fact that is not this agent\'s live one stores nothing, and an empty or malformed list is refused', async () => {
+  const sqlite = createSqliteMemoryStore(await newFile());
+  const mine = await sqlite.append('ava', 'Ava likes tea');
+  const juno = await sqlite.append('juno', 'Juno keeps the vault code');
+  await assert.rejects(() => sqlite.append('ava', 'merged', { supersedes: [mine.id, juno.id] }), /belongs to this agent/);
+  await assert.rejects(() => sqlite.append('ava', 'merged', { supersedes: [mine.id, 'ava:memory:nope'] }), /belongs to this agent/);
+  await assert.rejects(() => sqlite.append('ava', 'merged', { supersedes: [] }), /supersedes/);
+  await assert.rejects(() => sqlite.append('ava', 'merged', { supersedes: [mine.id, 7] }), /supersedes/);
+  assert.deepEqual((await sqlite.list('ava')).entries.map((entry) => entry.content), ['Ava likes tea']);
+  assert.deepEqual((await sqlite.list('juno')).entries.map((entry) => entry.content), ['Juno keeps the vault code']);
+  sqlite.close();
+});
+
+test('refuseProtected refuses, storing nothing, to supersede a pinned or user-labeled fact; without it both can be superseded', async () => {
+  const sqlite = createSqliteMemoryStore(await newFile());
+  const pinned = await sqlite.append('ava', 'the rota is in the ops doc');
+  await sqlite.pin('ava', pinned.id);
+  const asserted = await sqlite.append('ava', 'Dylan owns releases', { provenance: { trust: 'user' } });
+  const plain = await sqlite.append('ava', 'Ava likes tea');
+  await assert.rejects(
+    () => sqlite.append('ava', 'merged', { supersedes: [plain.id, pinned.id], refuseProtected: true }),
+    /pinned/,
+  );
+  await assert.rejects(
+    () => sqlite.append('ava', 'replaced', { supersedes: asserted.id, refuseProtected: true }),
+    /operator asserted/,
+  );
+  assert.equal((await sqlite.list('ava')).entries.length, 3);
+  const ok = await sqlite.append('ava', 'Ava likes green tea', { supersedes: plain.id, refuseProtected: true });
+  assert.equal(ok.supersedes, plain.id);
+  // The operator's own writes are not held to it.
+  await sqlite.append('ava', 'the rota moved to the wiki', { supersedes: pinned.id });
+  await sqlite.append('ava', 'Dylan and Quinn own releases', { supersedes: asserted.id });
+  sqlite.close();
+});
+
+test('the plugin registers the store as taking list-valued supersedes', async () => {
+  const registered = [];
+  const plugin = createSqliteMemoryPlugin({ path: await newFile() });
+  plugin.setup({ bus: new EventBus(), tools: new ToolRegistry(), memory: { register: (contribution) => registered.push(contribution) } });
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].supersedesMany, true);
+  plugin.dispose();
+});
+
+/**
+ * Another process supersedes `targetId` inside a write transaction it holds
+ * for a moment before committing. Resolves once that transaction is open.
+ */
+const supersedeFromAnotherProcess = async (file, agentId, targetId) => {
+  const { spawn } = await import('node:child_process');
+  const script = `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(${JSON.stringify(file)});
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('BEGIN IMMEDIATE');
+    const seq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM entries').get().next;
+    db.prepare('INSERT INTO entries (seq, id, agent_id, content, created_at, fields) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(seq, ${JSON.stringify(agentId)} + ':memory:' + String(seq).padStart(12, '0'), ${JSON.stringify(agentId)}, 'the replacement', new Date().toISOString(), JSON.stringify({ supersedes: ${JSON.stringify(targetId)} }));
+    process.stdout.write('holding\\n');
+    setTimeout(() => { db.exec('COMMIT'); db.close(); }, 400);
+  `;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise((resolve) => child.on('exit', resolve));
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', (chunk) => (String(chunk).includes('holding') ? resolve() : undefined));
+    child.on('exit', (code) => reject(new Error(`the other process exited (${code}) before holding the lock`)));
+  });
+  return exited;
+};
+
+test('a pin or a relabel waits for a write another process holds, then sees what it committed: a fact superseded meanwhile is not pinned or relabeled', async () => {
+  const file = await newFile();
+  const sqlite = createSqliteMemoryStore(file);
+  const pinTarget = await sqlite.append('ava', 'Ava likes tea');
+  const relabelTarget = await sqlite.append('ava', 'Ava runs on Sundays');
+
+  let done = supersedeFromAnotherProcess(file, 'ava', pinTarget.id);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(() => sqlite.pin('ava', pinTarget.id), /nothing was pinned/);
+  await done;
+  assert.deepEqual(await sqlite.pinned('ava', { include: 'allocated' }), []);
+
+  done = supersedeFromAnotherProcess(file, 'ava', relabelTarget.id);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(await sqlite.reassertTrust('ava', relabelTarget.id, 'user'), false);
+  await done;
+  sqlite.close();
+});
